@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -710,6 +710,15 @@ def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, l
             continue
         if ev["op"] == "base":
             base = int(ev.get("value") or 0)
+            # A later `base` re-seats the allocation, so the count restarts with it. Without this
+            # reset, a re-base hands out `new_base + served` and skips as many ids as were served
+            # under the old one — and re-basing is not exotic: it is what happens whenever the
+            # register grew by a path other than this tool, which is the common case.
+            served = 0
+            # Ids freed below the new base are not free any more. The register moved past them, so
+            # something is written there now, and handing one back would be the very collision the
+            # re-base exists to prevent, arriving through the other door.
+            free = [f for f in free if f >= base]
             continue
         if base is None:
             continue
@@ -1103,6 +1112,27 @@ class Sync:
             base = self._seed_base(reg)
             self.adapter.log_append(oid, fmt_line("base", reg, self.rid, value=f"{base:04d}"))
             events, _ = parse_log(self.adapter.log_read(oid))
+        else:
+            # The log knows what *this tool* handed out. The register knows what is actually
+            # written, by every path including the ones that never touch this tool — a person
+            # editing the file, another session's Doc Loop, a merge. The log alone therefore drifts
+            # behind, silently and permanently, and hands out ids that already have a heading.
+            #
+            # This is the failure mode the whole mechanism exists to prevent, so the register is
+            # consulted on every reserve and treated as a **floor**, never as a ceiling: it can only
+            # push the allocation forward. Ids this tool reserved but nobody has written yet are not
+            # in the register, so honouring it as a floor never revokes a live reservation.
+            #
+            # Probed rather than computed: the allocator is asked what it *would* hand out next, by
+            # resolving a synthetic reserve. That keeps one implementation of the allocation rule
+            # instead of a second copy here that can disagree with it.
+            floor = self._seed_base(reg)
+            probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe", "value": ""}]
+            _b, _f, probed = resolve_reservations(probe, reg)
+            if probed and probed[-1][1] < floor:
+                self.adapter.log_append(
+                    oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
+                events, _ = parse_log(self.adapter.log_read(oid))
         self.adapter.log_append(oid, fmt_line("reserve", reg, self.rid))
         time.sleep(0.25 + random.random() * 0.15)
         events, _ = parse_log(self.adapter.log_read(oid))

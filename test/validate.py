@@ -722,6 +722,62 @@ def check_hooks_noop_without_config() -> None:
                     f"({r.stderr.strip() or 'no stderr'})")
 
 
+def check_reserve_respects_the_register() -> None:
+    """`reserve` handed out ids that were already written. Found in nicegram-business, 2026-08-09.
+
+    `reserve DEC` returned DEC-0270, 0271, 0272 while the register's max heading was DEC-0281. The
+    counter was live but 11 behind: the `base` event is seeded once, and every id written by a path
+    other than this tool — a person editing the file, another session's Doc Loop, a merge — moves
+    the register without moving the log.
+
+    That inverts the mechanism. An agent following the protocol exactly (reserve, never trust the
+    register's own "next free" line) is the one that writes a duplicate, silently; an agent that
+    ignored the tool and read the line would have been right.
+
+    The fix consults the register on every reserve and treats it as a floor, which means re-basing
+    mid-log — so these assert the allocator survives that, since a re-base that skipped or recycled
+    ids would trade one collision for another.
+    """
+    sys.path.insert(0, str(ROOT / "plugins/agent-sync/skills/agent-sync/scripts"))
+    try:
+        from agent_sync import resolve_reservations
+    except Exception as exc:  # pragma: no cover - import failure is itself the finding
+        errors.append(f"reserve: cannot import the allocator to test it ({exc})")
+        return
+
+    def ev(op, run="r1", value=""):
+        return {"op": op, "key": "DEC", "run": run, "value": value}
+
+    # A re-base restarts the count. Before the fix `served` survived the new base, so the next id
+    # was `new_base + 2` and the two ids at the new base were skipped forever.
+    log = [ev("base", value="0100"), ev("reserve"), ev("reserve"),
+           ev("base", value="0200"), ev("reserve")]
+    _b, _f, assign = resolve_reservations(log, "DEC")
+    if assign[-1][1] != 200:
+        errors.append(
+            f"reserve: after a re-base the next id is {assign[-1][1]}, expected 200 — the count "
+            "did not restart, so a re-base skips as many ids as were served under the old base")
+
+    # Ids freed below a new base are gone, not recycled: the register moved past them, so a heading
+    # exists there now and handing one back is the same collision by the other door.
+    log = [ev("base", value="0100"), ev("reserve"), ev("release_id", value="0100"),
+           ev("base", value="0200"), ev("reserve")]
+    _b, _f, assign = resolve_reservations(log, "DEC")
+    if assign[-1][1] != 200:
+        errors.append(
+            f"reserve: a freed id below the new base was handed back ({assign[-1][1]}) — the "
+            "register has moved past it, so something is written there")
+
+    # A freed id at or above the base is still legitimately reusable; nothing was written to it.
+    log = [ev("base", value="0100"), ev("reserve"), ev("reserve"),
+           ev("release_id", value="0100"), ev("reserve")]
+    _b, _f, assign = resolve_reservations(log, "DEC")
+    if assign[-1][1] != 100:
+        errors.append(
+            f"reserve: a genuinely free id was not reused ({assign[-1][1]}, expected 100) — the "
+            "fix must not turn every release into a leak")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -740,6 +796,7 @@ def main() -> int:
     check_merge_refuses_conflicts()
     check_lease_held_is_visible()
     check_release_refuses_other_runs()
+    check_reserve_respects_the_register()
 
     for n in notes:
         print(f"note: {n}")

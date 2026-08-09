@@ -11,7 +11,7 @@
       "displayName": "Agent Sync",
       "source": "./plugins/agent-sync",
       "description": "Coordination layer for multi-agent repositories. Gives task-pipeline runs a lease authority with TTL, race-free ID reservation, a cross-repo signal feed, an append-only run journal and a machine-generated read-only board, all decided by replaying one append-only log so no backend needs compare-and-swap. The knowledge backend is a pluggable adapter (Outline, filesystem) declaring its own capabilities, and degrades honestly to git-file leases when it cannot be the lease authority. Ships Claude Code hooks that deny edits to guarded registry files without a live lease.",
-      "version": "1.5.1",
+      "version": "1.5.2",
       "author": {
         "name": "ssheleg",
         "url": "https://x.com/sshlg93"

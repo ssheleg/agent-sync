@@ -1,3 +1,40 @@
+## v1.5.2
+
+### `reserve` handed out ids that were already written
+
+`reserve DEC` returned `DEC-0270`, then `0271`, then `0272`, in a project whose register's highest
+heading was `DEC-0281` and whose own "next free" line read `DEC-0282`. All three were occupied;
+`DEC-0270` was cited by name in another document.
+
+The counter was not stuck — it incremented on every call. It was **11 behind**. The `base` event is
+seeded once, from the register, and never consulted again. Every id written by a path that is not
+this tool — a person editing the file, another session's Doc Loop, a merge — advances the register
+and leaves the log where it was. The gap only ever grows.
+
+This inverts the mechanism. An agent that follows the protocol exactly — reserve before minting,
+never trust the register's own "next free" line, which is the rule the protocol states — is the one
+that writes a duplicate, and it is silent at the point of use: the id looks fresh, the register
+accepts a second heading with that number, and every citation to it becomes ambiguous. An agent that
+ignored the tool and read the line would have been correct. That is the worst incentive a
+coordination tool can teach.
+
+The register is now consulted on **every** reserve and treated as a **floor**: it can push the
+allocation forward, never pull it back. Ids reserved through this tool but not yet written do not
+appear in the register, so honouring the floor never revokes a live reservation. The floor is
+applied by re-basing mid-log, which the allocator now supports properly — a new `base` restarts the
+count (it previously kept serving from the old one, skipping as many ids as had been handed out) and
+drops freed ids that fall below it (the register has moved past them, so a heading exists there now,
+and recycling one is the same collision through the other door). Ids freed at or above the base are
+still reused, so the fix does not turn every release into a leak.
+
+Proven end to end against the register that exposed it: the shipped 1.5.1 returns `DEC-0273`, an
+occupied id; this build returns `DEC-0282`, then `DEC-0283`. Three assertions in `test/validate.py`,
+all watched failing against a planted revert of the allocator — 202 where 200 was due, and a freed
+`0100` handed back.
+
+Found in nicegram-business, 2026-08-09, by an agent that recognised the returned number from another
+document. That is luck, not a control, which is why the check now exists.
+
 ## v1.5.1
 
 ### `release` could not remove the claim it had written
