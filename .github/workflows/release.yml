@@ -57,9 +57,14 @@ jobs:
       - name: Extract this version's CHANGELOG section
         run: |
           set -eu
+          # `v?` on BOTH lines. The CHANGELOG writes `## v1.7.0`; this matched only
+          # `## 1.7.0`, so v1.5.0, v1.5.1 and v1.5.2 each pushed a tag, failed here and
+          # never reached npm — the registry sat three releases behind while every tag
+          # looked delivered. The stop pattern needs it too, or the notes run to the
+          # bottom of the file. `test/validate.py` now runs this exact program.
           awk -v v="${{ steps.t.outputs.ver }}" '
-            $0 ~ "^## " v "([^0-9]|$)" {f=1; next}
-            /^## [0-9]/ {f=0}
+            $0 ~ "^## v?" v "([^0-9]|$)" {f=1; next}
+            /^## v?[0-9]/ {f=0}
             f {print}
           ' CHANGELOG.md > /tmp/notes.md
           test -s /tmp/notes.md || { echo "no CHANGELOG section for ${{ steps.t.outputs.ver }}"; exit 1; }

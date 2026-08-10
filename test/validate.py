@@ -1560,6 +1560,47 @@ def check_claim_round_trip_is_byte_exact() -> None:
                 f"before {before!r}, after {roadmap.read_bytes()!r}")
 
 
+def check_release_notes_are_extractable() -> None:
+    """The release workflow must be able to find this version's CHANGELOG section.
+
+    It could not, for three releases. The CHANGELOG writes `## v1.7.0`; the extraction
+    matched only `## 1.7.0`. So v1.5.0, v1.5.1 and v1.5.2 each pushed a tag, failed at
+    that step, and never published — npm sat three releases behind while every tag looked
+    delivered, and the failure lived in the one place CI does not run on main.
+
+    This runs the workflow's OWN awk program, lifted out of the YAML, so the check cannot
+    drift from the thing it checks.
+    """
+    if not shutil.which("awk"):
+        notes.append("awk not found — release-notes check skipped")
+        return
+    wf = ROOT / ".github" / "workflows" / "release.yml"
+    if not wf.exists():
+        err(".github/workflows/release.yml: missing — nothing releases this package")
+        return
+    m = re.search(r"awk -v v=\"[^\"]*\" '\n(.*?)\n\s*' CHANGELOG\.md", wf.read_text(), re.S)
+    if not m:
+        err("release notes: cannot find the extraction program in release.yml — this check "
+            "exists to run the real one, and a rewritten step must keep it findable")
+        return
+    program = "\n".join(line.strip() for line in m.group(1).splitlines())
+    version = json.loads((ROOT / "package.json").read_text())["version"]
+
+    out = subprocess.run(["awk", "-v", f"v={version}", program, str(ROOT / "CHANGELOG.md")],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        err(f"release notes: the extraction program failed ({out.stderr.strip()[:120]})")
+        return
+    if not out.stdout.strip():
+        err(f"release notes: no CHANGELOG section found for {version} — the tag will be "
+            "pushed, the workflow will fail at that step, and nothing will publish")
+    # And it must STOP at the next heading, or the notes carry the whole history.
+    headings = [l for l in out.stdout.splitlines() if re.match(r"^## v?\d", l)]
+    if headings:
+        err(f"release notes: the extracted section runs past its own version into "
+            f"{headings[0]!r} — the stop pattern does not match the heading style")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -1596,6 +1637,7 @@ def main() -> int:
     check_no_orphan_logs()
     check_no_dead_declarations()
     check_claim_round_trip_is_byte_exact()
+    check_release_notes_are_extractable()
 
     for n in notes:
         print(f"note: {n}")
@@ -1757,6 +1799,11 @@ def self_test() -> int:
             lambda t: t.replace(
                 '            lines[i] = row_prefix + "|" + "|".join(cells) + row_suffix',
                 '            lines[i] = "|" + "|".join(cells) + "|\\n"')),
+        # The defect that kept three tagged releases off npm: the extraction matched
+        # `## 1.5.2` while the CHANGELOG writes `## v1.5.2`.
+        "release notes cannot be extracted": (
+            ".github/workflows/release.yml",
+            lambda t: t.replace('$0 ~ "^## v?" v "([^0-9]|$)"', '$0 ~ "^## " v "([^0-9]|$)"')),
         "stray SKILL.md": (None, None),
     }
     original_root = ROOT

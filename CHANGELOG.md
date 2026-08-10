@@ -61,6 +61,19 @@ and `check` now says plainly that nothing shipped reads it.
 `os.uname()` and a literal `/dev/null` are gone in favour of `platform.node()` and `os.devnull`;
 the coordinator now runs wherever python3 does, and only the enforcement hooks need bash.
 
+### Three tagged releases never reached npm
+
+`v1.5.0`, `v1.5.1` and `v1.5.2` each pushed a tag, ran the release workflow, and failed at the same
+step: *"no CHANGELOG section for 1.5.2"*. The extraction matched `## 1.5.2` while this file writes
+`## v1.5.2` — a heading style that changed at 1.4.x and a workflow that did not. The registry sat
+three releases behind while every tag looked delivered, and the failure lived in the one place CI
+never runs on `main`.
+
+Both patterns now accept the `v` prefix — the stop pattern too, or the notes run to the bottom of
+the file — and `check_release_notes_are_extractable` runs the workflow's **own** awk program,
+lifted out of the YAML, against the current version. A release that cannot be described now fails
+on `main`, before the tag.
+
 ### New checks
 
 `check_status_reports_the_setup_verdict`, `check_env_discovery_is_bounded`,
