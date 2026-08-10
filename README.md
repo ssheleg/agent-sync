@@ -235,7 +235,7 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" <command>
 | Command | Does |
 |---|---|
 | `init` | **Run first.** Ask where state lives, write config + gitignored env file, print your step |
-| `status` | Inspect, repair, report — including other runs' leases and signals new since you last looked |
+| `status` | Inspect, repair, report — other runs' leases, signals new since you last looked, and `check`'s verdict on the setup |
 | `bootstrap` | Create the cloud container and print the id to paste into the env file |
 | `acquire <KEY>` | Take the lease on a task id. Prints `won`, or `lost <holder>` |
 | `renew <KEY>` | Extend the lease — moves the timestamp expiry is computed from. In Claude Code the `PostToolUse` hook does this for you |
@@ -273,11 +273,13 @@ see who has what, and the shared roadmap does not become the file every branch e
 python3 "$SKILL_DIR/scripts/agent_sync.py" merge --key ASC-072 --summary "what landed"
 ```
 
-Conflicts are computed with `git merge-tree` **before anything is touched** — on conflict
-it names the files, changes nothing and exits non-zero, so a resolution nobody reviewed
-never reaches the integration branch. Then it merges `--no-ff`, records the merge, and
-releases every lease this run holds. `--dry-run` stops after the checks; `--push` pushes
-afterwards.
+The local integration branch is fast-forwarded to `origin/<target>` first, so the
+preflight and the merge share a base; one that has genuinely diverged is refused with both
+counts. Conflicts are then computed with `git merge-tree` **before anything is touched** —
+on conflict it names the files, changes nothing and exits non-zero, so a resolution nobody
+reviewed never reaches the integration branch. Then it merges `--no-ff`, records the merge,
+and releases the lease named by `--key`. `--dry-run` stops after the checks; `--push`
+pushes afterwards.
 
 **The merge log** — `docs/MERGES.md`, configurable via `mergeLog` — answers the question an
 agent coming back from a branch cannot answer from `git log` alone: *what landed while I
@@ -320,7 +322,12 @@ through and `release` restores exactly what was there, so one fact keeps one hom
 | `integrationBranch` | where work lands and the only branch a claim is written on (default: the repo's own) |
 | `mergeLog` | `file` and `retentionDays` for the merge log (default `docs/MERGES.md`, 7) |
 
-`.env.agent-sync` — gitignored, mode 600:
+`.env.agent-sync` — gitignored, mode 600. It is looked for in this repository, then in
+each **superproject** above it (so one credentials file serves a tree of submodules), and
+nowhere else. `AGENT_SYNC_ENV=/path/to/file` names one explicitly and wins over both.
+Until 1.7.0 the search continued into any parent directory, so a stray file in a home or
+work directory silently pointed every project beneath it at one collection — `check`
+now prints which file is in force, and says when it comes from outside the repository.
 
 ```
 AGENT_SYNC_BACKEND=outline

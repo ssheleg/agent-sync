@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import random
 import re
 import stat
@@ -32,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -66,7 +67,6 @@ LOGS = {
     "claims": "30 Claims",
     "reservations": "40 Reservations",
     "signals": "50 Signals",
-    "blockers": "60 Blockers",
     # The as-built record: what agents actually implemented, as they implemented it.
     # Git documentation says how it SHOULD be — written before the code and often
     # without it. This says how it IS, derived from what was really written. They are
@@ -90,6 +90,9 @@ DEFAULT_RENEW = 300
 # How long a steal section may be held before it is treated as abandoned. It covers two
 # filesystem calls, so anything longer than this is a crashed process, not slow work.
 STEAL_GRACE = 30
+# How many signal identities `status` remembers as already shown. Bounded, with a floor
+# timestamp beside it so the entries that fall out are not announced a second time.
+SEEN_CAP = 500
 
 # Every key `.claude/agent-sync.json` may carry. One list, and `agent-sync.schema.json`
 # must agree with it exactly — the validator asserts that, because the two were already
@@ -251,25 +254,34 @@ def find_env_file(root: Path) -> Path | None:
     unable to see anyone: three agents entered from one umbrella, coordinating with
     nobody, and each one saying `ungated` while believing it was configured.
 
-    One credential file therefore serves the whole tree: local root first, then the
-    superproject git reports, then plain parent directories.
+    So one credential file serves the whole tree — but only a tree git can vouch for.
+    The search is: `AGENT_SYNC_ENV` if set, then the local root, then each superproject
+    in turn. It used to continue into **plain parent directories** until something
+    matched, which meant a stray `.env.agent-sync` in a home or work directory silently
+    configured every project beneath it and pointed them all at one collection — a
+    coordination plane shared by projects with nothing to do with each other, discovered
+    by nobody, because a found file looks exactly like a configured one.
     """
+    explicit = os.environ.get("AGENT_SYNC_ENV")
+    if explicit:
+        path = Path(explicit).expanduser()
+        return path if path.exists() else None
+
     local = root / ENV_FILE
     if local.exists():
         return local
 
-    superproject = git("rev-parse", "--show-superproject-working-tree", cwd=root)
-    if superproject:
+    seen: set[str] = set()
+    current = root
+    for _ in range(8):                      # a submodule chain, not the whole filesystem
+        superproject = git("rev-parse", "--show-superproject-working-tree", cwd=current)
+        if not superproject or superproject in seen:
+            break
+        seen.add(superproject)
         candidate = Path(superproject) / ENV_FILE
         if candidate.exists():
             return candidate
-
-    for parent in root.resolve().parents:
-        candidate = parent / ENV_FILE
-        if candidate.exists():
-            return candidate
-        if (parent / ".git").exists() and (parent / CONFIG_PATH).exists():
-            break   # a configured project that simply has no env file — stop here
+        current = Path(superproject)
     return None
 
 
@@ -455,10 +467,6 @@ class Adapter:
         return bool(self.capabilities["atomicAppend"]
                     and self.capabilities["totalOrderRead"])
 
-    @property
-    def is_exclusive(self) -> bool:
-        """Whether a won lease is a guarantee or advice. Never assume the first."""
-        return bool(self.capabilities.get("exclusiveLease"))
 
 
 class OutlineAdapter(Adapter):
@@ -833,7 +841,6 @@ class Sync:
         self.adapter = make_adapter(self.cfg, self.root)
         self.rid = run_id(self.root)
         self.ttl = int(self.cfg.get("leaseTtlSeconds") or DEFAULT_TTL)
-        self.settle = float(self.cfg.get("settleSeconds") or DEFAULT_SETTLE)
 
     @property
     def gated(self) -> bool:
@@ -970,8 +977,8 @@ class Sync:
                 return False, held.get("run")
 
         payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name(), "host": os.uname().nodename})
-        empty_tree = git("hash-object", "-t", "tree", "/dev/null")
+                              "repo": repo_name(), "host": platform.node()})
+        empty_tree = git("hash-object", "-t", "tree", os.devnull)
         # A lease object is plumbing, not authorship, so it must not depend on the
         # machine having a git identity. Without these `-c` flags `commit-tree`
         # refuses wherever user.email is unset and cannot be auto-detected — CI
@@ -1285,22 +1292,6 @@ class Sync:
                 mine.append(q.stem)
         return sorted(mine)
 
-    def _held_legacy(self) -> list[str]:
-        if not self.adapter.is_lease_authority:
-            d = self.root / STATE_DIR / "leases"
-            out = []
-            for p in (d.glob("*.lock") if d.exists() else []):
-                try:
-                    if json.loads(p.read_text()).get("run") == self.rid:
-                        out.append(p.stem)
-                except json.JSONDecodeError:
-                    continue
-            return out
-        events, _ = self.events("claims")
-        now = time.time()
-        keys = {e["key"] for e in events}
-        return sorted(k for k in keys if resolve_holder(events, k, now) == self.rid)
-
     # -- ids ---------------------------------------------------------------
 
     def reserve(self, reg: str) -> int:
@@ -1416,21 +1407,52 @@ class Sync:
 
     # -- awareness ---------------------------------------------------------
 
-    def _watermark(self, which: str) -> int:
+    @staticmethod
+    def _fingerprint(ev: dict[str, str]) -> str:
+        return "|".join((ev.get("ts", ""), ev.get("run", ""), ev.get("key", ""),
+                         ev.get("op", ""), ev.get("state", "")))
+
+    def _seen(self, which: str, events: list[dict[str, str]]) -> tuple[set[str], str]:
+        """What this run has already been shown, by identity rather than by position.
+
+        This was an INDEX into a list re-sorted on every read. An entry appended by
+        another run with an earlier timestamp — clock skew, or a shard that was
+        unreachable a moment ago — lands before the mark, shifts everything after it, and
+        is never reported: the slice hands back an entry already seen instead. The one
+        section of `status` whose job is to say "this changed while you were away" went
+        quiet about precisely the change that arrived late.
+
+        Returns the seen fingerprints and a floor timestamp. The floor bounds the file:
+        older entries fell out of the kept window, and anything below it was necessarily
+        shown in an earlier run.
+        """
         p = self.root / STATE_DIR / "seen.json"
         try:
-            return int(json.loads(p.read_text()).get(which, 0))
+            entry = json.loads(p.read_text()).get(which)
         except (OSError, ValueError, AttributeError):
-            return 0
+            return set(), ""
+        if isinstance(entry, dict):
+            return set(entry.get("fingerprints") or []), str(entry.get("floor") or "")
+        if isinstance(entry, int):
+            # The old index watermark meant "the first N were shown". Honour that reading
+            # once, so upgrading does not re-announce a year of signals.
+            return {self._fingerprint(e) for e in events[:entry]}, ""
+        return set(), ""
 
-    def _set_watermark(self, which: str, value: int) -> None:
+    def _set_seen(self, which: str, events: list[dict[str, str]]) -> None:
         p = self.root / STATE_DIR / "seen.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         try:
             data = json.loads(p.read_text())
         except (OSError, ValueError):
             data = {}
-        data[which] = value
+        kept = events[-SEEN_CAP:]
+        # The floor exists ONLY to cover entries that fell out of the kept window. Setting
+        # it whenever anything is remembered would re-create the bug in a new shape: an
+        # entry that arrives with an older timestamp is below the floor, and gets filtered
+        # out as "necessarily seen" when nothing has ever shown it.
+        data[which] = {"fingerprints": [self._fingerprint(e) for e in kept],
+                       "floor": kept[0]["ts"] if len(events) > SEEN_CAP and kept else ""}
         p.write_text(json.dumps(data))
 
     def activity(self, limit: int = 6, mark_read: bool = True) -> dict[str, Any]:
@@ -1443,10 +1465,11 @@ class Sync:
         others = {k: v for k, v in self.all_holdings().items() if v["run"] != self.rid}
 
         signals, _ = self.events("signals")
-        seen = self._watermark("signals")
-        fresh = signals[seen:] if len(signals) > seen else []
+        seen, floor = self._seen("signals", signals)
+        fresh = [e for e in signals
+                 if self._fingerprint(e) not in seen and e.get("ts", "") >= floor]
         if mark_read:
-            self._set_watermark("signals", len(signals))
+            self._set_seen("signals", signals)
 
         return {"others": others, "signals": signals[-limit:], "new_signals": fresh}
 
@@ -1460,14 +1483,30 @@ class Sync:
         return out
 
     @staticmethod
+    def _split_row(line: str) -> tuple[str, list[str], str] | None:
+        """(prefix, cells, suffix) — everything needed to put the row back untouched.
+
+        The row used to be rebuilt from its cells alone, so the indentation and the
+        original line ending were dropped: a round-trip left a diff on a shared registry
+        file that nobody made, on the one kind of file agents are told never to touch
+        casually. `SKILL.md` promises `git diff` empty after acquire-then-release, and now
+        the bytes outside the edited cell are carried through rather than reconstructed.
+        """
+        stripped = line.lstrip()
+        if not stripped.startswith("|"):
+            return None
+        prefix = line[:len(line) - len(stripped)]
+        core = stripped.rstrip()
+        suffix = stripped[len(core):]
+        if core.endswith("|"):
+            core, suffix = core[:-1], "|" + suffix
+        return prefix, core[1:].split("|"), suffix
+
+    @staticmethod
     def _row_cells(line: str) -> list[str] | None:
         """Split a markdown table row, or None if this is not one."""
-        if not line.lstrip().startswith("|"):
-            return None
-        raw = line.strip()
-        if raw.endswith("|"):
-            raw = raw[:-1]
-        return raw[1:].split("|")
+        split = Sync._split_row(line)
+        return split[1] if split else None
 
     # -- branch discipline -------------------------------------------------
 
@@ -1612,8 +1651,9 @@ class Sync:
                 continue
 
             i = hits[0]
-            cells = self._row_cells(lines[i])
-            assert cells is not None
+            split = self._split_row(lines[i])
+            assert split is not None
+            row_prefix, cells, row_suffix = split
             if idx < 0:
                 idx = len(cells) + idx
             if not 0 <= idx < len(cells):
@@ -1646,7 +1686,7 @@ class Sync:
                 if not state.get(key):
                     state.pop(key, None)
 
-            lines[i] = "|" + "|".join(cells) + "|\n"
+            lines[i] = row_prefix + "|" + "|".join(cells) + row_suffix
             tmp = path.with_suffix(path.suffix + ".agent-sync.tmp")
             tmp.write_text("".join(lines))
             tmp.replace(path)
@@ -2412,6 +2452,23 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("  blind to every other one.")
         return 1
 
+    # The same verdict `check` gives, from the command every session actually runs. Two
+    # commands answering one question differently is how a broken setup stays invisible:
+    # `status` used to print "NEXT: acquire a lease" on a project `check` called unhealthy.
+    try:
+        _ok, _warn, setup_problems = check_setup(root)
+    except Fail as exc:
+        setup_problems = [str(exc)]
+    if setup_problems:
+        print(f"\n✗ `check` reports {len(setup_problems)} problem(s) with this setup:")
+        for problem in setup_problems[:4]:
+            print(f"    · {problem}")
+        if len(setup_problems) > 4:
+            print(f"    · … and {len(setup_problems) - 4} more")
+        print("\nNEXT: fix the setup before coordinating on it —")
+        print("  agent_sync.py check")
+        return 1
+
     print("\nNEXT: acquire a lease before you touch a guarded file —")
     print("  agent_sync.py acquire <TASK-ID>")
     return 0
@@ -3026,30 +3083,30 @@ def cmd_finish(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_check(_args: argparse.Namespace) -> int:
+def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
     """Validate the whole setup, end to end, and refuse to call a broken one healthy.
 
     Every item here failed for real at some point in this tool's own adoption. A glob
     that matches nothing, a register pattern that matches nothing, a gate command that
     does not exist, a snapshot nobody links — each looks like a working install and
     protects nothing.
+
+    Returns `(ok, warn, problems)` rather than printing, because `status` reports the same
+    verdict and the two must not be able to disagree. They did: `status` printed "NEXT:
+    acquire a lease" and exited 0 on a project `check` called NOT healthy — and `status`
+    is the command every session runs, so the defect had a place to hide in plain sight.
     """
-    root = project_root()
-    os.chdir(root)
-    load_env_file(root)
     problems: list[str] = []
     warn: list[str] = []
     ok: list[str] = []
 
     cfg_path = root / CONFIG_PATH
     if not cfg_path.exists():
-        print("✗ not initialised — run `adopt`, then `init`")
-        return 1
+        raise Fail("not initialised — run `adopt`, then `init`")
     try:
         cfg = json.loads(cfg_path.read_text())
     except json.JSONDecodeError as exc:
-        print(f"✗ {CONFIG_PATH} is not valid JSON: {exc}")
-        return 1
+        raise Fail(f"{CONFIG_PATH} is not valid JSON: {exc}") from exc
     ok.append(f"config parses ({CONFIG_PATH})")
 
     if cfg.get("backend") not in ("outline", "fs"):
@@ -3136,8 +3193,14 @@ def cmd_check(_args: argparse.Namespace) -> int:
         if not mirror.get("sources"):
             problems.append("mirror is enabled with no sources — it renders nothing")
 
-    # Identity and reachability.
+    # Identity and reachability. Which file is in force is reported in every mode: it may
+    # be the local one, a superproject's, or one named by AGENT_SYNC_ENV, and an operator
+    # debugging a degraded run needs to know which of the three answered.
     env = find_env_file(root)
+    if env is not None and env.parent != root:
+        ok.append(f"credentials file in force: {env} (outside this repository)")
+    elif env is not None:
+        ok.append(f"credentials file in force: {env}")
     if cfg.get("backend") == "outline":
         if env is None:
             problems.append(f"no {ENV_FILE} found here or in any parent — the backend "
@@ -3231,6 +3294,24 @@ def cmd_check(_args: argparse.Namespace) -> int:
             f"Run: git rm -r --cached {STATE_DIR} && commit")
     else:
         ok.append(f"{STATE_DIR}/ is not tracked")
+
+    if cfg.get("settleSeconds") is not None:
+        warn.append("settleSeconds is set but no shipped adapter reads it — it is retained "
+                    "for a backend that must wait for writes to become visible, and does "
+                    "nothing here")
+
+    return ok, warn, problems
+
+
+def cmd_check(_args: argparse.Namespace) -> int:
+    root = project_root()
+    os.chdir(root)
+    load_env_file(root)
+    try:
+        ok, warn, problems = check_setup(root)
+    except Fail as exc:
+        print(f"✗ {exc}")
+        return 1
 
     for line in ok:
         print(f"  ✓ {line}")
@@ -3377,7 +3458,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
                     f"docs(merges): record {branch} → {target}"], capture_output=True)
     print(f"✓ recorded in {rel_log}")
 
-    for key in (s.held() or []):
+    # Only the lease this merge landed. It used to release every lease the run held, which
+    # is a different statement from the one the documentation makes and quietly frees work
+    # that has not landed.
+    held = s.held()
+    if args.key:
+        to_release = [args.key] if args.key in held else []
+        if not to_release and held:
+            print(f"note: this run does not hold {args.key}; leaving "
+                  f"{', '.join(held)} held")
+    else:
+        to_release = held
+    for key in to_release:
         s.release(key)
         print(f"✓ released {key}")
 

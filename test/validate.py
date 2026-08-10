@@ -1390,6 +1390,169 @@ def check_stage_binding_agrees() -> None:
         err(f"stage binding: README does not name the wired stages as '{spelled}'")
 
 
+def check_status_reports_the_setup_verdict() -> None:
+    """`status` and `check` must not disagree about whether this project is healthy.
+
+    They did: `status` printed "NEXT: acquire a lease" and exited 0 on a project `check`
+    called NOT healthy. `status` is the command every session runs and the only one most
+    agents ever see, so a defect it stays quiet about is a defect nobody hears.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — status verdict check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("status verdict: init failed")
+            return
+        # A guard pattern that matches nothing: `check` calls this a problem.
+        _write_cfg(project, guardedFiles=["docs/NOTHING_HERE.md"])
+        if _run_script(project, "check").returncode == 0:
+            err("status verdict: the fixture is wrong — `check` considers this setup healthy")
+            return
+        out = _run_script(project, "status")
+        text = (out.stdout + out.stderr).lower()
+        if out.returncode == 0 or "check" not in text:
+            err("status verdict: `status` reported normally on a setup `check` fails — two "
+                "commands, two answers about one project, and the agent only reads the first")
+
+
+def check_env_discovery_is_bounded() -> None:
+    """Credentials are not picked up from an unrelated directory above the project.
+
+    `find_env_file` walked every parent until it happened to find one, so a stray
+    `.env.agent-sync` in a home or work directory silently configured every project
+    beneath it — pointing them all at one collection, which is a coordination plane
+    shared by projects that have nothing to do with each other.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — env discovery check skipped")
+        return
+    with tempfile.TemporaryDirectory() as outer:
+        stray = Path(outer) / ".env.agent-sync"
+        stray.write_text("AGENT_SYNC_BACKEND=outline\n"
+                         "AGENT_SYNC_OUTLINE_URL=http://127.0.0.1:1\n"
+                         "AGENT_SYNC_OUTLINE_TOKEN=stray\n")
+        project = Path(outer) / "nested" / "project"
+        project.mkdir(parents=True)
+        _git_project(str(project))
+        if _run_script(str(project), "init", "--backend", "fs").returncode != 0:
+            err("env discovery: init failed")
+            return
+        (project / ".env.agent-sync").unlink(missing_ok=True)
+
+        out = _run_script(str(project), "check")
+        text = out.stdout + out.stderr
+        if str(stray) in text and "outside" not in text.lower():
+            err("env discovery: a credentials file from outside the project tree was adopted "
+                "without a word — every project under that directory shares one plane")
+
+        # And the explicit override must win, because deterministic beats discovered.
+        named = Path(outer) / "named.env"
+        named.write_text("AGENT_SYNC_BACKEND=fs\n")
+        out = _run_script(str(project), "check", env={"AGENT_SYNC_ENV": str(named)})
+        if "named.env" not in (out.stdout + out.stderr):
+            err("env discovery: AGENT_SYNC_ENV names a credentials file and the tool ignored "
+                "it — there is no way to be explicit about which one is in force")
+
+
+def check_watermark_survives_a_late_entry() -> None:
+    """"New since you last looked" must not lose an entry that arrives out of order.
+
+    The watermark was an INDEX into a list re-sorted on every read. An entry appended by
+    another run with an earlier timestamp — clock skew, or a shard that was unreachable a
+    moment ago — lands before the mark, shifts everything after it, and is never reported:
+    the slice returns an entry this run has already seen instead. The one section of
+    `status` that exists to say "something changed while you were away" then goes quiet
+    about exactly the change that arrived late.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — watermark check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("watermark: init failed")
+            return
+        state = Path(project) / ".agent-sync"
+        state.mkdir(exist_ok=True)
+        line = ("- `2026-08-0{d}T10:00:00Z` `op=signal` `key=DEP-00{d}` `run=r-early` "
+                "`state=filed` `repo=x`\n")
+        (state / "50-signals-r-early.md").write_text("".join(line.format(d=d) for d in (5, 6, 7)))
+
+        first = _run_script(project, "status")
+        if "DEP-005" not in first.stdout and "New since" not in first.stdout:
+            notes.append("watermark: the fixture produced no first-look report")
+
+        # A fourth signal, timestamped BEFORE the three already seen.
+        (state / "50-signals-r-late.md").write_text(
+            "- `2026-08-01T09:00:00Z` `op=signal` `key=DEP-999` `run=r-late` "
+            "`state=delivered` `repo=x`\n")
+        second = _run_script(project, "status")
+        if "DEP-999" not in second.stdout:
+            err("watermark: an entry that arrived out of order was never reported as new — "
+                "the awareness section is silent about the change it exists to announce")
+
+
+def check_no_orphan_logs() -> None:
+    """Every log the tool names must have something that writes it.
+
+    `LOGS` carried a `blockers` document for five versions. Nothing ever appended to it and
+    nothing ever read it, so a reader looking for blockers found an empty page and
+    concluded there were none.
+    """
+    mod = _load_script("agent_sync_logs_probe")
+    script = (ROOT / "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py").read_text()
+    for key in getattr(mod, "LOGS", {}):
+        if f'log_id("{key}")' not in script and f'_publish("{key}"' not in script:
+            err(f"LOGS['{key}'] names a document nothing writes — an empty page reads as "
+                "'nothing to report', which is a different statement")
+
+
+def check_no_dead_declarations() -> None:
+    """A declared knob or helper that nothing uses is a promise the code does not keep."""
+    script = (ROOT / "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py").read_text()
+    for symbol in ("_held_legacy", "is_exclusive", "self.settle"):
+        if symbol in script:
+            err(f"{symbol} survives in the coordinator but nothing calls it — remove it or "
+                "give it work; a reader assumes it is load-bearing")
+    # Portability: the coordinator is imported and run wherever python3 is.
+    for token in ("os.uname(", '"/dev/null"'):
+        if token in script:
+            err(f"{token} is POSIX-only and the compatibility line does not say so")
+
+
+def check_claim_round_trip_is_byte_exact() -> None:
+    """`acquire` then `release` must leave the registry file exactly as it was.
+
+    SKILL.md promises `git diff` empty after a round-trip. The row was rebuilt from its
+    cells, so indentation and the original line ending were dropped — a diff on a shared
+    file that nobody made, on the one file agents are told never to touch casually.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — claim round-trip check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        roadmap = Path(project) / "ROADMAP.md"
+        # An indented row, and a final line with no trailing newline.
+        roadmap.write_text("| Task | State |\n|---|---|\n  | T-1 | todo |\n| T-2 | todo |")
+        before = roadmap.read_bytes()
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("claim round-trip: init failed")
+            return
+        _write_cfg(project, claimTags={"ROADMAP.md": {"mode": "cell", "cell": -1,
+                                                     "held": "{prev} (claimed: {holder})"}})
+        _run_script(project, "acquire", "T-1", run_id="rt")
+        if roadmap.read_bytes() == before:
+            err("claim round-trip: the fixture never wrote the claim through, so the "
+                "restore proves nothing")
+        _run_script(project, "release", "T-1", run_id="rt")
+        if roadmap.read_bytes() != before:
+            err("claim round-trip: release did not restore the file byte for byte — "
+                f"before {before!r}, after {roadmap.read_bytes()!r}")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -1420,6 +1583,12 @@ def main() -> int:
     check_guard_and_check_agree_on_globs()
     check_unparseable_log_fails_loudly()
     check_stage_binding_agrees()
+    check_status_reports_the_setup_verdict()
+    check_env_discovery_is_bounded()
+    check_watermark_survives_a_late_entry()
+    check_no_orphan_logs()
+    check_no_dead_declarations()
+    check_claim_round_trip_is_byte_exact()
 
     for n in notes:
         print(f"note: {n}")
@@ -1554,6 +1723,33 @@ def self_test() -> int:
         "stage binding loses its source": (
             "plugins/agent-sync/skills/agent-sync/references/pipeline-binding.md",
             lambda t: re.sub(r"<!-- agent-sync:stages[^>]*-->\n", "", t)),
+        # --- the 1.7.0 defects ---
+        "status hides the setup verdict": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("    if setup_problems:\n        print(f\"\\n✗ `check` reports",
+                                "    if False:\n        print(f\"\\n✗ `check` reports")),
+        "no way to name the credentials file": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('    explicit = os.environ.get("AGENT_SYNC_ENV")',
+                                "    explicit = None")),
+        "watermark is positional again": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                "        fresh = [e for e in signals\n"
+                '                 if self._fingerprint(e) not in seen and e.get("ts", "") >= floor]',
+                "        fresh = signals[len(seen):] if len(signals) > len(seen) else []")),
+        "a log nothing writes": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('    "signals": "50 Signals",\n',
+                                '    "signals": "50 Signals",\n    "blockers": "60 Blockers",\n')),
+        "posix-only spelling returns": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("platform.node()", "os.uname().nodename")),
+        "claim round-trip rebuilds the row": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                '            lines[i] = row_prefix + "|" + "|".join(cells) + row_suffix',
+                '            lines[i] = "|" + "|".join(cells) + "|\\n"')),
         "stray SKILL.md": (None, None),
     }
     original_root = ROOT

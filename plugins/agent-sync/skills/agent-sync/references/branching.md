@@ -62,8 +62,14 @@ In order, and every check before anything is touched:
    the same files, they merge into what is about to land.
 5. Merges `--no-ff`, so the branch stays visible in history.
 6. **Writes the merge log** and commits it.
-7. **Releases every lease this run holds.** A run that ends holding one blocks the next
-   agent for the whole TTL.
+7. **Releases the lease named by `--key`.** Only that one: releasing every lease the run
+   holds is a different statement from the one this step makes, and it quietly frees work
+   that has not landed. Without `--key` there is nothing to name, so it releases what the
+   run holds and says so. A run that ends holding a lease blocks the next agent for the
+   whole TTL — so release, but release what you landed.
+
+The remote is `origin`, the conventional home of the integration branch. `leaseRemote` is a
+different setting for a different job: where the lease refs live.
 
 `--dry-run` stops after step 4. `--push` pushes the integration branch afterwards;
 without it, `finish` is the next call — it checks every repository, not just this one.

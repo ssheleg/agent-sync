@@ -1,3 +1,73 @@
+## v1.7.0
+
+**Observability, honest degradation, and the removal of things that were never load-bearing.**
+1.5.3 stopped the tool saying untrue things; 1.6.0 made its guarantees hold. This closes the
+remaining findings from the 2026-08-10 audit — each one a place where the tool was quiet rather
+than wrong, which is the harder failure to notice.
+
+### `status` and `check` gave two answers about one project
+
+`status` printed `NEXT: acquire a lease` and exited 0 on a setup `check` called NOT healthy — a
+guard pattern matching no file, a snapshot nobody links, an env file tracked by git. `status` is
+the command every session runs and the only one most agents ever read, so anything it stays quiet
+about is effectively unreported.
+
+The validation now lives in one function, `check_setup()`, which both commands call. `status`
+prints the count, the first four problems and one next action; `check` prints the whole list.
+
+### Credentials were adopted from anywhere above the project
+
+`find_env_file` walked every parent directory until something matched, so a stray
+`.env.agent-sync` in a home or work directory silently configured every project beneath it and
+pointed them all at one collection — a coordination plane shared by projects with nothing to do
+with each other. A found file looks exactly like a configured one, so nothing reported it.
+
+The search is now `AGENT_SYNC_ENV` if set, then this repository, then each **superproject** in
+turn — a tree git can vouch for, which is the case the walk existed to serve. `check` prints which
+file is in force and says when it comes from outside the repository.
+
+### "New since you last looked" lost entries that arrived out of order
+
+The watermark was an index into a list re-sorted on every read. An entry appended with an earlier
+timestamp — clock skew, or a shard that was briefly unreachable — lands before the mark, shifts
+everything after it, and is never reported; the slice returns an entry already seen instead. The
+one section of `status` whose job is to announce what changed went quiet about exactly the change
+that arrived late.
+
+Entries are now remembered by identity, capped at 500, with a floor timestamp covering only what
+fell out of that window — set only when something actually did, or the fix would have re-created
+the bug in a new shape.
+
+### `merge` released every lease the run held
+
+The documentation says it releases the lease; it released all of them, quietly freeing work that
+had not landed. It now releases the one named by `--key`, and says what it left held.
+
+### An `acquire`/`release` round-trip left a diff
+
+`SKILL.md` promises `git diff` empty afterwards. The claimed row was rebuilt from its cells, so
+indentation and the original line ending were dropped — an unexplained change to a shared registry
+file, which is the one kind of file agents are told never to touch casually. The bytes outside the
+edited cell are now carried through rather than reconstructed.
+
+### Declarations that were never load-bearing
+
+`LOGS` carried a `blockers` document nothing wrote and nothing read, so a reader looking for
+blockers found an empty page and concluded there were none. `_held_legacy` and
+`Adapter.is_exclusive` had no callers. `Sync.settle` was computed and never used —
+`settleSeconds` stays in the schema for a backend that must wait for writes to become visible,
+and `check` now says plainly that nothing shipped reads it.
+
+`os.uname()` and a literal `/dev/null` are gone in favour of `platform.node()` and `os.devnull`;
+the coordinator now runs wherever python3 does, and only the enforcement hooks need bash.
+
+### New checks
+
+`check_status_reports_the_setup_verdict`, `check_env_discovery_is_bounded`,
+`check_watermark_survives_a_late_entry`, `check_no_orphan_logs`, `check_no_dead_declarations`,
+`check_claim_round_trip_is_byte_exact` — with six more self-test fixtures. The validator now
+plants and catches 27 distinct defects.
+
 ## v1.6.0
 
 **Four guarantees that were described but not delivered, and the one number now stated once.**
