@@ -30,8 +30,9 @@ written by everyone. Take a lease first, and check:
     python3 "$SKILL/scripts/agent_sync.py" acquire <TASK-ID>
     python3 "$SKILL/scripts/agent_sync.py" guard docs/DECISIONS.md
 
-Exit 2 means another run holds it. Do not edit anyway. Release on every path,
-including failure — an abandoned lease looks like active work until it expires.
+Exit 2 means **this run holds no lease** — not that somebody else holds that file. Do
+not edit anyway. Release on every path, including failure — an abandoned lease looks
+like active work until it expires.
 
 ## Ids are reserved, not read
 

@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -778,6 +779,364 @@ def check_reserve_respects_the_register() -> None:
             "fix must not turn every release into a leak")
 
 
+# ------------------------------------------------------- composition, not units
+#
+# Every defect the 2026-08-10 audit found lived in the gap between two things this
+# file already tested. `resolve_reservations` was correct and `reserve` handed three
+# runs one id; `lease_guarantee` was quoted by every surface and `renew` refreshed
+# nothing; the schema listed `mergeLog` and `check` called it unknown. A unit test
+# proves a function; only a composition test proves the promise.
+
+
+def _load_script(name: str = "agent_sync_under_test"):
+    """A private copy of the coordinator, so a check may monkeypatch it freely."""
+    script = ROOT / "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py"
+    spec = importlib.util.spec_from_file_location(name, script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _git_project(path: str, *, branch: str = "main") -> None:
+    for argv in (["git", "init", "-q", "-b", branch],
+                 ["git", "-c", "user.email=v@e", "-c", "user.name=v",
+                  "commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(argv, cwd=path, capture_output=True)
+
+
+def _run_script(project: str, *args: str, run_id: str = "validator",
+                env: dict[str, str] | None = None):
+    script = ROOT / "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py"
+    return subprocess.run([sys.executable, str(script), *args], cwd=project,
+                          env={**os.environ, "AGENT_SYNC_RUN_ID": run_id, **(env or {})},
+                          capture_output=True, text=True, timeout=120)
+
+
+def _write_cfg(project: str, **keys) -> None:
+    p = Path(project) / ".claude" / "agent-sync.json"
+    cfg = json.loads(p.read_text())
+    cfg.update(keys)
+    p.write_text(json.dumps(cfg, indent=2))
+
+
+def _recording_plane(mod, base: Path):
+    """A record plane that CAN order writes — what `outline` claims to be.
+
+    `fs` declares atomicAppend false, so it refuses to allocate ids at all and the
+    allocation path ships untested. This stands in for a plane that accepts the job,
+    which is the only configuration in which the id protocol actually runs.
+    """
+
+    class Plane(mod.Adapter):
+        name = "recording"
+        capabilities = {"atomicAppend": True, "totalOrderRead": True,
+                        "search": False, "exclusiveLease": False}
+
+        def configured(self):
+            return True
+
+        def _p(self, path):
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "-", path).strip("-").lower()
+            base.mkdir(parents=True, exist_ok=True)
+            return base / f"{safe}.md"
+
+        def tree_ensure(self, path):
+            p = self._p(path)
+            if not p.exists():
+                p.write_text("")
+            return str(p)
+
+        def log_append(self, oid, line):
+            with open(oid, "a") as fh:
+                fh.write(line.rstrip("\n") + "\n")
+
+        def log_read(self, oid):
+            p = Path(oid)
+            return p.read_text() if p.exists() else ""
+
+        def doc_put(self, oid, text):
+            Path(oid).write_text(text)
+
+        def doc_get(self, oid):
+            p = Path(oid)
+            return p.read_text() if p.exists() else ""
+
+        def log_shards(self, prefix):
+            stem = re.sub(r"[^A-Za-z0-9._-]+", "-", prefix).strip("-").lower()
+            return [str(q) for q in sorted(base.glob(f"{stem}*.md"))]
+
+    return Plane()
+
+
+def check_reserve_is_race_free() -> None:
+    """Two runs must never be handed one id — the headline promise of this tool.
+
+    It was broken and nothing here could see it: `reserve` read `log_id(...)`, which is
+    THIS run's own shard, and never merged the others. Three runs each seeded their own
+    `base` from the register and each returned the same number. The pure allocator was
+    tested and correct; the caller never consulted it with the whole log. So the check
+    has to drive `Sync.reserve` itself, from more than one identity.
+    """
+    cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as project:
+            _git_project(project)
+            docs = Path(project) / "docs"
+            docs.mkdir()
+            (docs / "DECISIONS.md").write_text(
+                "# Decisions\n\n**Next free ID:** `DEC-0007`\n\n### DEC-0001 — x\n")
+            if _run_script(project, "init", "--backend", "fs").returncode != 0:
+                err("reserve race: init failed")
+                return
+            _write_cfg(project, idRegisters={"DEC": {
+                "file": "docs/DECISIONS.md",
+                "nextFreeIdPattern": r"\*\*Next free ID:\*\* `DEC-(\d{4})`"}})
+
+            mod = _load_script("agent_sync_reserve_test")
+            plane = _recording_plane(mod, Path(project) / ".agent-sync" / "plane")
+            mod.make_adapter = lambda cfg, root: plane
+            os.chdir(project)          # Sync() resolves the project from its own cwd
+
+            handed: list[int] = []
+            for rid in ("alpha", "beta", "gamma"):
+                os.environ["AGENT_SYNC_RUN_ID"] = rid
+                handed.append(mod.Sync().reserve("DEC"))
+            os.environ.pop("AGENT_SYNC_RUN_ID", None)
+
+            if len(set(handed)) != len(handed):
+                err(f"reserve: three runs were handed {sorted(handed)} — ids collide, which is "
+                    "the one failure this tool exists to prevent")
+            if handed and min(handed) < 7:
+                err(f"reserve: handed {min(handed)}, below the register's next free id (7) — "
+                    "an id that already has a heading")
+    finally:
+        os.chdir(cwd)
+        os.environ.pop("AGENT_SYNC_RUN_ID", None)
+
+
+def _lock_age(project: str, key: str) -> float:
+    """Seconds since the timestamp the lease authority would expire this lock by."""
+    mod = _load_script("agent_sync_age_probe")
+    lock = Path(project) / ".agent-sync" / "leases" / f"{key}.lock"
+    held = json.loads(lock.read_text())
+    return time.time() - mod.parse_iso(held.get("ts", ""))
+
+
+def check_renew_extends_the_lease() -> None:
+    """`renew` must move the timestamp the lease is expired by. It did not.
+
+    It appended `op=renew` to the record plane — which has not decided a lease since
+    1.0.0 — and touched a throttle file. The lock's own `ts` was written once, by
+    `acquire`. So a run holding a lease simply lost it at TTL while working, its own
+    guard began denying it, and another run took the task. The `PostToolUse` hook made
+    no difference because there was nothing for it to refresh.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — renew check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("renew: init failed")
+            return
+        _write_cfg(project, leaseTtlSeconds=600, renewIntervalSeconds=300)
+
+        if "won" not in _run_script(project, "acquire", "REN-1").stdout:
+            err("renew: could not acquire the lease to renew")
+            return
+
+        # Age the lease to nearly expired, exactly as forty minutes of work would, and
+        # clear the throttle the way the interval elapsing does.
+        lock = Path(project) / ".agent-sync" / "leases" / "REN-1.lock"
+        held = json.loads(lock.read_text())
+        mod = _load_script("agent_sync_renew_probe")
+        aged = datetime_minus(mod, 590)
+        held["ts"] = aged
+        lock.write_text(json.dumps(held))
+        (Path(project) / ".agent-sync" / "last-renew").unlink(missing_ok=True)
+
+        _run_script(project, "renew", "REN-1")
+
+        if json.loads(lock.read_text()).get("ts") == aged:
+            err("renew: the lease timestamp did not move — `renew` refreshes nothing, so a "
+                "run loses its own lease at TTL while it is still working")
+        if _lock_age(project, "REN-1") > 60:
+            err("renew: the lease is still older than a minute after a renew")
+        if "REN-1" not in _run_script(project, "whoami").stdout:
+            err("renew: the run does not hold its lease after renewing it")
+
+
+def datetime_minus(mod, seconds: int) -> str:
+    """An ISO stamp `seconds` in the past, in the script's own format."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+
+
+def check_config_round_trip() -> None:
+    """The config `init` writes must pass `check`, and so must the shipped example.
+
+    They did not. `check` carried its own literal list of legal keys, and `mergeLog`
+    (written by `init` itself) and `integrationBranch` (in the schema, in the example,
+    read by the code) were absent from it. `check` called them unknown and said they
+    "will be ignored" — false twice over, and an instruction: an agent making `check`
+    green deletes working configuration.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — config round-trip check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("config round-trip: init failed")
+            return
+
+        out = _run_script(project, "check")
+        if "is not in the schema" in out.stdout:
+            bad = [l.strip() for l in out.stdout.splitlines() if "is not in the schema" in l]
+            err(f"config round-trip: `check` rejects the config `init` just wrote: {bad}")
+
+        # And the shipped example, whose every key the schema declares.
+        example = json.loads((ROOT / "agent-sync.example.json").read_text())
+        example["backend"] = "fs"
+        example.pop("$schema", None)
+        (Path(project) / ".claude" / "agent-sync.json").write_text(json.dumps(example, indent=2))
+        out = _run_script(project, "check")
+        if "is not in the schema" in out.stdout:
+            bad = [l.strip() for l in out.stdout.splitlines() if "is not in the schema" in l]
+            err(f"config round-trip: `check` rejects keys of the shipped example: {bad}")
+
+        # And the two lists must be one list. The schema cannot be read at runtime — the
+        # plugin ships without it — so the coordinator names the keys itself and this
+        # asserts the equality that `check` used to get wrong silently.
+        schema = set(json.loads((ROOT / "agent-sync.schema.json").read_text())["properties"])
+        mod = _load_script("agent_sync_config_keys")
+        declared = set(getattr(mod, "CONFIG_KEYS", ()))
+        if not declared:
+            err("config round-trip: the coordinator declares no CONFIG_KEYS — the legal-key "
+                "list is inline in `check` again, where it drifted from the schema before")
+        elif declared != schema:
+            err(f"config round-trip: CONFIG_KEYS and the schema disagree — "
+                f"only in the code: {sorted(declared - schema)}; "
+                f"only in the schema: {sorted(schema - declared)}")
+
+
+def check_no_success_on_failed_publish() -> None:
+    """A command must not print success it did not achieve, or exit 0 having failed.
+
+    Three surfaces did. `release-id` printed "released" on a backend that cannot record
+    one and returned 0. `record` printed "recorded" and returned 0 while stderr said the
+    entry was never published. `journal` crashed with a Python traceback when the state
+    directory was not writable, because adapter `OSError` was never turned into the
+    tool's own failure type.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — false-success check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("false success: init failed")
+            return
+
+        out = _run_script(project, "release-id", "DEC", "0007")
+        if out.returncode == 0:
+            err("release-id: reported success on a backend that records nothing — the id was "
+                "not returned to anybody, and the caller was told it was")
+
+        # An unreachable plane: the record must fail loudly, not quietly.
+        unreachable = {"AGENT_SYNC_BACKEND": "outline",
+                       "AGENT_SYNC_OUTLINE_URL": "http://127.0.0.1:1",
+                       "AGENT_SYNC_OUTLINE_TOKEN": "x",
+                       "AGENT_SYNC_OUTLINE_COLLECTION":
+                           "00000000-0000-4000-8000-000000000000"}
+        _write_cfg(project, backend="outline")
+        out = _run_script(project, "record", "a thing", env=unreachable)
+        if out.returncode == 0:
+            err("record: exited 0 with the plane unreachable — the as-built record has a gap "
+                "and the caller was told it was written")
+        if "recorded" in out.stdout:
+            err("record: printed 'recorded' for an entry that was never published")
+
+        # An unwritable local plane is the same contract reached the other way, and it is
+        # the path that used to produce a Python traceback: an adapter `OSError` walked
+        # past every `except Fail` into `main`, and the agent was handed a stack trace as
+        # the state of the coordination plane. Deterministic and instant, so the rest of
+        # the surfaces are exercised here rather than against a socket.
+        _write_cfg(project, backend="fs")
+        state = Path(project) / ".agent-sync"
+        state.mkdir(exist_ok=True)
+        mode = state.stat().st_mode
+        os.chmod(state, 0o500)
+        try:
+            for argv, label in (
+                    (("record", "a thing"), "record"),
+                    (("signal", "DEP-001", "filed"), "signal"),
+                    (("journal", "a note"), "journal")):
+                out = _run_script(project, *argv, run_id="unwritable")
+                if "Traceback" in out.stderr:
+                    err(f"{label}: an unwritable local plane raises a Python traceback instead "
+                        "of the tool's own failure, with a sentence a reader can act on")
+                if out.returncode == 0:
+                    err(f"{label}: exited 0 with the plane unwritable — nothing was recorded "
+                        "and the caller was told it was")
+        finally:
+            os.chmod(state, mode)
+
+
+def check_guard_denial_names_only_what_it_knows() -> None:
+    """The denial must not name a holder of some other key as the holder of this file.
+
+    It reported "<path> is a guarded registry file and this run holds no lease — r-x
+    holds a lease right now", where r-x held an unrelated task. An agent repeats that
+    sentence, and the transcript then contains a fact nobody can find a source for.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — guard message check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        docs = Path(project) / "docs"
+        docs.mkdir()
+        (docs / "DECISIONS.md").write_text("# Decisions\n")
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("guard message: init failed")
+            return
+        _write_cfg(project, guardedFiles=["docs/DECISIONS.md"])
+
+        _run_script(project, "acquire", "OTHER-1", run_id="holder")
+        out = _run_script(project, "guard", "docs/DECISIONS.md", run_id="asker")
+        text = out.stdout + out.stderr
+        if out.returncode != 2:
+            err("guard message: a run holding nothing was allowed to write a guarded file")
+        if "holds a lease right now" in text and "OTHER-1" not in text:
+            err("guard message: names a holder without naming what they hold — the reader "
+                "concludes that run holds this file, which is not what was checked")
+
+
+def check_doctrine_is_current() -> None:
+    """No published surface may still sell a design this tool measured and rejected.
+
+    `marketplace.json` is the first thing a person reads, and it described leases as
+    "decided by replaying one append-only log so no backend needs compare-and-swap" —
+    the exact belief 1.0.0 refuted and SKILL.md's first trap forbids.
+    """
+    refuted = (
+        "no backend needs compare-and-swap",
+        "no backend requires compare-and-swap",
+    )
+    surfaces = [ROOT / ".claude-plugin" / "marketplace.json",
+                ROOT / "plugins" / "agent-sync" / ".claude-plugin" / "plugin.json",
+                ROOT / "README.md",
+                ROOT / "package.json"]
+    for f in surfaces:
+        if not f.exists():
+            continue
+        text = f.read_text().lower()
+        for phrase in refuted:
+            if phrase in text:
+                err(f"{rel(f)}: still claims '{phrase}' — leases have been decided by an "
+                    "atomic primitive since 1.0.0, and the knowledge base never decides one")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -797,6 +1156,12 @@ def main() -> int:
     check_lease_held_is_visible()
     check_release_refuses_other_runs()
     check_reserve_respects_the_register()
+    check_reserve_is_race_free()
+    check_renew_extends_the_lease()
+    check_config_round_trip()
+    check_no_success_on_failed_publish()
+    check_guard_denial_names_only_what_it_knows()
+    check_doctrine_is_current()
 
     for n in notes:
         print(f"note: {n}")
@@ -862,6 +1227,49 @@ def self_test() -> int:
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
             lambda t: t.replace("    conflicts = merge_conflicts(upstream, branch)",
                                 "    conflicts = []")),
+        # --- the 1.5.3 defects, each planted back exactly as it shipped ---
+        # `reserve` replaying its own shard, and the unconditional re-base that made
+        # merging alone insufficient. Both are needed: either one on its own still
+        # separates three runs, which is why the second was easy to miss.
+        "reserve reads only its own shard": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('        events, _ = self.events("reservations")\n'
+                                '        base, _free, _assign',
+                                '        events, _ = parse_log(self.adapter.log_read(oid))\n'
+                                '        base, _free, _assign')
+                       .replace("            if base is not None and value <= base + served:\n"
+                                "                continue\n", "")),
+        # `renew` back to logging a renewal it never performed.
+        "renew moves no timestamp": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        renewed = [k for k in keys if self._refresh_lease(k)]",
+                                "        renewed = list(keys)")),
+        # One key dropped from the legal list is the whole `mergeLog` defect.
+        "config key list drifts from the schema": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('"settleSeconds", "integrationBranch", "mergeLog",',
+                                '"settleSeconds", "integrationBranch",')),
+        # Success printed over a publish that failed.
+        "record reports success it did not achieve": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                '    if not Sync().record(" ".join(args.text), decision=args.decision or "",\n'
+                '                         files=args.files or ""):\n        return 1\n',
+                '    Sync().record(" ".join(args.text), decision=args.decision or "",\n'
+                '                  files=args.files or "")\n')),
+        # A denial that names a run without naming what it holds.
+        "guard names a holder without a key": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("holds {other[1]} — a different task, not this file.",
+                                "holds a lease right now.")),
+        # The refuted doctrine back on the listing everyone reads first. Assembled from
+        # parts for the same reason the leaked host is: written whole, this fixture would
+        # be the very phrase the check forbids, sitting in a published file.
+        "refuted doctrine on the listing": (
+            ".claude-plugin/marketplace.json",
+            lambda t: t.replace("Coordination layer for multi-agent repositories.",
+                                "Coordination layer for multi-agent repositories, so "
+                                + "no backend needs " + "compare-and-swap.")),
         "stray SKILL.md": (None, None),
     }
     original_root = ROOT

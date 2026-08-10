@@ -1,3 +1,89 @@
+## v1.5.3
+
+**Five surfaces told the caller something that was not true.** An audit on 2026-08-10 ran the
+commands instead of reading them, and every finding below was reproduced before it was fixed. The
+validator was green throughout — which is the finding behind the findings, and the reason this
+release ships six new checks that drive the tool rather than its functions.
+
+### `reserve` handed three runs the same id
+
+`reserve` replayed `log_id("reservations")` — the document **this run writes**. Every other run's
+shard was invisible to it, so three runs each saw an empty history, each seeded a `base` from the
+register, and each was handed `DEC-0007`. Measured, three processes, one number.
+
+The pure allocator was correct and tested; nothing ever asked it about the whole log. This is the
+same failure that disqualified per-writer documents as a *lease* store in 1.0.0 — eight processes
+reading only their own shard, eight winners — arriving in the allocation path, where the tested
+unit hid it. Allocation now runs over the merged log.
+
+Merging alone would have replaced one collision with another: two runs opening a register in the
+same minute both append the same seed, and a `base` that re-seated unconditionally restarts the
+count and hands the second run the id the first just took. A `base` now only ever moves allocation
+**forward**; one at or below the current position is ignored.
+
+### `renew` renewed nothing
+
+It appended `op=renew` to the record plane — which has not decided a lease since 1.0.0 — and
+touched a throttle file. The timestamp expiry is actually computed from, the one inside the lock
+(or the git ref payload), was written once, by `acquire`.
+
+So a run holding a lease lost it at TTL **while still working**: `whoami` reported `holds:
+nothing`, its own `PreToolUse` guard began denying its edits, and another run acquired the task it
+was in the middle of. With the default 2700 s, every task longer than forty-five minutes. The
+`PostToolUse` hook made no difference, because there was nothing for it to move — and from the
+record plane's side the renewals arrived exactly on schedule, so nothing looked wrong anywhere.
+`renew` now rewrites the lock in `local` mode and re-pushes the ref with `--force-with-lease`
+against the exact object it read in `git` mode.
+
+### `check` rejected the config `init` had just written
+
+`check` carried its own literal list of legal keys. `mergeLog` — written by `init` itself — and
+`integrationBranch` — in the schema, in the shipped example, read by the code — were not in it, so
+a freshly initialised project reported `config key 'mergeLog' is not in the schema — it will be
+ignored`. Both halves false: it is in the schema, and it is not ignored.
+
+That is worse than a wrong message; it is an instruction. An agent making `check` green deletes
+working configuration. The list now lives in one place, `CONFIG_KEYS`, and the validator asserts it
+equals the schema's properties exactly.
+
+### Three commands reported success they had not achieved
+
+`release-id` printed `released DEC-0007` and exited 0 on a backend that records nothing — the id
+stayed a hole the board reports as a leak, and the only party who could have fixed it had been told
+it was handled. `record` and `signal` printed success and exited 0 while stderr said the entry was
+never published. All three now fail loudly.
+
+An adapter `OSError` also walked past every `except Fail` into `main`: an unwritable state
+directory handed the agent a Python traceback as the state of the coordination plane. Store errors
+are now the tool's own failure type.
+
+### The guard named a holder who held something else
+
+A denial read `<path> is a guarded registry file and this run holds no lease — r-x holds a lease
+right now`, where `r-x` held an unrelated task. Beside a path, that sentence gets repeated as "r-x
+holds this file". The denial now names the run **and its key**, and says plainly that exit 2 is a
+statement about the asking run, not about the file.
+
+### The marketplace listing still sold the design 1.0.0 refuted
+
+`marketplace.json` — the first thing anyone reads — described coordination as "decided by replaying
+one append-only log so no backend needs compare-and-swap". That is the belief the first trap in
+`SKILL.md` exists to forbid. Rewritten, and a check now fails on the phrase.
+
+### Documentation corrected where it described behaviour that did not exist
+
+`SKILL.md` and the Cursor rule on what exit 2 means; `lease-protocol.md` on what `renew` moves and
+on the log a reader replays; the claim-tag vocabulary in `README.md` and `lease-protocol.md`, which
+showed a role where the tool writes a run id; `hooks.md` on the `NotebookEdit` matcher, on what
+`session-end.sh` actually does, and on the two timeouts that really apply.
+
+### New checks
+
+`check_reserve_is_race_free`, `check_renew_extends_the_lease`, `check_config_round_trip`,
+`check_no_success_on_failed_publish`, `check_guard_denial_names_only_what_it_knows`,
+`check_doctrine_is_current`. Each drives the real commands from more than one identity, because
+every defect above lived in the gap between two things the validator already tested separately.
+
 ## v1.5.2
 
 ### `reserve` handed out ids that were already written

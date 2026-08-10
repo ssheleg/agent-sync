@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.5.2"
+  version: "1.5.3"
   author: ssheleg
 ---
 
@@ -97,10 +97,8 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" adopt
 Confirm the registers and guarded files with the operator first: a register pointed at the
 wrong file makes every later check confidently wrong, and a guarded list that misses a
 shared file leaves the one place collisions happen unprotected. In a submodule it declares
-no registers: decisions belong to the parent repository.
-
-Then: `init` → paste the approved config → `reconcile --set-baseline` → `setup` →
-commit the snapshot and link it from the project's agent instructions.
+no registers: decisions belong to the parent repository. Then take the chain above from
+`init`.
 
 ## First command in a project: `init`
 
@@ -214,10 +212,8 @@ shared.
 
 The third matters because a plain shell command has no session id and a hook does. So
 `SessionStart` stamps `.agent-sync/sessions/<CLI pid>` with the session it knows, and a later
-command finds itself by walking its own process ancestry to a stamped pid — exact, and
-deliberately not command-line parsing: the throwaway shell every tool call runs in carries
-claude paths in its argv, so every heuristic aimed at the binary matched it instead. Stamps
-are removed when their process is gone.
+command finds itself by walking its own process ancestry to a stamped pid. Why that and not
+command-line parsing: `references/earned-rules.md`.
 
 When none of the four can be established the run says so — *"this identity is shared with any other
 session in this checkout"* — rather than presenting a shared entry as separation.
@@ -246,8 +242,11 @@ The config lists registry files several agents write. Before editing one:
 python3 "$SKILL_DIR/scripts/agent_sync.py" guard docs/DECISIONS.md
 ```
 
-Exit 2 means another run holds it. Do not edit anyway, and do not "just fix one line" —
-a clobbered decision looks exactly like a decision.
+**Exit 2 is about *this run*: it holds no lease** — not that somebody else holds that
+file. One lease covers every guarded file; hold one or write none. A denial names the
+other run **and its key**, because "r-x holds a lease" beside a path gets repeated as
+"r-x holds this file". Do not edit anyway, and do not "just fix one line" — a clobbered
+decision looks exactly like a decision.
 
 Claude Code's `PreToolUse` hook runs this for you. Elsewhere nothing does.
 
@@ -260,9 +259,9 @@ both use it.
 python3 "$SKILL_DIR/scripts/agent_sync.py" reserve DEC   # → DEC-0216
 ```
 
-Allocation is positional over the log, so every agent computes the same answer. Reserve
-and not write it to git? `release-id` it — otherwise the number is a hole the board
-reports as a leak, and nobody can tell a hole from work on a branch.
+Allocation is positional over the **merged** log — every shard, never just this run's —
+so every agent computes the same answer. Reserved and not written to git? `release-id`
+it, or the number is a hole the board reports as a leak.
 
 ## Nothing in a log is ever edited or deleted
 

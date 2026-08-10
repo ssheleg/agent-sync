@@ -46,7 +46,7 @@ The hook receives JSON on stdin with `session_id`, `prompt_id`, `transcript_path
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh" }] }
     ],
     "PreToolUse": [
-      { "matcher": "Edit|Write|MultiEdit",
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh" }] },
       { "matcher": "Bash", "if": "Bash(git commit *)",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh" }] }
@@ -66,8 +66,8 @@ The hook receives JSON on stdin with `session_id`, `prompt_id`, `transcript_path
 |---|---|
 | `session-start.sh` | Register the run, print the board summary and the one next action |
 | `guard.sh` | Deny an edit to a `guardedFiles[]` path, or a commit staging one, without a live lease |
-| `renew.sh` | Renew the lease, throttled to `renewIntervalSeconds` — a no-op most calls |
-| `session-end.sh` | Release every lease, flush the journal, close the run |
+| `renew.sh` | Renew the lease — moves the timestamp expiry is computed from, throttled to `renewIntervalSeconds`, a no-op most calls |
+| `session-end.sh` | Release every lease this run holds. That is all it does — it writes no journal entry and closes nothing else |
 
 ## Performance
 
@@ -82,7 +82,7 @@ throttle is broken — fix the throttle rather than removing the hook.
 |---|---|
 | Guarded edits go through | The guard crashed. Any exit code other than 2 is non-blocking. Run it by hand with a sample stdin payload |
 | Everything is denied | No config, or no lease. `status` says which |
-| Session start is slow | The backend is unreachable; it should time out at 5 s and degrade, not hang |
+| Session start is slow | The backend is unreachable. Each hook is capped twice — `run_limited 10` inside the script, and the `timeout` in `hooks.json` (15–20 s) — so it degrades rather than hanging |
 | Renew floods the log | The throttle file is not being written — check its path is writable |
 
 Run the guard directly to see what it decides:

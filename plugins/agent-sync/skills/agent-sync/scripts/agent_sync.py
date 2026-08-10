@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -87,6 +87,18 @@ MAX_UNPARSEABLE = 0.02
 DEFAULT_SETTLE = 3.0
 DEFAULT_TTL = 2700
 DEFAULT_RENEW = 300
+
+# Every key `.claude/agent-sync.json` may carry. One list, and `agent-sync.schema.json`
+# must agree with it exactly — the validator asserts that, because the two were already
+# a second copy of each other once and disagreed: `check` called `mergeLog` (written by
+# `init` itself) and `integrationBranch` (in the schema, in the example, read below)
+# unknown keys that "will be ignored". Both statements were false, and the second was an
+# instruction: an agent making `check` green deletes working configuration.
+CONFIG_KEYS = frozenset({
+    "$schema", "backend", "leaseTtlSeconds", "renewIntervalSeconds", "gated",
+    "idRegisters", "guardedFiles", "claimTags", "gates", "mirror", "setupFile",
+    "leaseBackend", "leaseRemote", "settleSeconds", "integrationBranch", "mergeLog",
+})
 
 
 # --------------------------------------------------------------------------- utils
@@ -600,27 +612,46 @@ class FsAdapter(Adapter):
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", path).strip("-").lower()
         return self.base / f"{safe}.md"
 
+    # A store failure is the tool's own failure type, never a bare OSError. Callers
+    # catch `Fail` and turn it into one sentence a reader can act on; an OSError walks
+    # straight past them into `main`, and the agent is handed a Python traceback for a
+    # read-only directory — which it then reports as the state of the coordination plane.
     def tree_ensure(self, path: str) -> str:
         p = self._p(path)
-        if not p.exists():
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("")
+        try:
+            if not p.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("")
+        except OSError as exc:
+            raise Fail(f"cannot open the local plane at {p}: {exc}") from exc
         return str(p)
 
     def log_append(self, oid: str, line: str) -> None:
-        with open(oid, "a") as fh:
-            fh.write(line.rstrip("\n") + "\n")
+        try:
+            with open(oid, "a") as fh:
+                fh.write(line.rstrip("\n") + "\n")
+        except OSError as exc:
+            raise Fail(f"cannot append to {oid}: {exc}") from exc
 
     def log_read(self, oid: str) -> str:
         p = Path(oid)
-        return p.read_text() if p.exists() else ""
+        try:
+            return p.read_text() if p.exists() else ""
+        except OSError as exc:
+            raise Fail(f"cannot read {oid}: {exc}") from exc
 
     def doc_put(self, oid: str, text: str) -> None:
-        Path(oid).write_text(text)
+        try:
+            Path(oid).write_text(text)
+        except OSError as exc:
+            raise Fail(f"cannot write {oid}: {exc}") from exc
 
     def doc_get(self, oid: str) -> str:
         p = Path(oid)
-        return p.read_text() if p.exists() else ""
+        try:
+            return p.read_text() if p.exists() else ""
+        except OSError as exc:
+            raise Fail(f"cannot read {oid}: {exc}") from exc
 
     def log_shards(self, prefix: str) -> list[str]:
         stem = re.sub(r"[^A-Za-z0-9._-]+", "-", prefix).strip("-").lower()
@@ -709,11 +740,18 @@ def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, l
         if ev["key"] != reg:
             continue
         if ev["op"] == "base":
-            base = int(ev.get("value") or 0)
-            # A later `base` re-seats the allocation, so the count restarts with it. Without this
-            # reset, a re-base hands out `new_base + served` and skips as many ids as were served
-            # under the old one — and re-basing is not exotic: it is what happens whenever the
-            # register grew by a path other than this tool, which is the common case.
+            value = int(ev.get("value") or 0)
+            # A base only ever moves allocation FORWARD. Two runs opening the same register in
+            # the same minute both append the same seed, and a base that re-seated
+            # unconditionally would restart the count and hand the second run the id the first
+            # had just been given — the collision, arriving through the door built to prevent it.
+            if base is not None and value <= base + served:
+                continue
+            base = value
+            # A re-base restarts the count. Without this reset, it hands out `new_base + served`
+            # and skips as many ids as were served under the old one — and re-basing is not
+            # exotic: it is what happens whenever the register grew by a path other than this
+            # tool, which is the common case.
             served = 0
             # Ids freed below the new base are not free any more. The register moved past them, so
             # something is written there now, and handing one back would be the very collision the
@@ -998,6 +1036,61 @@ class Sync:
                       file=sys.stderr)
         return True, self.rid
 
+    def _refresh_lease(self, key: str) -> bool:
+        """Move the timestamp this lease is expired by, in the plane that arbitrates it.
+
+        This is what `renew` means, and for four minor versions it did not happen. `renew`
+        appended `op=renew` to the RECORD plane — which has not decided a lease since
+        1.0.0 — and touched a throttle file. The lock's own `ts` was written once, by
+        `acquire`. So a run holding a lease lost it at TTL while still working: its own
+        guard began denying it, and another run acquired the task it was in the middle of.
+        The `PostToolUse` hook changed nothing, because there was nothing for it to move.
+        """
+        if self.lease_mode == "git":
+            sha, held = self._git_read_lease(key)
+            if not sha or held.get("run") != self.rid:
+                return False
+            payload = json.dumps({**held, "ts": now_iso()})
+            empty_tree = git("hash-object", "-t", "tree", os.devnull)
+            made = subprocess.run(
+                ["git", "-c", "user.name=agent-sync", "-c", "user.email=agent-sync@localhost",
+                 "commit-tree", empty_tree],
+                input=payload, capture_output=True, text=True)
+            commit = made.stdout.strip()
+            if not commit:
+                return False
+            # Against the exact object just read: a renewal must never overwrite a lease
+            # somebody else took while this run was between the read and the push.
+            r = subprocess.run(["git", "push", self._git_remote(),
+                                f"--force-with-lease={self._ref(key)}:{sha}",
+                                f"{commit}:{self._ref(key)}"], capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"note: could not renew {key} on the remote: {r.stderr.strip()[:160]}",
+                      file=sys.stderr)
+                return False
+            self._note_local(key, payload)
+            return True
+
+        lock = self._local_lock(key)
+        if not lock.exists():
+            return False
+        try:
+            held = json.loads(lock.read_text())
+        except (json.JSONDecodeError, OSError):
+            return False
+        if held.get("run") != self.rid:
+            return False
+        held["ts"] = now_iso()
+        tmp = lock.with_name(f"{lock.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(held))
+            tmp.replace(lock)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            print(f"note: could not renew {key} ({exc})", file=sys.stderr)
+            return False
+        return True
+
     def renew(self, key: str | None = None) -> bool:
         marker = self.root / STATE_DIR / "last-renew"
         interval = int(self.cfg.get("renewIntervalSeconds") or DEFAULT_RENEW)
@@ -1007,12 +1100,13 @@ class Sync:
         if not keys:
             self._touch_renew()
             return False
-        if self.adapter.is_lease_authority:
+        renewed = [k for k in keys if self._refresh_lease(k)]
+        if self.adapter.is_lease_authority and renewed:
             oid = self.log_id("claims")
-            for k in keys:
+            for k in renewed:
                 self.adapter.log_append(oid, fmt_line("renew", k, self.rid))
         self._touch_renew()
-        return True
+        return bool(renewed)
 
     def _touch_renew(self) -> None:
         marker = self.root / STATE_DIR / "last-renew"
@@ -1105,13 +1199,18 @@ class Sync:
                 f"backend '{self.adapter.name}' cannot reserve ids safely "
                 "(atomicAppend is false). Allocate by hand and record it, or configure a "
                 "cloud backend. Pretending would hand two agents the same id.")
+        # Every shard, not just this run's. `log_id` returns the document THIS run writes,
+        # and reading it alone was the whole defect: three runs each replayed a log
+        # containing only their own lines, each seeded a base from the register, and each
+        # was handed the same number — while `_leaks` on the same data, read merged,
+        # reported the truth. Allocation is positional over the WHOLE log or it is nothing.
         oid = self.log_id("reservations")
-        events, _ = parse_log(self.adapter.log_read(oid))
+        events, _ = self.events("reservations")
         base, _free, _assign = resolve_reservations(events, reg)
         if not base:
             base = self._seed_base(reg)
             self.adapter.log_append(oid, fmt_line("base", reg, self.rid, value=f"{base:04d}"))
-            events, _ = parse_log(self.adapter.log_read(oid))
+            events, _ = self.events("reservations")
         else:
             # The log knows what *this tool* handed out. The register knows what is actually
             # written, by every path including the ones that never touch this tool — a person
@@ -1132,10 +1231,10 @@ class Sync:
             if probed and probed[-1][1] < floor:
                 self.adapter.log_append(
                     oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
-                events, _ = parse_log(self.adapter.log_read(oid))
+                events, _ = self.events("reservations")
         self.adapter.log_append(oid, fmt_line("reserve", reg, self.rid))
         time.sleep(0.25 + random.random() * 0.15)
-        events, _ = parse_log(self.adapter.log_read(oid))
+        events, _ = self.events("reservations")
         _b, _f, assignments = resolve_reservations(events, reg)
         mine = [v for r, v in assignments if r == self.rid]
         if not mine:
@@ -1155,9 +1254,18 @@ class Sync:
         return int(m.group(1))
 
     def release_id(self, reg: str, value: str) -> None:
-        if self.adapter.is_lease_authority:
-            self.adapter.log_append(self.log_id("reservations"),
-                                    fmt_line("release_id", reg, self.rid, value=value))
+        """Return an id to the pool — or say plainly that nothing recorded it.
+
+        On a backend that cannot order writes this used to do nothing and print
+        "released" anyway. The id stayed a hole the board reports as a leak, and the only
+        party who could have fixed that had been told it was handled."""
+        if not self.adapter.is_lease_authority:
+            raise Fail(
+                f"backend '{self.adapter.name}' cannot record a released id "
+                "(atomicAppend is false), so nothing was returned to the pool. Note it in "
+                f"the register by hand, or configure a backend that can: {reg}-{value}")
+        self.adapter.log_append(self.log_id("reservations"),
+                                fmt_line("release_id", reg, self.rid, value=value))
 
     # -- journal / signals -------------------------------------------------
 
@@ -1178,20 +1286,22 @@ class Sync:
                   file=sys.stderr)
             return False
 
-    def journal(self, text: str) -> None:
+    def journal(self, text: str) -> bool:
         try:
             oid = self.adapter.tree_ensure(f"20 Runs — {self.rid}")
             self.adapter.log_append(oid, fmt_line(
                 "journal", self.rid, self.rid, sha=head_sha(),
                 note=text.replace("`", "'")[:400]))
+            return True
         except Fail as exc:
             print(f"agent-sync: journal NOT published ({exc})", file=sys.stderr)
+            return False
 
-    def signal(self, dep: str, state: str) -> None:
+    def signal(self, dep: str, state: str) -> bool:
         allowed = {"filed", "accepted", "delivered", "closed", "refused"}
         if state not in allowed:
             raise Fail(f"state must be one of {sorted(allowed)}")
-        self._publish("signals", fmt_line(
+        return self._publish("signals", fmt_line(
             "signal", dep, self.rid, state=state, repo=repo_name(), sha=head_sha()))
 
     # -- awareness ---------------------------------------------------------
@@ -1486,9 +1596,9 @@ class Sync:
 
     # -- as-built record and reconciliation ---------------------------------
 
-    def record(self, text: str, decision: str = "", files: str = "") -> None:
+    def record(self, text: str, decision: str = "", files: str = "") -> bool:
         """Append what was ACTUALLY built. Not a plan, not an intention."""
-        self._publish("asbuilt", fmt_line(
+        return self._publish("asbuilt", fmt_line(
             "asbuilt", decision or "-", self.rid, repo=repo_name(), sha=head_sha(),
             files=files.replace("`", "'")[:200],
             note=text.replace("`", "'")[:400]))
@@ -1641,29 +1751,20 @@ class Sync:
             note = "" if self.gated else " (advisory: arbitrated locally only)"
             return True, f"held by this run ({', '.join(held)}){note}"
 
+        # Name the OTHER key, never just the other run. "r-x holds a lease right now"
+        # beside a path reads as "r-x holds this file" — which is not what was checked,
+        # and an agent that repeats it puts a fact in the transcript with no source.
         other = self._any_other_holder()
-        who = f" — {other} holds a lease right now" if other else ""
-        return False, (f"{rel} is a guarded registry file and this run holds no lease{who}. "
+        who = (f" Another run ({other[0]}) holds {other[1]} — a different task, not this file."
+               if other else "")
+        return False, (f"{rel} is a guarded registry file and this run holds no lease.{who} "
                        f"Acquire one first: agent_sync.py acquire <TASK-ID>")
 
-    def _any_other_holder(self) -> str | None:
-        if self.adapter.is_lease_authority:
-            events, _ = self.events("claims")
-            now = time.time()
-            for key in {e["key"] for e in events}:
-                holder = resolve_holder(events, key, now)
-                if holder and holder != self.rid:
-                    return holder
-            return None
-        d = self.root / STATE_DIR / "leases"
-        for p in (d.glob("*.lock") if d.exists() else []):
-            try:
-                held = json.loads(p.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-            if held.get("run") != self.rid and \
-                    time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
-                return str(held.get("run"))
+    def _any_other_holder(self) -> tuple[str, str] | None:
+        """(run, key) of some lease another run holds — both halves, or neither."""
+        for key, holding in sorted(self.all_holdings().items()):
+            if holding.get("run") and holding["run"] != self.rid:
+                return str(holding["run"]), key
         return None
 
     # -- board -------------------------------------------------------------
@@ -2258,12 +2359,12 @@ def cmd_release_id(args: argparse.Namespace) -> int:
 
 
 def cmd_journal(args: argparse.Namespace) -> int:
-    Sync().journal(" ".join(args.text))
-    return 0
+    return 0 if Sync().journal(" ".join(args.text)) else 1
 
 
 def cmd_signal(args: argparse.Namespace) -> int:
-    Sync().signal(args.dep, args.state)
+    if not Sync().signal(args.dep, args.state):
+        return 1
     print(f"{args.dep} → {args.state}")
     return 0
 
@@ -2296,7 +2397,11 @@ def cmd_board(args: argparse.Namespace) -> int:
 
 
 def cmd_record(args: argparse.Namespace) -> int:
-    Sync().record(" ".join(args.text), decision=args.decision or "", files=args.files or "")
+    # Non-zero when the entry did not land. Printing "recorded" over a stderr line saying
+    # the opposite is how an agent ends up reporting an as-built record that does not exist.
+    if not Sync().record(" ".join(args.text), decision=args.decision or "",
+                         files=args.files or ""):
+        return 1
     print("recorded")
     return 0
 
@@ -2819,11 +2924,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
 
     if cfg.get("backend") not in ("outline", "fs"):
         problems.append(f"backend '{cfg.get('backend')}' is not a known adapter")
-    unknown = set(cfg) - {"$schema", "backend", "leaseTtlSeconds", "renewIntervalSeconds",
-                          "gated", "idRegisters", "guardedFiles", "claimTags", "gates",
-                          "mirror", "setupFile", "leaseBackend", "leaseRemote",
-                          "settleSeconds"}
-    for k in sorted(unknown):
+    for k in sorted(set(cfg) - CONFIG_KEYS):
         problems.append(f"config key '{k}' is not in the schema — it will be ignored")
 
     # Registers must exist AND their allocation pattern must actually match.

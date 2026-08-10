@@ -86,12 +86,24 @@ The tool reports which guarantee is in force; it never implies the stronger one.
 
 ## Expiry and stealing
 
-A lock is expired when `now > ts + ttl` for the timestamp inside it, refreshed by
-`renew`.
+A lock is expired when `now > ts + ttl` for the timestamp inside it.
+
+**`renew` moves that timestamp, in the plane that arbitrates the lease** — it rewrites the
+lock file in `local` mode, and re-pushes the ref with `--force-with-lease` against the
+exact object it read in `git` mode. The `op=renew` line it also appends to the record plane
+is visibility, not renewal.
+
+That distinction is the whole of the bug fixed in 1.5.3: `renew` wrote *only* the record
+line. The lock's `ts` was written once, by `acquire`, so a run holding a lease lost it at
+TTL while still working — its own guard began denying it, and another run acquired the task
+it was in the middle of. Nothing reported it, because from the record plane's side the
+renewals were arriving exactly as scheduled. **A renewal that does not move the timestamp
+the expiry is computed from is not a renewal**, however faithfully it is logged.
 
 Default `ttl` is 2700 s (45 minutes). `renew` is emitted at most once per
 `renewIntervalSeconds` (default 300 s) — by the `PostToolUse` hook in Claude Code,
-and by the agent itself everywhere else.
+and by the agent itself everywhere else. A `renew` for a key this run does not hold
+refreshes nothing and says so.
 
 **Stealing an expired lease is the ordinary `acquire` path.** There is no force flag:
 the reap step removes an expired lock and the create proceeds. The steal is visible on
@@ -120,7 +132,14 @@ Then, replaying in order and maintaining a free list:
 - `op=reserve key=DEC` takes the free-list head if it is non-empty; otherwise it
   takes `base + (count of prior reserves not served from the free list)`.
 
-Every reader computes the same assignment for every reserve line, including its own.
+Every reader computes the same assignment for every reserve line, including its own —
+**and "the log" means every shard merged, never the one this run writes.** Reading only
+its own document is how `reserve` handed three runs `DEC-0007` three times (fixed in
+1.5.3): each replayed a log containing only its own lines, each seeded its own `base`
+from the register, and each was correct about a history nobody else shared. The failure
+is the same one that disqualified per-writer documents as a *lease* store, arriving in
+the allocator — so a `base` now only ever moves allocation **forward**, and two runs
+opening a register in the same minute cannot restart each other's count.
 
 **An id you reserved and did not write to git must be released** with
 `release_id`. An id that is reserved, unreleased and absent from git after its run
@@ -133,7 +152,7 @@ number, and silently handing it out again would produce two documents with one i
 | Fact | Home | Lifetime |
 |---|---|---|
 | Who holds this task **right now** | the lease log | ephemeral, TTL |
-| Who **owns** this task | the git claim tag (`[name]`, `todo (claimed: <role>)`) | durable |
+| Who **owns** this task | the git claim tag — `todo (claimed: r-7f3a91)`, the template from `claimTags.held` | durable |
 
 `acquire` writes the git tag through and `release` restores exactly what was there. The
 objection that once demoted this to a check — an unattended process rewriting a shared

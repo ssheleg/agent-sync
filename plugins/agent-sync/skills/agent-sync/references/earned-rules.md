@@ -13,6 +13,15 @@ belonged to somebody else, and `release` would have taken it. The resolution ord
 `AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` · the session that started this shell · shared, and where
 none can be established the run says so instead of presenting a shared entry as separation.
 
+The third position is the one that needs explaining, because the obvious implementation of it is
+wrong. A plain shell command carries no session id; a hook does. So `SessionStart` stamps
+`.agent-sync/sessions/<CLI pid>` with the session it knows, and any later command finds itself by
+walking its own **process ancestry** to a stamped pid, removing stamps whose process is gone. It is
+deliberately not command-line parsing: the throwaway shell every tool call runs in carries claude
+paths in its own `argv`, so every heuristic aimed at spotting the CLI binary matched that shell
+instead — and matching the wrong ancestor hands two sessions one identity, which is the failure
+above.
+
 **Work in a submodule is not finished until its parent says so.** A parent records each submodule as
 a pointer to one commit, and moving the submodule does not move the pointer. The work is committed,
 pushed, green in CI and marked done in its own roadmap — and a clone of the parent gets the commit

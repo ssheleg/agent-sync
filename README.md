@@ -238,7 +238,7 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" <command>
 | `status` | Inspect, repair, report — including other runs' leases and signals new since you last looked |
 | `bootstrap` | Create the cloud container and print the id to paste into the env file |
 | `acquire <KEY>` | Take the lease on a task id. Prints `won`, or `lost <holder>` |
-| `renew <KEY>` | Extend the lease. In Claude Code the `PostToolUse` hook does this for you |
+| `renew <KEY>` | Extend the lease — moves the timestamp expiry is computed from. In Claude Code the `PostToolUse` hook does this for you |
 | `release <KEY>` | Give the lease back. Always, including on failure |
 | `reserve <REG>` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |
@@ -296,8 +296,9 @@ right one. Full doctrine:
 [`references/branching.md`](plugins/agent-sync/skills/agent-sync/references/branching.md).
 
 **The lease is not the claim.** The lease says who holds the task *now* and expires; the
-durable claim is the tag in git (`[name]`, `todo (claimed: <role>)`). `acquire` writes
-that tag through and `release` clears it, so one fact keeps one home.
+durable claim is the tag in git — `todo (claimed: r-7f3a91)`, rendered from the
+`claimTags.held` template, naming the **run**, not a role. `acquire` writes that tag
+through and `release` restores exactly what was there, so one fact keeps one home.
 
 ## Configuration
 
