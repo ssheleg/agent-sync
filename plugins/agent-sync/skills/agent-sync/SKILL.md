@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.7.0"
+  version: "1.7.1"
   author: ssheleg
 ---
 
@@ -113,10 +113,9 @@ storage question gets asked and answered, once, and written down.
    - or local files (`fs`) — no credentials, and no visibility to an agent on another
      machine: no shared awareness, no cross-repo signals, no shared board.
 
-   The lease is decided separately by `leaseBackend` — `git` for cross-machine exclusion,
-   `local` otherwise — and **`gated` follows that choice, never the record plane**. `fs`
-   with a local lock is still real exclusion between the agents on this machine; `outline`
-   with a local lock is *not* exclusion across them. Report the one you actually have.
+   The lease is decided separately by `leaseBackend` (trap 2), and **`gated` follows that
+   choice, never the record plane**. Report the guarantee you actually have, not the
+   stronger one the record plane suggests.
 2. **If cloud: the instance URL.** The URL is configuration, not a secret, so you
    may write it. The **token is not** — you never ask for it in chat, never read it
    back, and never place it yourself.
@@ -144,9 +143,9 @@ the file is their step, and the design depends on it staying theirs.
 python3 "$SKILL_DIR/scripts/agent_sync.py" status
 ```
 
-Idempotent. Inspects, repairs what is missing, prints a status block, names exactly
-ONE next action — and carries `check`'s verdict, so the command every session runs and
-the command that validates the setup cannot give two answers about one project.
+Idempotent. Inspects, repairs, reports, names exactly ONE next action — and carries
+`check`'s verdict, so the command every session runs and the one that validates the
+setup cannot give two answers about one project.
 
 **Read the two awareness sections it prints — they are the point, not decoration.**
 
@@ -196,7 +195,9 @@ npx sshlg-skills install
 | `scaffold [--full]` | Create only what is missing, never a line over anything that exists. `--full` also seeds the question register, the index, the dependency board, the data model with its entity register, and the docs gate |
 | `finish [--gates]` | Is the **work** finished — every repository clean, pushed and pointed at, no lease left held. `check` answers whether the project is wired correctly; this answers whether you are done |
 
-`$SKILL_DIR` is this skill's own directory. Every command reads
+`$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync`
+under the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once
+per session and reuse it — do not guess a path. Every command reads
 `.claude/agent-sync.json` from the project root and needs no arguments beyond those
 listed.
 
@@ -321,16 +322,10 @@ Two files, and the split between them is the whole security model.
 **`.claude/agent-sync.json`** — *shape*, committed: which backend, TTLs, which files
 are guarded, which registers exist, which gates to run.
 
-**`.env.agent-sync`** — *identity*, created by `init`, mode 600, gitignored:
-
-```
-AGENT_SYNC_BACKEND=outline
-AGENT_SYNC_OUTLINE_URL=https://<instance>
-AGENT_SYNC_OUTLINE_TOKEN=          # the operator fills this line, nobody else
-AGENT_SYNC_OUTLINE_COLLECTION=     # printed by `bootstrap`
-```
-
-Load it before running agents:
+**`.env.agent-sync`** — *identity*, written by `init` with the keys already in it, mode
+600, gitignored. The operator fills the token line and nobody else; `bootstrap` prints
+the collection id to paste beside it. Found here, or in a superproject, or wherever
+`AGENT_SYNC_ENV` points — `check` prints which. Load it before running agents:
 
 ```bash
 set -a && . ./.env.agent-sync && set +a

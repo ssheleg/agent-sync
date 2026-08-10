@@ -225,8 +225,9 @@ action:
 
 ## Everyday use
 
-In an agent session you use the slash command (`/agent-sync claim ASC-072`); the same
-commands run directly against the coordinator script, which is what the hooks and CI do:
+In an agent session you use the slash command (`/agent-sync acquire ASC-072` — the verb is
+`acquire`, the same one the CLI takes); the same commands run directly against the
+coordinator script, which is what the hooks and CI do:
 
 ```bash
 python3 "$SKILL_DIR/scripts/agent_sync.py" <command>

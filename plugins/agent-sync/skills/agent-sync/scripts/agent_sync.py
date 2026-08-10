@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -2094,19 +2094,29 @@ class Sync:
             "## The cycle, per task",
             "",
             "```",
-            "status      → who else is working, and what changed while you were away",
+            "merges      → what landed while you were away",
+            "status      → who else is working, and what changed since you last looked",
             "reconcile   → resolve every divergence BEFORE writing code",
-            "acquire ID  → take the lease; the claim tag in git is written through",
+            "branch      → work happens on one; the integration branch is somebody",
+            "              else's stable base",
+            "acquire ID  → take the lease. On the integration branch the claim tag is",
+            "              written through to git; on any other branch the holder stays",
+            "              in the coordination plane, where `status` shows it to everyone",
             "   … work …",
             "record      → what you ACTUALLY built, with the decision id and files",
             "   … update the git documents in the same change …",
             "reconcile   → check both sides again",
             "board       → regenerate the shared view",
-            "release ID  → on every path, including failure",
+            "merge --key → land the branch: conflicts checked first, the merge recorded,",
+            "              that lease released. Without a branch, `release ID` by hand",
+            "              — on every path, including failure",
             "```",
             "",
+            f"This project's integration branch is `{self.integration_branch}`.",
+            "",
             "Full doctrine ships with the skill: `references/two-sources.md`,",
-            "`references/lease-protocol.md`, `references/pipeline-binding.md`.",
+            "`references/lease-protocol.md`, `references/branching.md`,",
+            "`references/roadmap.md`, `references/pipeline-binding.md`.",
         ]
         return "\n".join(L) + "\n"
 
@@ -2889,31 +2899,24 @@ annotate the old entry's status line. The body of the old entry stays as history
 
 AGENTS_SEED = """# AGENTS.md — working protocol
 
-**Read [`{snapshot}`]({snapshot}) first.** It is generated from the live configuration and
-states how documentation and coordination work here: which registers exist, which files
-need a lease, which gates run, what is written where, and what is never deleted.
+**Read [`{snapshot}`]({snapshot}) first, and follow the cycle it states.** That file is
+generated from the live configuration: which registers exist, which files need a lease,
+which gates run, what is written where, what is never deleted, and the order to do it in.
 
-## Before you write anything
+This file deliberately does **not** restate that cycle. It is seeded once and never
+overwritten, so a copy of the protocol here would be frozen on the day the project was
+created while the tool moved on — and the two would disagree in front of an agent with no
+way to tell which is current. One fact, one home; the home is the generated snapshot,
+because it can be regenerated and `agent-sync check` fails when it goes stale.
 
-Several agents may work this repository at once.
+## The three that are true in every project
 
-1. `agent-sync status` — who else is working, and what changed while you were away.
-2. `agent-sync reconcile` — the git documents say how it *should* be, the as-built record
-   says how it *is*. Resolve every divergence **before** writing code.
-3. `agent-sync acquire <TASK-ID>` — the guarded registers refuse an unleased write.
-4. Reserve any new id with `agent-sync reserve <REGISTER>` before writing it.
-
-## When you finish
-
-1. `agent-sync record` — what you actually built, with the decision id and the files.
-2. Update the git documents in the **same** change.
-3. `agent-sync reconcile` again, then `agent-sync board`.
-4. `agent-sync release <TASK-ID>` — on every path, including failure.
-
-## The one rule that matters most
-
-**No decision lives only in chat.** Record it in the decision register, propagate it to
-every document it affects, and commit referencing the id.
+1. **Several agents may work this repository at once.** `agent-sync status` before you
+   start: who holds what, and what changed since you last looked.
+2. **Work on a branch, and land it with `agent-sync merge`.** The integration branch is
+   somebody else's stable base — nothing about work in flight is committed there.
+3. **No decision lives only in chat.** Record it in the decision register, propagate it to
+   every document it affects, and commit referencing the id.
 """
 
 
@@ -3119,8 +3122,21 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
     for k in sorted(set(cfg) - CONFIG_KEYS):
         problems.append(f"config key '{k}' is not in the schema — it will be ignored")
 
-    # Registers must exist AND their allocation pattern must actually match.
+    # Registers must exist, their allocation pattern must match — and the backend must be
+    # able to hand an id out at all. A register declared on a plane whose `reserve` always
+    # raises is a rule that protects nothing, which is the exact thing `check` promises to
+    # refuse: the generated snapshot then instructs every agent to run `reserve <REG>`, and
+    # the command cannot succeed in that project.
     regs = cfg.get("idRegisters") or {}
+    if regs:
+        backend = os.environ.get("AGENT_SYNC_BACKEND") or cfg.get("backend") or "fs"
+        probe = make_adapter(cfg, root)
+        if not probe.is_lease_authority:
+            problems.append(
+                f"{len(regs)} id register(s) declared, but backend '{probe.name}' cannot "
+                f"reserve ids (atomicAppend is false){' — the configured backend is ' + backend + ' and it is not reachable, so runs degrade to fs' if backend != probe.name else ''}. "
+                "`reserve` fails every time here; either configure a backend that can "
+                "allocate, or remove the registers and allocate them in the parent repository")
     for reg, spec in sorted(regs.items()):
         f = root / spec.get("file", "")
         if not f.exists():

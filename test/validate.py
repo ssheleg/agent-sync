@@ -1605,6 +1605,113 @@ def check_release_notes_are_extractable() -> None:
             f"{headings[0]!r} — the stop pattern does not match the heading style")
 
 
+def check_every_advertised_verb_exists() -> None:
+    """A command an agent is told to run must be a command the CLI has.
+
+    The slash command's `argument-hint` offered `claim <KEY>` and the README's everyday
+    table showed `/agent-sync claim ASC-072`. The CLI has `acquire`; `claim` is an
+    `invalid choice`. It is the first thing an agent reads and the first thing it types.
+    """
+    mod = _load_script("agent_sync_verbs")
+    real = set(mod.build_parser()._subparsers._group_actions[0].choices)  # noqa: SLF001
+    surfaces = {
+        "commands/agent-sync.md": ROOT / "plugins" / "agent-sync" / "commands" / "agent-sync.md",
+    }
+    for label, path in surfaces.items():
+        if not path.exists():
+            continue
+        hint = re.search(r"argument-hint:\s*\"\[([^\]]+)\]\"", path.read_text())
+        if not hint:
+            continue
+        for token in hint.group(1).split("|"):
+            verb = token.strip().split()[0] if token.strip() else ""
+            if verb and verb not in real:
+                err(f"{label}: advertises `{verb}`, which is not a CLI command "
+                    f"(closest real ones: {', '.join(sorted(real)[:6])}…)")
+
+    # The slash command only — the character before it must not be a word character, or
+    # `npx @ssheleg/agent-sync install` reads as an invocation of a verb called `install`.
+    readme = (ROOT / "README.md").read_text()
+    for m in re.finditer(r"(?<![\w@/-])/agent-sync (\w[\w-]*)", readme):
+        verb = m.group(1)
+        if verb not in real:
+            err(f"README.md: shows `/agent-sync {verb}`, which is not a CLI command")
+
+
+def check_generated_docs_carry_current_doctrine() -> None:
+    """What the tool WRITES into a project must not lag what the skill teaches.
+
+    `setup` generates the snapshot every agent is told to read first — "it states how
+    documentation and coordination work here" — and `scaffold` seeds `AGENTS.md`. Since
+    1.4.0 the doctrine is: work on a branch, land it with `merge`, and the claim is
+    written through **only** on the integration branch. Neither generated document
+    mentioned a branch or `merge` even once, and the snapshot stated the claim tag is
+    written through as an unconditional fact. An agent that does exactly what the skill
+    tells it — trust the generated snapshot — gets the workflow from two versions ago,
+    and regenerating does not help, because the generator is what is stale.
+    """
+    script = (ROOT / "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py").read_text()
+    for marker, label in (("def setup_snapshot", "the setup snapshot"),
+                          ("AGENTS_SEED = ", "the seeded AGENTS.md")):
+        block = script.split(marker, 1)[1] if marker in script else ""
+        block = block[:6000]
+        if "merge" not in block.lower():
+            err(f"{label} never mentions `merge` — it prescribes a cycle ending in "
+                "`release` while the skill's branch discipline says work lands with "
+                "`merge`, and it is the document agents are told to read first")
+
+
+def check_registers_need_a_backend_that_can_reserve() -> None:
+    """A register nobody can reserve from is a rule that protects nothing.
+
+    `check`'s own promise is that it refuses to call a setup healthy on a rule pointing at
+    what is not there. A project declaring `idRegisters` on a backend whose `reserve`
+    always raises passed as healthy — and the snapshot it generates then tells every agent
+    to run `agent_sync.py reserve DEC`, which cannot succeed in that project.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — register/backend check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        (Path(project) / "DECISIONS.md").write_text(
+            "# Decisions\n\n**Next free ID:** `DEC-0001`\n")
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("register/backend: init failed")
+            return
+        _write_cfg(project, idRegisters={"DEC": {
+            "file": "DECISIONS.md",
+            "nextFreeIdPattern": r"\*\*Next free ID:\*\* `DEC-(\d{4})`"}})
+
+        reserve = _run_script(project, "reserve", "DEC")
+        if reserve.returncode == 0:
+            notes.append("register/backend: this backend can reserve; the check is moot here")
+            return
+        out = _run_script(project, "check")
+        if "cannot reserve" not in out.stdout:
+            err("check: called a setup healthy in which the declared register can never be "
+                "reserved — `reserve DEC` fails every time, and the generated snapshot "
+                "instructs every agent to run it")
+
+
+def check_skill_gives_a_resolvable_script_path() -> None:
+    """`$SKILL_DIR` appears in every command example and is defined nowhere.
+
+    Six invocations tell the agent to run `python3 "$SKILL_DIR/scripts/agent_sync.py"`, and
+    the only explanation is the prose "this skill's own directory". Nothing gives a value:
+    not `${CLAUDE_PLUGIN_ROOT}`, not a discovery command. The Cursor rule names a concrete
+    path; the skill body does not, so the agent guesses or searches the filesystem at the
+    point of its very first command.
+    """
+    md = (ROOT / "plugins/agent-sync/skills/agent-sync/SKILL.md").read_text()
+    if "$SKILL_DIR" not in md:
+        return
+    if not re.search(r"CLAUDE_PLUGIN_ROOT|\.agents/skills/agent-sync|"
+                     r"resolve .{0,40}\$SKILL_DIR|SKILL_DIR=", md):
+        err("SKILL.md: uses $SKILL_DIR in every command example without giving one "
+            "resolvable value or a way to find it — the agent guesses at the first step")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -1642,6 +1749,10 @@ def main() -> int:
     check_no_dead_declarations()
     check_claim_round_trip_is_byte_exact()
     check_release_notes_are_extractable()
+    check_every_advertised_verb_exists()
+    check_generated_docs_carry_current_doctrine()
+    check_registers_need_a_backend_that_can_reserve()
+    check_skill_gives_a_resolvable_script_path()
 
     for n in notes:
         print(f"note: {n}")
@@ -1808,6 +1919,28 @@ def self_test() -> int:
         "release notes cannot be extracted": (
             ".github/workflows/release.yml",
             lambda t: t.replace('$0 ~ "^## v?" v "([^0-9]|$)"', '$0 ~ "^## " v "([^0-9]|$)"')),
+        # --- the 1.7.1 defects: how the skill reads to the agent using it ---
+        "the slash command offers a verb the CLI lacks": (
+            "plugins/agent-sync/commands/agent-sync.md",
+            lambda t: t.replace("acquire <KEY>", "claim <KEY>")),
+        "generated project docs lag the doctrine": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                '            "merges      → what landed while you were away",\n', "")
+             .replace('            "merge --key → land the branch: conflicts checked first, '
+                      'the merge recorded,",\n',
+                      '            "release ID  → on every path, including failure",\n')),
+        "check blesses a register nobody can reserve": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        if not probe.is_lease_authority:",
+                                "        if False:")),
+        "the script path is prose only": (
+            "plugins/agent-sync/skills/agent-sync/SKILL.md",
+            lambda t: t.replace(
+                "`$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync`\n"
+                "under the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once\n"
+                "per session and reuse it — do not guess a path.",
+                "`$SKILL_DIR` is this skill's own directory.")),
         "stray SKILL.md": (None, None),
     }
     original_root = ROOT

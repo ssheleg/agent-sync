@@ -1,6 +1,6 @@
 ---
-description: Coordinate concurrent agents — initialise the shared knowledge store, check status, claim a task, reserve an id, or regenerate the board.
-argument-hint: "[init|status|claim <KEY>|release <KEY>|reserve <REG>|board|finish]"
+description: Coordinate concurrent agents — initialise the shared knowledge store, check status, take a task, reserve an id, or regenerate the board.
+argument-hint: "[init|status|check|acquire <KEY>|release <KEY>|reserve <REG>|board|merge|finish]"
 ---
 
 Invoke the `agent-sync` skill.

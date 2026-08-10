@@ -1,3 +1,68 @@
+## v1.7.1
+
+**A second audit, along a different axis: not whether the tool keeps its promises, but whether an
+agent reading this skill can follow it and get a correct result.** The scenarios were executed, not
+imagined — cold start, the whole adoption chain, the per-task cycle, two agents contending for one
+task, every hook with a realistic payload, and the edges (no git repository, uninitialised project,
+absolute paths, `git -C <dir> commit`). The coordination core came through clean. What did not was
+everything the agent *reads*.
+
+### The documents the tool generates were two versions behind the doctrine it teaches
+
+`setup` writes the snapshot every agent is told to read first — *"it states how documentation and
+coordination work here"* — and `scaffold` seeds `AGENTS.md`. Neither mentioned a branch or `merge`
+even once. Both prescribed a cycle ending in `release`, and the snapshot stated *"the claim tag in
+git is written through"* as an unconditional fact, which has been false on any branch since 1.4.0 —
+the branch being where the doctrine says the work belongs.
+
+So an agent doing exactly what the skill instructs — trust the generated snapshot — got the
+workflow from two releases ago. Regenerating did not help: the generator was what was stale. Both
+now carry the branch rule, `merge --key`, and this project's integration branch by name.
+
+`AGENTS.md` stopped restating the cycle altogether. It is seeded once and **never overwritten**, so
+a copy of the protocol there is frozen on the day the project was created while the tool moves on —
+and every project scaffolded before today would have kept the old one forever. It now points at the
+snapshot, which is regenerable and which `check` fails on when it goes stale. One fact, one home.
+
+### `check` blessed a project an agent cannot work in
+
+A configuration declaring `idRegisters` on a backend whose `reserve` always raises passed as
+`setup healthy`. `check`'s own promise is that it refuses a rule pointing at what is not there, and
+a register nobody can allocate from is exactly that — while the snapshot it generates instructs
+every agent to run `agent_sync.py reserve DEC`, which cannot succeed there. It is now a problem,
+named with both ways out.
+
+### The slash command offered a verb the CLI does not have
+
+`argument-hint` advertised `claim <KEY>` and the README showed `/agent-sync claim ASC-072`. The
+command is `acquire`; `claim` is an `invalid choice`. First thing an agent reads, first thing it
+types.
+
+### `$SKILL_DIR` was used in every example and defined nowhere
+
+Six invocations tell the agent to run `python3 "$SKILL_DIR/scripts/agent_sync.py"`, and the only
+explanation was the prose *"this skill's own directory"*. Nothing gave a value. The Cursor rule
+names a concrete path; the skill body now names both — `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync`
+and `~/.agents/skills/agent-sync`.
+
+### What the audit found working
+
+Worth recording, because a report that only lists faults says nothing about the rest: two agents
+contending for one task behave correctly end to end — the second loses, sees who holds it and in
+which repository, is denied the guarded file, and cannot release a lease it does not hold. The
+guard denies `Edit`, `Write`, `NotebookEdit` and absolute paths, and blocks `git commit`,
+`git -C <dir> commit` and `cd <dir> && git commit` when a guarded file is staged, while letting
+`git log --grep=commit` and malformed JSON through. `SessionStart` stamps the identity and prints
+the awareness block; `SessionEnd` releases. The adoption chain works with and without a pre-existing
+`docs/`. An uninitialised project and a non-git directory both answer with the next action and a
+non-zero exit.
+
+### New checks
+
+`check_every_advertised_verb_exists`, `check_generated_docs_carry_current_doctrine`,
+`check_registers_need_a_backend_that_can_reserve`, `check_skill_gives_a_resolvable_script_path` —
+with four more self-test fixtures. The validator now plants and catches 32 distinct defects.
+
 ## v1.7.0
 
 **Observability, honest degradation, and the removal of things that were never load-bearing.**

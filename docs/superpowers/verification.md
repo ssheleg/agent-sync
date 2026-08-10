@@ -44,9 +44,23 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 | REQ-21 | `acquire`/`release` leaves the file byte-identical | `check_claim_round_trip_is_byte_exact` + self-test `claim round-trip rebuilds the row` | 2026-08-10 |
 | REQ-22 | Guard latency stays out of the way | Measured, not gated: ~100 ms and 8 subprocesses per guarded edit with no run id in the environment, ~70 ms and 1 with one. **Never** enforced | 2026-08-10 |
 
+## v1.7.1 — how the skill reads to the agent using it
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| REQ-23 | Every verb a surface advertises is a verb the CLI has | `check_every_advertised_verb_exists` + self-test `the slash command offers a verb the CLI lacks` | 2026-08-10 |
+| REQ-24 | The documents the tool generates carry the doctrine the skill teaches | `check_generated_docs_carry_current_doctrine` + self-test `generated project docs lag the doctrine` | 2026-08-10 |
+| REQ-25 | `check` refuses a register the configured backend can never allocate | `check_registers_need_a_backend_that_can_reserve` + self-test `check blesses a register nobody can reserve` | 2026-08-10 |
+| REQ-26 | `$SKILL_DIR` has a resolvable value in the skill body | `check_skill_gives_a_resolvable_script_path` + self-test `the script path is prose only` | 2026-08-10 |
+| REQ-27 | Two agents contending for one task behave correctly end to end | Executed, not checked: second loses, sees the holder and repo, is denied the guarded file, cannot release what it does not hold. **Not gated** | 2026-08-10 |
+| REQ-28 | The guard covers every tool shape and commit form | Executed, not checked: `Edit`/`Write`/`NotebookEdit`/absolute paths denied; `git commit`, `git -C <dir> commit`, `cd <dir> && git commit` blocked with a guarded file staged; `git log --grep=commit` and malformed JSON pass. **Partly gated** by `check_hooks_noop_without_config` | 2026-08-10 |
+
 ## Standing gaps
 
-- **REQ-09** and **REQ-20** have no check that fails on their own. Both are board rows.
+- **REQ-09**, **REQ-20**, **REQ-27** and **REQ-28** have no check that fails on their own. The last
+  two are the multi-agent and hook scenarios: they were driven by hand this run and behaved
+  correctly, which is evidence about today, not a guarantee about tomorrow. Board rows B-001 and
+  B-009.
 - **REQ-22** is a measurement, not a gate. If guard latency matters later it needs a budget and a
   check that fails when it is exceeded; asserting a timing in CI without one is how a flaky test
   gets deleted.

@@ -5,6 +5,7 @@
 | Date | Commit | What ran |
 |---|---|---|
 | 2026-08-10 | `1f1f7b9` | Audit of 1.5.2, then 1.5.3 → 1.6.0 → 1.7.0, released and published |
+| 2026-08-10 | `HEAD` | Second audit along the agent-usage axis → 1.7.1 |
 
 ## Standing instructions
 
@@ -33,8 +34,46 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
    plus a check that the others quote it — `lease_guarantee()` is the pattern to copy.
 7. **`SKILL.md` is at its token ceiling.** Every addition must displace something. Move the *why*
    into `references/` and leave the rule in the body; the budget is a real constraint, not a lint.
+8. **A doctrine change is not done until the generators emit it.** `setup_snapshot()` and the
+   `*_SEED` templates write documents into other people's projects, and those are what agents read
+   first. Four releases changed the branch doctrine and none of them touched the templates. When a
+   rule changes, grep the generators before closing the task.
 
 ## Entries
+
+### 2026-08-10 (second pass) — the code was right and the instructions were two versions old
+
+**Symptom.** A repeat audit along a different axis — *can an agent follow this skill and get a
+correct result* — found the coordination core clean and the agent-facing surface wrong in four
+places. The worst: `setup` and `scaffold`, the two commands that write documents **into a user's
+project**, generated a workflow with no mention of branches or `merge`, and stated the claim tag is
+written through to git unconditionally — false on any branch since 1.4.0, which is where the
+doctrine says the work belongs. An agent doing exactly what the skill says — read the generated
+snapshot first, it describes how this project is wired — got the 1.3 workflow.
+
+**Surfaced at.** Stage 0 again, by running the scenarios instead of reading them: cold start, the
+adoption chain, the per-task cycle, two agents on one task, every hook with a real payload.
+
+**Owned by.** The generators. Every one of the four fixes shipped in 1.4.0–1.7.0 updated
+`SKILL.md` and the references — the documents the *author* reads — and none of them updated the
+templates the *tool emits*. The doctrine and its generator drifted apart with nothing between them.
+
+**Root cause.** The same shape as the first audit, one layer out. There, a guarantee was described
+in prose and not implemented in code; here, a doctrine was implemented in code and not carried into
+the artifacts the code writes. Both are "one fact, two homes, and only one of them was maintained" —
+and in both cases the unmaintained copy was the one the reader actually trusts.
+
+**Fix, by grade.** Mechanical: `check_generated_docs_carry_current_doctrine` fails when the
+generated snapshot or the seeded `AGENTS.md` stops naming `merge`;
+`check_every_advertised_verb_exists` runs the argument-hint against the real argparse choices;
+`check_registers_need_a_backend_that_can_reserve`; `check_skill_gives_a_resolvable_script_path`.
+Structural: `AGENTS.md` no longer restates the cycle at all — it is seeded once and never
+overwritten, so any protocol copied there is frozen forever; it now points at the snapshot, which
+regenerates and which `check` fails on when stale.
+
+**The check that catches it next time.** The four above. Standing instruction 8.
+
+**What it cost to find.** Nothing that a first-time user would not have hit on their first task.
 
 ### 2026-08-10 — the validator was green while six shipped guarantees were false
 

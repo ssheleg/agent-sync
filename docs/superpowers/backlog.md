@@ -15,6 +15,8 @@ anything that can make the tool report something untrue outranks both.
 | B-005 | low | The run-id resolution walks up to ten `ps` calls when no id is in the environment | ~100 ms per guarded edit today, which is fine. It becomes worth caching if the guard ever runs on more than `Edit`-shaped tools | audit 2026-08-10 (D10) |
 | B-007 | low | `actions/checkout@v4` and `actions/setup-node@v4` target Node 20 | Both are being forced onto Node 24 by the runner and annotate every release. They work today; they will stop | release run 31374955487 |
 | B-008 | medium | The validator has no way to run as a machine without this family installed | The task-pipeline ordering defect was invisible locally and obvious on CI. A `HOME`-isolated mode would catch that class before the tag, not after | run of 2026-08-10 |
+| B-009 | high | Gate the two scenarios driven by hand in the second audit — two agents contending for one task, and the guard across every tool shape and commit form | Both behaved correctly when executed, and neither has a check that fails on its own. They are the tool's whole purpose; "worked when I tried it" is the state the first audit found everything in | audit 2026-08-10 (second pass) |
+| B-010 | medium | The self-test takes ~6 minutes and is growing linearly with fixtures | 32 cases × a full `main()` each. It already exceeded a 10-minute command budget once. Run the fixtures in parallel, or scope each to the checks it can trip | run of 2026-08-10 |
 
 ## Closed by the run of 2026-08-10
 
