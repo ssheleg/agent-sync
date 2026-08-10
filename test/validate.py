@@ -805,9 +805,18 @@ def _load_script(name: str = "agent_sync_under_test"):
 
 
 def _git_project(path: str, *, branch: str = "main") -> None:
+    """A repository shaped like a real one — including an identity.
+
+    The identity used to be passed per-commit with `-c`, which works on a workstation
+    with a global `.gitconfig` and fails on a CI runner without one: anything the tool
+    itself commits (a merge, the merge-log entry) has no author. `merge` passed here and
+    failed there. A fixture must not depend on the developer's own machine being
+    configured — that is the whole class standing instruction 4 exists for.
+    """
     for argv in (["git", "init", "-q", "-b", branch],
-                 ["git", "-c", "user.email=v@e", "-c", "user.name=v",
-                  "commit", "-q", "--allow-empty", "-m", "init"]):
+                 ["git", "config", "user.email", "v@e"],
+                 ["git", "config", "user.name", "v"],
+                 ["git", "commit", "-q", "--allow-empty", "-m", "init"]):
         subprocess.run(argv, cwd=path, capture_output=True)
 
 
@@ -1887,6 +1896,59 @@ def check_guard_covers_every_write_shape() -> None:
                     "the guarded files are unwritable by anyone")
 
 
+def check_merge_refuses_without_an_identity() -> None:
+    """No committer identity is a preflight failure, not a mid-merge abort.
+
+    Found by CI: a runner has no global `.gitconfig`, so `git merge` refuses at the commit
+    and `merge` took the abort path. Recoverable, and still not what a command whose whole
+    doctrine is "every check before anything is touched" promises.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — merge identity check skipped")
+        return
+    with tempfile.TemporaryDirectory() as box:
+        project = str(Path(box) / "project")
+        Path(project).mkdir()
+        # A machine with no identity anywhere — not the repository, not a global file,
+        # not the system one. Unsetting the repo keys is not enough: this developer's
+        # `~/.gitconfig` supplied one and the fixture passed while proving nothing.
+        bare = {"HOME": str(Path(box) / "home"),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1"}
+        (Path(box) / "home").mkdir()
+        genv = {**os.environ, **bare}
+        for argv in (["git", "init", "-q", "-b", "main"],
+                     ["git", "config", "user.useConfigOnly", "true"],
+                     ["git", "-c", "user.email=v@e", "-c", "user.name=v",
+                      "commit", "-q", "--allow-empty", "-m", "init"]):
+            subprocess.run(argv, cwd=project, env=genv, capture_output=True)
+        if _run_script(project, "init", "--backend", "fs", env=bare).returncode != 0:
+            err("merge identity: init failed")
+            return
+        subprocess.run(["git", "checkout", "-q", "-b", "feature/id"], cwd=project,
+                       env=genv, capture_output=True)
+        (Path(project) / "x.txt").write_text("x\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, env=genv, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=v@e", "-c", "user.name=v",
+                        "commit", "-q", "-m", "work"], cwd=project, env=genv,
+                       capture_output=True)
+
+        out = _run_script(project, "merge", "--key", "ID-1", "--summary", "s", env=bare)
+        text = out.stdout + out.stderr
+        if out.returncode == 0:
+            err("merge identity: merged with no committer identity configured")
+        if "identity" not in text.lower():
+            err("merge identity: refused without naming the reason or the fix")
+        on = subprocess.run(["git", "branch", "--show-current"], cwd=project,
+                            env=genv, capture_output=True, text=True).stdout.strip()
+        if on != "feature/id":
+            err(f"merge identity: left the repository on '{on}' — the refusal must touch "
+                "nothing, including which branch you are standing on")
+        if (Path(project) / "docs" / "MERGES.md").exists():
+            err("merge identity: recorded a merge that never happened")
+
+
 def check_merge_releases_only_its_key() -> None:
     """`merge --key` releases that lease and leaves the others held.
 
@@ -1923,7 +1985,10 @@ def check_merge_releases_only_its_key() -> None:
 
         out = _run_script(project, "merge", "--key", "LANDS-1", "--summary", "landed")
         if out.returncode != 0:
-            err(f"merge key-release: the merge itself failed ({out.stdout.strip()[-120:]})")
+            # stderr first: the reason lives there, and printing the tail of stdout gave
+            # "…1 file changed, 1 insertion(+)" as the explanation for a failure.
+            why = (out.stderr.strip() or out.stdout.strip()).splitlines()
+            err(f"merge key-release: the merge itself failed — {why[-1] if why else '(silent)'}")
             return
         held = _run_script(project, "whoami").stdout
         if "LANDS-1" in held:
@@ -1977,6 +2042,7 @@ def main() -> int:
     check_commands_work_without_the_family_installed()
     check_two_agents_cannot_share_one_task()
     check_guard_covers_every_write_shape()
+    check_merge_refuses_without_an_identity()
     check_merge_releases_only_its_key()
 
     for n in notes:
@@ -2204,6 +2270,11 @@ def self_test() -> int:
             lambda t: t.replace(
                 "        to_release = [args.key] if args.key in held else []",
                 "        to_release = list(held)")),
+        "merge starts without checking for an identity": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda s: s.replace(
+                '    ident = subprocess.run(["git", "var", "GIT_COMMITTER_IDENT"],',
+                '    ident = subprocess.run(["git", "var", "GIT_AUTHOR_DATE"],')),
         "stray SKILL.md": (None, None),
     }
     # Each case runs as its own PROCESS, and they run concurrently.

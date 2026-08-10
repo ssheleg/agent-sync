@@ -3423,6 +3423,21 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise Fail(f"working tree is not clean ({len(dirty)} path(s)) — commit or stash first; "
                    "a merge cannot tell your uncommitted work from the branch's")
 
+    # A merge commit is authorship, so it needs a real identity — unlike a lease object,
+    # which is plumbing and is written with a synthetic one on purpose. Checked HERE
+    # because everything in this command is checked before anything is touched: without
+    # it the merge starts, git refuses at the commit, and the abort path runs. That is
+    # recoverable and it is still not what this command promises. It is also the ordinary
+    # state of a CI runner and a fresh container, which is where it was found.
+    ident = subprocess.run(["git", "var", "GIT_COMMITTER_IDENT"],
+                           capture_output=True, text=True)
+    if ident.returncode != 0:
+        why = (ident.stderr or "").strip().splitlines()
+        raise Fail("git has no committer identity here, so the merge commit cannot be "
+                   "written. Set one and run this again — nothing was touched:\n"
+                   "  git config user.name '<you>' && git config user.email '<you@example>'"
+                   + (f"\n  ({why[-1]})" if why else ""))
+
     git("fetch", "--quiet", "origin", target)
     upstream = f"origin/{target}" if git("rev-parse", "--verify", "--quiet", f"origin/{target}") else target
 

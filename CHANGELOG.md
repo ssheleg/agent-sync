@@ -63,7 +63,14 @@ word earns a document.
 `actions/checkout@v5`, `actions/setup-node@v5`, `actions/setup-python@v6` — the v4 pins were being
 forced onto Node 24 by the runner and annotated every release.
 
-The validator now runs 43 checks and plants and catches 36 distinct defects.
+`merge` also gained a preflight it was missing. A merge commit is authorship, so it needs a real
+git identity — unlike a lease object, which is plumbing and is written with a synthetic one on
+purpose. Without one the merge started, git refused at the commit, and the abort path ran: it
+recovers, and it is still not what a command whose whole doctrine is *every check before anything
+is touched* promises. Found by CI, because a runner has no global `.gitconfig` and this machine
+does — the same blind spot, twice in one day.
+
+The validator now runs 44 checks and plants and catches 37 distinct defects.
 
 ## v1.7.1
 
