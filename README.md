@@ -448,7 +448,7 @@ npm test                             # both of the above
 ```
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
-scripts, the slash command, `agent-sync.schema.json`, and eight reference contracts the
+scripts, the slash command, `agent-sync.schema.json`, and ten reference contracts the
 agent loads on their own trigger rather than by default:
 
 | Reference | Read it when |
