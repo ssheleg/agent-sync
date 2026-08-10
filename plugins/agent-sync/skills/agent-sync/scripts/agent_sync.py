@@ -2441,12 +2441,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
     if drift:
         print(f"\n  Mirror drift ({len(drift)} page(s)): regenerate with `board --mirror`")
 
-    if not pipeline_installed():
-        print("\n✗ task-pipeline is not installed. agent-sync binds to its stages and")
-        print("  will not improvise a substitute flow.")
-        print("\nNEXT:\n  npx sshlg-skills install")
-        return 1
-
     if plane_broken:
         print("\nNEXT: repair the coordination plane — until it reads, this run is working")
         print("  blind to every other one.")
@@ -2455,6 +2449,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
     # The same verdict `check` gives, from the command every session actually runs. Two
     # commands answering one question differently is how a broken setup stays invisible:
     # `status` used to print "NEXT: acquire a lease" on a project `check` called unhealthy.
+    #
+    # Reported BEFORE the task-pipeline gate, and the order is the point: this is a fact
+    # about the project, that is a fact about the machine. Behind the gate, a defect in
+    # the project stayed invisible on every machine without the dependency installed —
+    # which is every CI runner, and is how this ordering was found.
     try:
         _ok, _warn, setup_problems = check_setup(root)
     except Fail as exc:
@@ -2467,6 +2466,12 @@ def cmd_status(_args: argparse.Namespace) -> int:
             print(f"    · … and {len(setup_problems) - 4} more")
         print("\nNEXT: fix the setup before coordinating on it —")
         print("  agent_sync.py check")
+        return 1
+
+    if not pipeline_installed():
+        print("\n✗ task-pipeline is not installed. agent-sync binds to its stages and")
+        print("  will not improvise a substitute flow.")
+        print("\nNEXT:\n  npx sshlg-skills install")
         return 1
 
     print("\nNEXT: acquire a lease before you touch a guarded file —")

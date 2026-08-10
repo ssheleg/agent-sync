@@ -61,6 +61,18 @@ and `check` now says plainly that nothing shipped reads it.
 `os.uname()` and a literal `/dev/null` are gone in favour of `platform.node()` and `os.devnull`;
 the coordinator now runs wherever python3 does, and only the enforcement hooks need bash.
 
+### The setup verdict sat behind the task-pipeline gate
+
+`status` checked for `task-pipeline` and returned before it ever reported on the project. On any
+machine without the dependency installed — every CI runner — a project defect was therefore
+invisible: the command exited non-zero for a reason that had nothing to do with it. The order is
+now project first, machine second, because one is a fact about the repository everyone shares and
+the other is a fact about the box you happen to be on.
+
+Found by CI, on the release run for this very version, against a check that had passed locally
+all day — and the check has been tightened to assert the problem is *named*, not merely that the
+exit code is non-zero.
+
 ### Three tagged releases never reached npm
 
 `v1.5.0`, `v1.5.1` and `v1.5.2` each pushed a tag, ran the release workflow, and failed at the same

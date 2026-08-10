@@ -1418,8 +1418,12 @@ def check_status_reports_the_setup_verdict() -> None:
             err("status verdict: the fixture is wrong — `check` considers this setup healthy")
             return
         out = _run_script(project, "status")
-        text = (out.stdout + out.stderr).lower()
-        if out.returncode == 0 or "check" not in text:
+        text = out.stdout + out.stderr
+        # Assert the PROBLEM is named, not merely that the exit code is non-zero: on a
+        # machine without task-pipeline `status` already exited 1 for an unrelated reason,
+        # and a check that only reads the code passes while the project defect stays
+        # invisible. That is how the ordering bug reached CI.
+        if out.returncode == 0 or "guards nothing" not in text:
             err("status verdict: `status` reported normally on a setup `check` fails — two "
                 "commands, two answers about one project, and the agent only reads the first")
 
