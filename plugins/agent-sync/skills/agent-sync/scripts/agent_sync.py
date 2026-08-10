@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -231,16 +231,39 @@ def matches_glob(rel: str, pattern: str) -> bool:
     return bool(rx.match(rel.replace(os.sep, "/")))
 
 
+def _tracked_files(root: Path) -> list[str]:
+    """Every candidate path in the repository, walked ONCE.
+
+    `glob_files` used to walk the whole tree per pattern, and `check` calls it for every
+    guarded pattern and every claim-tag pattern — five patterns over a 20 000-file
+    repository is five full walks. Measured at ~3 s for a single `status`, which since
+    1.7.0 runs `check`, and `status` is a `SessionStart` hook. Git's own index is used
+    where it exists, because it already excludes everything `.gitignore` does; the walk
+    is the fallback for files not yet tracked.
+    """
+    listed = git("ls-files", "--cached", "--others", "--exclude-standard", cwd=root)
+    if listed:
+        return listed.split("\n")
+    skip = {".git", "node_modules", STATE_DIR.name}
+    out: list[str] = []
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if skip & set(rel.parts):
+            continue
+        if path.is_file():
+            out.append(str(rel))
+    return out
+
+
 def glob_files(root: Path, pattern: str) -> list[Path]:
     """Every existing file the pattern covers, by the same rule the guard applies."""
-    skip = {".git", "node_modules", STATE_DIR.name}
-    out: list[Path] = []
-    for path in root.rglob("*"):
-        if skip & set(path.relative_to(root).parts):
-            continue
-        if path.is_file() and matches_glob(str(path.relative_to(root)), pattern):
-            out.append(path)
-    return out
+    return [root / rel for rel in _tracked_files(root) if matches_glob(rel, pattern)]
+
+
+def glob_files_many(root: Path, patterns: list[str]) -> dict[str, list[Path]]:
+    """The same answer for several patterns, from one walk."""
+    files = _tracked_files(root)
+    return {p: [root / rel for rel in files if matches_glob(rel, p)] for p in patterns}
 
 
 # --------------------------------------------------------------------------- config
@@ -3155,9 +3178,11 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
             ok.append(f"register {reg} allocates from {spec['file']} ({reg}-{m.group(1)})")
 
     # A guard glob that matches nothing protects nothing. Resolved by the same function
-    # the guard itself applies, so the two commands cannot disagree about one pattern.
+    # the guard itself applies, so the two commands cannot disagree about one pattern —
+    # and from one walk of the repository, not one per pattern.
+    guard_hits = glob_files_many(root, list(cfg.get("guardedFiles") or []))
     for pattern in (cfg.get("guardedFiles") or []):
-        hits = glob_files(root, pattern)
+        hits = guard_hits.get(pattern) or []
         if not hits:
             problems.append(f"guarded pattern '{pattern}' matches no file — it guards nothing")
     if cfg.get("guardedFiles"):
@@ -3165,8 +3190,9 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
     else:
         warn.append("no guarded files — nothing requires a lease in this repository")
 
+    claim_hits = glob_files_many(root, list(cfg.get("claimTags") or {}))
     for pattern, spec in (cfg.get("claimTags") or {}).items():
-        files = glob_files(root, pattern)
+        files = claim_hits.get(pattern) or []
         if not files:
             problems.append(f"claimTags pattern '{pattern}' matches no file")
             continue

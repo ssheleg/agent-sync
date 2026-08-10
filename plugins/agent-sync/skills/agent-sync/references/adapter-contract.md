@@ -1,3 +1,11 @@
+> **`settleSeconds` is this contract's extension point, and nothing shipped reads it.**
+> It exists for an adapter whose writes are not immediately visible to a subsequent read —
+> a store with an asynchronous index, where a reader must wait before replaying. Neither
+> `outline` nor `fs` needs it, so `check` says plainly that setting it does nothing here.
+> It is kept rather than removed because deleting it would make every config carrying one
+> fail validation to buy nothing, and because an adapter that needs it has nowhere else to
+> ask. If you add a backend that waits, this is the knob; if you do not, ignore it.
+
 # Adapter contract
 
 **Read this when** adding a knowledge backend, auditing one, or deciding whether a

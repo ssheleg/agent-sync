@@ -8,17 +8,23 @@ anything that can make the tool report something untrue outranks both.
 
 | ID | Priority | What | Why it is here | Source |
 |---|---|---|---|---|
-| B-001 | high | Give REQ-20 a check of its own — `merge --key` releases that lease and leaves the others held | Verified by reading the code this run. Every defect the 2026-08-10 audit found was in something verified by reading | audit 2026-08-10 / run of 2026-08-10 |
-| B-002 | medium | Decide whether `settleSeconds` stays | It is in the schema, nothing shipped reads it, and `check` now says so. Either an adapter needs it or 2.0 removes it — a knob that only warns is a decision postponed | audit 2026-08-10 (D1) |
-| B-003 | medium | `status` now runs the full `check`, which walks the repository for guard globs | On a very large repository that is a `SessionStart` hook doing an `rglob("*")`. Measure it; cache or narrow if it costs more than a second | run of 2026-08-10 (REQ-15) |
-| B-004 | low | Blockers were removed as a log nothing wrote | If blockers are wanted they need a real writer, a reader and a place on the board — not a document that exists so the word appears | audit 2026-08-10 (D2) |
-| B-005 | low | The run-id resolution walks up to ten `ps` calls when no id is in the environment | ~100 ms per guarded edit today, which is fine. It becomes worth caching if the guard ever runs on more than `Edit`-shaped tools | audit 2026-08-10 (D10) |
-| B-007 | low | `actions/checkout@v4` and `actions/setup-node@v4` target Node 20 | Both are being forced onto Node 24 by the runner and annotate every release. They work today; they will stop | release run 31374955487 |
-| B-008 | medium | The validator has no way to run as a machine without this family installed | The task-pipeline ordering defect was invisible locally and obvious on CI. A `HOME`-isolated mode would catch that class before the tag, not after | run of 2026-08-10 |
-| B-009 | high | Gate the two scenarios driven by hand in the second audit — two agents contending for one task, and the guard across every tool shape and commit form | Both behaved correctly when executed, and neither has a check that fails on its own. They are the tool's whole purpose; "worked when I tried it" is the state the first audit found everything in | audit 2026-08-10 (second pass) |
-| B-010 | medium | The self-test takes ~6 minutes and is growing linearly with fixtures | 32 cases × a full `main()` each. It already exceeded a 10-minute command budget once. Run the fixtures in parallel, or scope each to the checks it can trip | run of 2026-08-10 |
+| — | — | *(nothing open)* | Every row opened by the two 2026-08-10 audits is closed below, each with what closed it | — |
 
-## Closed by the run of 2026-08-10
+## Closed by the board-clearing run of 2026-08-10
+
+| ID | What closed it |
+|---|---|
+| B-001 | `check_merge_releases_only_its_key` — two leases held, one landed, the other must still be held |
+| B-002 | **Decision: it stays.** `settleSeconds` is the adapter contract's extension point for a store whose writes are not immediately readable. Removing it would fail every config that carries one to buy nothing; `check` already says nothing shipped reads it. Written into `references/adapter-contract.md` so the next reader finds the reasoning, not the silence |
+| B-003 | Measured, then fixed: `status` on a 20 000-file repository with five guarded patterns took **3.2 s** because the tree was walked once *per pattern*. One walk, reusing git's index where it exists — **0.5 s**, same output |
+| B-004 | **Decision: blockers stay gone.** The concept needs a writer, a reader and a place on the board before the word earns a document. Nothing is worse than a page that reads "no blockers" because nothing ever writes one |
+| B-005 | Measured: **130–220 ms** per guarded edit with no run id in the environment, against a `PreToolUse` budget of 20 s. Acceptable; no change. Recorded so the next person does not re-derive it |
+| B-007 | `actions/checkout@v5`, `actions/setup-node@v5`, `actions/setup-python@v6` |
+| B-008 | `check_commands_work_without_the_family_installed` — runs with `HOME` redirected, and proves the isolation on a healthy project before asserting on a broken one |
+| B-009 | `check_two_agents_cannot_share_one_task` and `check_guard_covers_every_write_shape` — nine payload shapes, both with and without the lease |
+| B-010 | Self-test runs each fixture as its own process, eight at a time: **6 min → 2.8 min**, and the global-state reset that made parallelism impossible is gone |
+
+## Closed by the earlier runs of 2026-08-10
 
 - REQ-01 … REQ-19, REQ-21 — see `verification.md` for what verifies each one now.
 - **B-006 — publish.** Done: `v1.7.0` tagged and released, npm moved 1.4.3 → 1.7.0, GitHub release

@@ -1,3 +1,70 @@
+## v1.8.0
+
+**The board, cleared.** Nine rows opened by the two audits of 2026-08-10, closed with a check, a
+measurement or a written decision — because a backlog nobody empties is a list of things everyone
+has agreed to stop seeing.
+
+### The two scenarios that were only ever driven by hand are now gated
+
+Two agents contending for one task, and the guard across every shape a write arrives in, were
+verified by executing them and had no check that fails on its own — the exact state in which the
+first audit found six shipped defects. `check_two_agents_cannot_share_one_task` drives the full
+sequence from two identities: the second run loses, is told who holds it, sees the holding in
+`status`, is denied the guarded registry, cannot release a lease it does not hold, and the holder
+can. `check_guard_covers_every_write_shape` drives nine payloads through the real hook — `Edit`,
+`Write`, `NotebookEdit`, an unguarded file, `git commit`, `git -C <dir> commit`,
+`cd <dir> && git commit`, `git log --grep=commit`, and malformed input — with and without the lease.
+
+Planting the first defect took two mutations, not one, and that is worth recording: breaking only
+`acquire`'s expiry check still refuses the steal, because `_steal_expired` re-reads the expiry
+**inside** the critical section. The exclusion has two independent layers. The single-point fixture
+was MISSED, which is how that was discovered.
+
+### `check_merge_releases_only_its_key`
+
+`merge --key` must release that lease and leave the others held. It was verified by reading the
+code, and every defect the first audit found was in something verified by reading.
+
+### `status` on a large repository: 3.2 s → 0.5 s
+
+`check` resolved guarded and claim-tag patterns by walking the whole tree **once per pattern** —
+five patterns over a 20 000-file repository is five full walks, measured at 3.2 s for a single
+`status`, which is a `SessionStart` hook. It now walks once, and uses git's own index where there is
+one, so `.gitignore` is honoured for free. Same output, six times faster.
+
+### `check_commands_work_without_the_family_installed`
+
+Runs the commands with `HOME` redirected at an empty directory — the state of every CI runner, and
+where the task-pipeline ordering defect was obvious while this development machine could not see it.
+The check proves its own isolation on a healthy project before asserting on a broken one, because a
+probe that cannot fail is not a probe.
+
+### The self-test: 6 min → 2.8 min
+
+Each fixture now runs as its own process, eight at a time. It was a loop that reassigned module
+globals and called `main()` in-band, once per fixture; at 32 fixtures it had already blown a
+ten-minute command budget, and a suite people stop running is a suite that does not exist. The
+subprocess also removes the global-state reset that made parallelism impossible.
+
+### Decisions recorded rather than deferred again
+
+**`settleSeconds` stays.** It is the adapter contract's extension point for a store whose writes are
+not immediately readable; removing it would fail every config that carries one to buy nothing.
+Written into `references/adapter-contract.md`, where the next reader will look.
+
+**Blockers stay gone.** The concept needs a writer, a reader and a place on the board before the
+word earns a document.
+
+**Guard latency is fine:** 130–220 ms per guarded edit with no run id in the environment, against a
+`PreToolUse` budget of 20 s. Measured, recorded, no change.
+
+### Also
+
+`actions/checkout@v5`, `actions/setup-node@v5`, `actions/setup-python@v6` — the v4 pins were being
+forced onto Node 24 by the runner and annotated every release.
+
+The validator now runs 43 checks and plants and catches 36 distinct defects.
+
 ## v1.7.1
 
 **A second audit, along a different axis: not whether the tool keeps its promises, but whether an

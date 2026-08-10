@@ -1712,6 +1712,227 @@ def check_skill_gives_a_resolvable_script_path() -> None:
             "resolvable value or a way to find it — the agent guesses at the first step")
 
 
+def check_commands_work_without_the_family_installed() -> None:
+    """Run the commands as a machine that has none of this skill family.
+
+    That is every CI runner, and it is where `status` was found reporting the
+    task-pipeline gate *before* the project's own problems — so on any such machine a
+    defect in the repository was invisible behind a fact about the box. The class is
+    broader than that one bug: this development machine has every dependency, so any
+    behaviour that only appears without them ships unseen. `HOME` is redirected, which is
+    what `pipeline_installed()` reads.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — bare-machine check skipped")
+        return
+    with tempfile.TemporaryDirectory() as bare:
+        home = Path(bare) / "home"
+        home.mkdir()
+        project = Path(bare) / "project"
+        project.mkdir()
+        _git_project(str(project))
+        isolated = {"HOME": str(home)}
+        if _run_script(str(project), "init", "--backend", "fs",
+                       env=isolated).returncode != 0:
+            err("bare machine: init failed without the family installed")
+            return
+
+        # First prove the isolation itself, on a project with nothing else wrong: a
+        # healthy setup reaches the machine gate, so the message is the receipt that
+        # `HOME` really was redirected. Asserting it on the broken project below would be
+        # a false alarm — `status` returns at the project verdict and never gets there.
+        _run_script(str(project), "setup", env=isolated)
+        (project / "AGENTS.md").write_text("See AGENT_SYNC.md\n")
+        healthy = _run_script(str(project), "status", env=isolated)
+        if "task-pipeline is not installed" not in (healthy.stdout + healthy.stderr):
+            notes.append("bare machine: HOME was redirected but the family was still "
+                         "found — this check is not proving what it claims")
+
+        # Now the assertion: a project defect must be reported even though the machine is
+        # missing a dependency, because otherwise no CI runner can ever see one.
+        _write_cfg(str(project), guardedFiles=["docs/NOTHING_HERE.md"])
+        out = _run_script(str(project), "status", env=isolated)
+        text = out.stdout + out.stderr
+        if "guards nothing" not in text:
+            err("bare machine: `status` never reported the project's own problem — it is "
+                "behind a gate about the machine, so on any runner the defect is invisible")
+        if out.returncode == 0:
+            err("bare machine: `status` exited 0 on a project it should have failed")
+
+
+def check_two_agents_cannot_share_one_task() -> None:
+    """The whole purpose of this tool, driven end to end by two identities.
+
+    Every part of it was verified by hand in the 2026-08-10 audits and none of it had a
+    check that fails on its own — which is the exact state in which that audit found six
+    shipped defects. "It worked when I tried it" is evidence about that afternoon.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — two-agent scenario skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        (Path(project) / "DECISIONS.md").write_text("# Decisions\n")
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("two agents: init failed")
+            return
+        _write_cfg(project, guardedFiles=["DECISIONS.md"])
+
+        first = _run_script(project, "acquire", "TASK-1", run_id="alice")
+        if "won" not in first.stdout:
+            err("two agents: the first run could not take the task")
+            return
+
+        second = _run_script(project, "acquire", "TASK-1", run_id="bob")
+        if second.returncode == 0 or "lost" not in second.stdout:
+            err("two agents: the second run also took a task the first one holds — the "
+                "lease is decoration")
+        if "alice" not in second.stdout:
+            err("two agents: the loser is not told who holds it, so it knows it is blocked "
+                "and nothing about by whom")
+
+        aware = _run_script(project, "status", run_id="bob")
+        if "TASK-1" not in aware.stdout or "alice" not in aware.stdout:
+            err("two agents: `status` does not show the other run's holding — awareness is "
+                "the half of coordination that is not exclusion")
+
+        denied = _run_script(project, "guard", "DECISIONS.md", run_id="bob")
+        if denied.returncode != 2:
+            err("two agents: the run holding nothing may write the guarded registry")
+
+        allowed = _run_script(project, "guard", "DECISIONS.md", run_id="alice")
+        if allowed.returncode != 0:
+            err("two agents: the holder is denied its own guarded file")
+
+        stolen = _run_script(project, "release", "TASK-1", run_id="bob")
+        if stolen.returncode == 0:
+            err("two agents: a run released a lease it never held")
+        if "TASK-1" not in _run_script(project, "whoami", run_id="alice").stdout:
+            err("two agents: the holder lost its lease to a run that did not hold it")
+
+        if _run_script(project, "release", "TASK-1", run_id="alice").returncode != 0:
+            err("two agents: the holder could not release its own lease")
+
+
+GUARD_SHAPES = [
+    # (label, payload, expect_blocked)
+    ("Edit", '{"tool_name":"Edit","tool_input":{"file_path":"DECISIONS.md"}}', True),
+    ("Write", '{"tool_name":"Write","tool_input":{"file_path":"DECISIONS.md"}}', True),
+    ("NotebookEdit",
+     '{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"DECISIONS.md"}}', True),
+    ("an unguarded file", '{"tool_name":"Edit","tool_input":{"file_path":"README.md"}}', False),
+    ("git commit", '{"tool_name":"Bash","tool_input":{"command":"git commit -m wip"}}', True),
+    ("git -C <dir> commit",
+     '{"tool_name":"Bash","tool_input":{"command":"git -C %(dir)s commit -m wip"}}', True),
+    ("cd <dir> && git commit",
+     '{"tool_name":"Bash","tool_input":{"command":"cd %(dir)s && git commit -m wip"}}', True),
+    ("git log --grep=commit",
+     '{"tool_name":"Bash","tool_input":{"command":"git log --grep=commit"}}', False),
+    ("malformed input", "not json at all", False),
+]
+
+
+def check_guard_covers_every_write_shape() -> None:
+    """The enforcement path agents actually hit, in every shape it arrives in.
+
+    `guard.sh` shipped for eleven versions blocking every commit in unconfigured
+    repositories, and separately missed `git -C <dir> commit` entirely for a full day of
+    commits to guarded registers — with the Edit half refusing correctly the whole time,
+    so the protection looked present. Shapes are cheap to add and expensive to miss.
+    """
+    hooks = ROOT / "plugins" / "agent-sync" / "hooks"
+    if not shutil.which("git") or not (hooks / "guard.sh").exists():
+        notes.append("git or guard.sh not found — guard shape check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        (Path(project) / "DECISIONS.md").write_text("# Decisions\n")
+        (Path(project) / "README.md").write_text("# readme\n")
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("guard shapes: init failed")
+            return
+        _write_cfg(project, guardedFiles=["DECISIONS.md"])
+        subprocess.run(["git", "add", "DECISIONS.md"], cwd=project, capture_output=True)
+
+        env = {**os.environ,
+               "CLAUDE_PLUGIN_ROOT": str(ROOT / "plugins" / "agent-sync"),
+               "CLAUDE_PROJECT_DIR": project,
+               "AGENT_SYNC_RUN_ID": "nobody"}
+        for label, payload, blocked in GUARD_SHAPES:
+            r = subprocess.run(["bash", str(hooks / "guard.sh")],
+                               input=payload % {"dir": project} if "%(dir)s" in payload
+                               else payload,
+                               cwd=project, env=env, capture_output=True, text=True,
+                               timeout=60)
+            if blocked and r.returncode != 2:
+                err(f"guard shapes: `{label}` reached a guarded file with no lease "
+                    f"(exit {r.returncode}) — anything but 2 is non-blocking")
+            if not blocked and r.returncode != 0:
+                err(f"guard shapes: `{label}` was blocked and should not be "
+                    f"(exit {r.returncode})")
+
+        # And with the lease held, the same writes go through.
+        _run_script(project, "acquire", "SHAPE-1", run_id="holder")
+        env["AGENT_SYNC_RUN_ID"] = "holder"
+        for label, payload, blocked in GUARD_SHAPES:
+            if not blocked:
+                continue
+            r = subprocess.run(["bash", str(hooks / "guard.sh")],
+                               input=payload % {"dir": project} if "%(dir)s" in payload
+                               else payload,
+                               cwd=project, env=env, capture_output=True, text=True,
+                               timeout=60)
+            if r.returncode != 0:
+                err(f"guard shapes: `{label}` is denied to the run that holds the lease — "
+                    "the guarded files are unwritable by anyone")
+
+
+def check_merge_releases_only_its_key() -> None:
+    """`merge --key` releases that lease and leaves the others held.
+
+    It used to release every lease the run held, which is a different statement from the
+    one the documentation makes and quietly frees work that has not landed.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — merge key-release check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        (Path(project) / "f.txt").write_text("base\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=v@e", "-c", "user.name=v",
+                        "commit", "-q", "-m", "base"], cwd=project, capture_output=True)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("merge key-release: init failed")
+            return
+        subprocess.run(["git", "add", "-A"], cwd=project, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=v@e", "-c", "user.name=v",
+                        "commit", "-q", "-m", "cfg"], cwd=project, capture_output=True)
+
+        for key in ("LANDS-1", "STAYS-2"):
+            if "won" not in _run_script(project, "acquire", key).stdout:
+                err(f"merge key-release: could not acquire {key}")
+                return
+
+        subprocess.run(["git", "checkout", "-q", "-b", "feature/z"], cwd=project,
+                       capture_output=True)
+        (Path(project) / "g.txt").write_text("mine\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=v@e", "-c", "user.name=v",
+                        "commit", "-q", "-m", "mine"], cwd=project, capture_output=True)
+
+        out = _run_script(project, "merge", "--key", "LANDS-1", "--summary", "landed")
+        if out.returncode != 0:
+            err(f"merge key-release: the merge itself failed ({out.stdout.strip()[-120:]})")
+            return
+        held = _run_script(project, "whoami").stdout
+        if "LANDS-1" in held:
+            err("merge key-release: the lease the merge landed is still held")
+        if "STAYS-2" not in held:
+            err("merge key-release: a lease this merge did not land was released — work "
+                "that has not landed is now advertised as free")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -1753,6 +1974,10 @@ def main() -> int:
     check_generated_docs_carry_current_doctrine()
     check_registers_need_a_backend_that_can_reserve()
     check_skill_gives_a_resolvable_script_path()
+    check_commands_work_without_the_family_installed()
+    check_two_agents_cannot_share_one_task()
+    check_guard_covers_every_write_shape()
+    check_merge_releases_only_its_key()
 
     for n in notes:
         print(f"note: {n}")
@@ -1941,32 +2166,89 @@ def self_test() -> int:
                 "under the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once\n"
                 "per session and reuse it — do not guess a path.",
                 "`$SKILL_DIR` is this skill's own directory.")),
+        # --- the scenarios that were only ever driven by hand ---
+        # A live holder read as expired. BOTH guards have to go: `acquire` checks the
+        # expiry, and `_steal_expired` re-checks it inside the critical section, so
+        # breaking either one alone still refuses the steal. That the single-point
+        # mutation was MISSED is the reassuring half of this fixture — the exclusion has
+        # two independent layers — and the reason the fixture plants both.
+        "a live lease can be taken by a second run": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                '            if time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):\n'
+                '                return False, held.get("run")',
+                "            if False:\n"
+                '                return False, held.get("run")')
+             .replace(
+                '            if held and time.time() <= parse_iso(held.get("ts", "")) + int(\n'
+                '                    held.get("ttl", self.ttl)):\n'
+                "                return False",
+                "            if False:\n"
+                "                return False")),
+        # The setup verdict back behind the machine gate — invisible on every runner.
+        "the project verdict hides behind the machine gate": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                "    try:\n        _ok, _warn, setup_problems = check_setup(root)",
+                "    if not pipeline_installed():\n        return 1\n"
+                "    try:\n        _ok, _warn, setup_problems = check_setup(root)")),
+        # The commit branch of the guard stops recognising a commit — the shape of the
+        # defect that let a full day of commits reach guarded registers.
+        "the guard stops seeing commits": (
+            "plugins/agent-sync/hooks/guard.sh",
+            lambda t: t.replace('if k < len(toks) and toks[k] == "commit":',
+                                'if k < len(toks) and toks[k] == "kommit":')),
+        # merge back to releasing everything the run holds.
+        "merge releases leases it did not land": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                "        to_release = [args.key] if args.key in held else []",
+                "        to_release = list(held)")),
         "stray SKILL.md": (None, None),
     }
+    # Each case runs as its own PROCESS, and they run concurrently.
+    #
+    # It used to be a loop that reassigned the module globals `ROOT`, `errors` and `notes`
+    # and called `main()` in-process. That is a full validator run per case, one after
+    # another: at 32 fixtures it took six minutes and had already blown a ten-minute
+    # command budget once — and a suite people stop running is a suite that does not
+    # exist. A subprocess per case also removes the global-state reset, which was the
+    # reason parallelism was impossible.
     original_root = ROOT
-    failures = []
-    for label, (target, mutate) in cases.items():
+    workers = max(1, min(8, (os.cpu_count() or 2) - 1))
+
+    def run_case(item: tuple[str, tuple]) -> tuple[str, int]:
+        label, (target, mutate) = item
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "repo"
             shutil.copytree(original_root, work,
-                            ignore=shutil.ignore_patterns(".git", "node_modules"))
+                            ignore=shutil.ignore_patterns(".git", "node_modules",
+                                                          "__pycache__", ".agent-sync"))
             if target is None:
                 (work / "templates").mkdir(exist_ok=True)
                 (work / "templates" / "SKILL.md").write_text("---\nname: x\n---\n")
             else:
                 p = work / target
                 p.write_text(mutate(p.read_text()))
-            ROOT = work
-            errors, notes = [], []
-            rc = main()
-            if rc == 0:
-                failures.append(label)
-            print(f"  self-test [{label}]: {'detected' if rc else 'MISSED'}")
-    ROOT = original_root
+            r = subprocess.run([sys.executable, str(work / "test" / "validate.py")],
+                               capture_output=True, text=True, timeout=900)
+            return label, r.returncode
+
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        results = dict(pool.map(run_case, cases.items()))
+
+    # Reported in declaration order, whatever order they finished in: a suite whose
+    # output reshuffles between runs cannot be diffed.
+    failures = [label for label in cases if results.get(label, 0) == 0]
+    for label in cases:
+        print(f"  self-test [{label}]: "
+              f"{'detected' if results.get(label, 0) else 'MISSED'}")
     if failures:
         print(f"\nSELF-TEST FAILED — undetected: {failures}")
         return 1
-    print("\nSELF-TEST PASS: every injected defect was caught")
+    print(f"\nSELF-TEST PASS: every injected defect was caught "
+          f"({len(cases)} fixtures, {workers} at a time)")
     return 0
 
 
