@@ -1,3 +1,76 @@
+## v1.6.0
+
+**Four guarantees that were described but not delivered, and the one number now stated once.**
+1.5.3 stopped the tool reporting things that were untrue; this release makes the properties it
+claims actually hold, each with a check that has been watched fail against the defect it exists to
+catch.
+
+### Stealing an expired lease had a window two runs could both pass through
+
+`unlink` then `O_EXCL create` are two operations. A second stealer that has already read the lock
+as expired removes the lock the first one just created, and both then hold what each believes is an
+exclusive lease. Twelve racing processes never exposed it — with a 300 ms delay injected between the
+two calls, two of two won, and in production that delay is an ordinary scheduler hiccup.
+
+The reap and the create are now one critical section: `<key>.lock.steal` is created with `O_EXCL`,
+the expiry is re-read **inside** it (the holder may have renewed; another stealer may have finished),
+and the section carries a 30-second abandonment grace, because without one a crash between two
+filesystem calls costs the key until a human deletes a file nobody documents.
+
+This mattered more after 1.5.3 than before it: with `renew` finally refreshing leases, the steal path
+stops being the common case — but for four versions every long task went through it.
+
+### `merge` measured one base and merged into another
+
+Conflicts and the diff were computed against `origin/<target>`; the merge was made into the **local**
+`<target>`, which nothing advances. So `merge` printed the staleness it had just measured — `main
+moved: 1 commit(s)` — then `✓ merged as …`, wrote a merge-log entry, released the lease, and the push
+was rejected as non-fast-forward. The work had not landed, `docs/MERGES.md` said it had, and the task
+was free for somebody else to take.
+
+The local integration branch is now fast-forwarded to its upstream before anything else, so the
+preflight and the merge share a base. One that has genuinely diverged cannot be fast-forwarded and is
+refused, with both counts named.
+
+### One glob meant two things
+
+The guard matched with `Path.match`, which anchors at the **right**: with `docs/DECISIONS.md` in
+`guardedFiles`, an edit to `vendor/docs/DECISIONS.md` was denied — a file `check` never enumerated
+and never validated, protected by a rule nobody wrote. In the other direction `Path.match` does not
+walk `**` before Python 3.13, so `docs/**/*.md` guarded less than `check` reported. A pattern that
+means two things means nothing. Both commands now resolve patterns through one function, anchored at
+the repository root.
+
+### The 2% rule was a constant nothing read
+
+`MAX_UNPARSEABLE` was declared in 1.0.0 and never referenced. `SKILL.md`, `lease-protocol.md` and the
+README all stated that a log past the threshold stops the run; the only implementation was a warning
+line on the board that returned 0. Every reader now refuses a log past the limit and names the ratio,
+so `status`, `board`, `check`, `reconcile` and `reserve` stop rather than replaying a partial history
+— which reports holders who do not exist and silence where the real ones are, both of which look like
+an answer.
+
+`acquire` is deliberately not in that list, and the documents now say so: a lease is decided by the
+lock or the ref, never by the log, so a corrupt log cannot make one look lost.
+
+### The stage binding said three different things
+
+`SKILL.md` announced "four of the eleven stages" and listed five (0, 1, 3, 9, 10); the README named
+0, 3, 4, 5, 9 and 10; `pipeline-binding.md` agreed with the README and separately called stage 1
+*"nothing shared to coordinate"* — the stage `reconcile` belongs to, and the one the tool's own
+doctrine says must resolve every divergence before code is written. An agent wiring `pipeline.json`
+from any one of the three got a pipeline missing a rule.
+
+The numbers now live in a marker in `pipeline-binding.md` — `rules=0,1,3,9,10`,
+`wired=0,1,3,4,5,9,10` — the two lists answer two different questions instead of being conflated,
+stage 1 has its row and its `pipeline.json` entry, and a check fails when a surface stops agreeing.
+
+### New checks
+
+`check_steal_is_atomic`, `check_merge_refuses_stale_target`, `check_guard_and_check_agree_on_globs`,
+`check_unparseable_log_fails_loudly`, `check_stage_binding_agrees` — plus five self-test fixtures
+planting each defect back.
+
 ## v1.5.3
 
 **Five surfaces told the caller something that was not true.** An audit on 2026-08-10 ran the

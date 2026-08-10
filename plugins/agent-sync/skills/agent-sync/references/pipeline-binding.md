@@ -5,12 +5,29 @@
 `agent-sync` supplies stages; it does not define them. The stage names below are
 `task-pipeline`'s own — do not rename, renumber or fork them.
 
+## The numbers, once
+
+<!-- agent-sync:stages rules=0,1,3,9,10 wired=0,1,3,4,5,9,10 -->
+
+Two different questions, and answering them in one list is why three documents once gave
+three answers:
+
+- **Stages carrying a rule — 0, 1, 3, 9, 10.** Something must happen there or the run is
+  wrong, and each rule is about ordering. Quoted in `SKILL.md`.
+- **Stages wired into `pipeline.json` — 0, 1, 3, 4, 5, 9, 10.** The list above plus the two
+  where the journal has teeth (file ownership, submodule pointers). Quoted in the README.
+
+`SKILL.md` said "four of the eleven stages" and then listed five; the README named a third
+set; and this file called stage 1 *"nothing shared to coordinate"* — the stage `reconcile`
+belongs to. The marker above is the source, and the validator fails when a surface stops
+agreeing with it.
+
 ## Where it plugs in
 
 | Stage | Calls | Why there and not elsewhere |
 |---|---|---|
 | **0 Intake grill** | `status`, then `acquire <KEY>` | The cloud KB and the board join the harvest's source ledger. The lease is taken **before the brief is committed**, or two agents write two briefs for one task |
-| **1 Docs study** | — | External docs; nothing shared to coordinate |
+| **1 Docs study** | `reconcile`, then resolve every divergence | The git documents say how it *should* be, the as-built record how it *is*. Building on an unresolved divergence is writing code against a system that does not exist — and this is the last stage where that costs nothing |
 | **2 Brainstorm + decompose** | `journal` | Also warns when a live run holds an overlapping key — cheapest moment to find the overlap |
 | **3 Spec** | `reserve <REG>` per id | Ids must be reserved *before* they are written to git. Reading "next free id" is not reserving it |
 | **4 Plan** | `journal` with the plan's file ownership | Parallel groups that write one file are a merge conflict scheduled for later |
@@ -33,6 +50,9 @@ clause to each of those stages' existing `gate.check`:
     { "id": 0,  "state": "intake",      "name": "Intake grill",
       "skills": ["task-pipeline:grill", "agent-sync"],
       "gate": { "type": "manual", "check": "<the stage's own criteria> AND the lease for this task is held before the brief is committed" } },
+    { "id": 1,  "state": "docs-study",  "name": "Docs study",
+      "skills": ["task-pipeline:knowledge", "agent-sync"],
+      "gate": { "type": "manual", "check": "<the stage's own criteria> AND `reconcile` ran and every divergence it named is resolved or recorded as standing" } },
     { "id": 3,  "state": "spec",        "name": "Spec",
       "skills": ["task-pipeline:spec", "agent-sync"],
       "gate": { "type": "manual", "check": "<the stage's own criteria> AND every id the spec writes was reserved first" } },
@@ -65,7 +85,7 @@ that copied it silently dropped the stage's real gate: stage 9 lost the propagat
 sweep and the documentation gate, stage 10 lost the ladder walk and the evidence
 rule.
 
-Stages 1, 2, 6, 7 and 8 keep their own `skills[]`; `agent-sync` only journals there,
+Stages 2, 6, 7 and 8 keep their own `skills[]`; `agent-sync` only journals there,
 which needs no wiring.
 
 ## What must be guarded

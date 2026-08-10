@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.5.3"
+VERSION = "1.6.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -87,6 +87,9 @@ MAX_UNPARSEABLE = 0.02
 DEFAULT_SETTLE = 3.0
 DEFAULT_TTL = 2700
 DEFAULT_RENEW = 300
+# How long a steal section may be held before it is treated as abandoned. It covers two
+# filesystem calls, so anything longer than this is a crashed process, not slow work.
+STEAL_GRACE = 30
 
 # Every key `.claude/agent-sync.json` may carry. One list, and `agent-sync.schema.json`
 # must agree with it exactly — the validator asserts that, because the two were already
@@ -190,6 +193,51 @@ def repo_name() -> str:
 
 class Fail(Exception):
     """A failure the caller must see. Never swallowed into a success."""
+
+
+_GLOB_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def matches_glob(rel: str, pattern: str) -> bool:
+    """Repo-root-anchored glob — ONE implementation, for the guard and for `check`.
+
+    They used to have two, and the two disagreed in both directions about the same
+    pattern. `Path.match` anchors at the RIGHT, so `docs/DECISIONS.md` also matched
+    `vendor/docs/DECISIONS.md` — a file `check` (which enumerates with `glob`) never saw
+    and never validated, guarded by a rule nobody wrote. And `Path.match` does not walk
+    `**` before Python 3.13, so `docs/**/*.md` guarded less than `check` reported it did.
+
+    A pattern that means two things means nothing, so the translation lives here: `**` is
+    zero or more directories, `*` and `?` never cross a separator, everything else is
+    literal, and the whole path must match from the repository root.
+    """
+    rx = _GLOB_CACHE.get(pattern)
+    if rx is None:
+        parts: list[str] = []
+        for seg in pattern.strip("/").split("/"):
+            if seg == "**":
+                parts.append("(?:[^/]+/)*")
+                continue
+            out = ""
+            for ch in seg:
+                out += "[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch)
+            parts.append(out + "/")
+        body = "".join(parts)
+        rx = re.compile("^" + (body[:-1] if body.endswith("/") else body) + "$")
+        _GLOB_CACHE[pattern] = rx
+    return bool(rx.match(rel.replace(os.sep, "/")))
+
+
+def glob_files(root: Path, pattern: str) -> list[Path]:
+    """Every existing file the pattern covers, by the same rule the guard applies."""
+    skip = {".git", "node_modules", STATE_DIR.name}
+    out: list[Path] = []
+    for path in root.rglob("*"):
+        if skip & set(path.relative_to(root).parts):
+            continue
+        if path.is_file() and matches_glob(str(path.relative_to(root)), pattern):
+            out.append(path)
+    return out
 
 
 # --------------------------------------------------------------------------- config
@@ -845,6 +893,20 @@ class Sync:
 
         # Deterministic for every reader: time, then run, then position within a shard.
         events.sort(key=lambda e: (e["ts"], e["run"], int(e["_i"])))
+
+        # Past the threshold the log is refused, not replayed. `MAX_UNPARSEABLE` was
+        # declared and never read: the only trace of this rule was a line on the board
+        # that printed a warning and returned 0, while SKILL.md, lease-protocol.md and the
+        # README all said a log this broken stops the run. Replaying it reports holders who
+        # do not exist and silence where the real ones are — which is strictly worse than
+        # refusing, because both look like an answer.
+        total = len(events) + bad
+        if total and bad / total > MAX_UNPARSEABLE:
+            raise Fail(
+                f"the {which} log is {bad}/{total} unparseable "
+                f"({bad / total:.0%}, over the {MAX_UNPARSEABLE:.0%} limit) — refusing to "
+                "replay it. Entry-shaped lines that do not match the grammar are counted, "
+                "never guessed at; fix or remove them (see references/lease-protocol.md)")
         return events, bad
 
     # -- leases ------------------------------------------------------------
@@ -965,6 +1027,51 @@ class Sync:
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{re.sub(r'[^A-Za-z0-9_-]', '-', key)}.lock"
 
+    def _steal_expired(self, lock: Path, payload: str) -> bool:
+        """Replace an expired lock — reap and create as ONE critical section.
+
+        They used to be two calls with a gap between them, and the gap is a hole in the
+        exclusion: a second stealer that has already read the lock as expired removes the
+        lock the first one just created, and both then hold what each believes is an
+        exclusive lease. Twelve racing processes never showed it; a 300 ms delay injected
+        between the two calls produced two winners out of two, and in production that
+        delay is an ordinary scheduler hiccup.
+
+        `O_EXCL` on a second name makes the section itself exclusive, and the expiry is
+        re-read INSIDE it — so a run that gets in after the winner sees a live lease and
+        loses, rather than reaping the lease it just missed. The section covers two
+        filesystem calls, so its own abandonment grace is short; without one, a crash
+        between them would cost the key until somebody deleted a file by hand.
+        """
+        guard = lock.with_name(lock.name + ".steal")
+        try:
+            if guard.exists() and time.time() - guard.stat().st_mtime > STEAL_GRACE:
+                guard.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except OSError:
+            return False                      # another run is stealing this very lock
+        try:
+            os.close(fd)
+            try:
+                held = json.loads(lock.read_text())
+            except (json.JSONDecodeError, OSError):
+                held = {}
+            if held and time.time() <= parse_iso(held.get("ts", "")) + int(
+                    held.get("ttl", self.ttl)):
+                return False                  # renewed, or already stolen and live again
+            lock.unlink(missing_ok=True)
+            fd2 = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd2, "w") as fh:
+                fh.write(payload)
+            return True
+        except OSError:
+            return False
+        finally:
+            guard.unlink(missing_ok=True)
+
     def acquire(self, key: str) -> tuple[bool, str | None]:
         """Exclusion comes from an atomic file create; the cloud carries the record.
 
@@ -993,33 +1100,36 @@ class Sync:
             return won, holder
 
         lock = self._local_lock(key)
+        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
+                              "repo": repo_name()})
 
-        # Reap an expired lock first: it is a crashed run, not a live holder.
         if lock.exists():
             try:
                 held = json.loads(lock.read_text())
             except (json.JSONDecodeError, OSError):
                 held = {}
-            expired = time.time() > parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl))
             if held.get("run") == self.rid:
                 self._touch_renew()
                 return True, self.rid
-            if not expired:
+            if time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
                 return False, held.get("run")
-            lock.unlink(missing_ok=True)
-
-        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name()})
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            if not self._steal_expired(lock, payload):
+                try:
+                    other = json.loads(lock.read_text()).get("run")
+                except (json.JSONDecodeError, OSError):
+                    other = None
+                return False, other
+        else:
             try:
-                other = json.loads(lock.read_text()).get("run")
-            except (json.JSONDecodeError, OSError):
-                other = None
-            return False, other
-        with os.fdopen(fd, "w") as fh:
-            fh.write(payload)
+                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                try:
+                    other = json.loads(lock.read_text()).get("run")
+                except (json.JSONDecodeError, OSError):
+                    other = None
+                return False, other
+            with os.fdopen(fd, "w") as fh:
+                fh.write(payload)
 
         self._touch_renew()
         for n in self.write_claim(key, self.rid):
@@ -1345,9 +1455,8 @@ class Sync:
     def _claim_targets(self, key: str) -> list[tuple[Path, dict[str, Any]]]:
         out = []
         for pattern, spec in (self.cfg.get("claimTags") or {}).items():
-            for path in sorted(self.root.glob(pattern)):
-                if path.is_file():
-                    out.append((path, spec))
+            for path in sorted(glob_files(self.root, pattern)):
+                out.append((path, spec))
         return out
 
     @staticmethod
@@ -1739,7 +1848,7 @@ class Sync:
     def guard(self, path: str) -> tuple[bool, str]:
         rel = os.path.relpath(os.path.abspath(path), str(self.root))
         patterns = self.cfg.get("guardedFiles") or []
-        if not any(Path(rel).match(p) for p in patterns):
+        if not any(matches_glob(rel, p) for p in patterns):
             return True, "not a guarded file"
 
         # A lease is required in every mode. What differs between backends is how
@@ -2238,11 +2347,27 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
     # Who else is in here, and what landed while this run was away. Without this a
     # lease only tells an agent it is blocked, never who by or on what.
+    plane_broken = False
+
+    # The two logs this command reports on, checked before it reports on them. With a
+    # local lease the claims log is a record rather than the source of holdings, so
+    # nothing on the awareness path would have touched it — and `status` would print a
+    # confident "other runs: none" over a log that cannot be replayed at all.
+    for which in ("claims", "signals"):
+        try:
+            s.events(which)
+        except Fail as exc:
+            print(f"\n✗ {exc}")
+            plane_broken = True
+
     try:
         act = s.activity()
     except Fail as exc:
-        print(f"\n⚠ could not read the coordination plane: {exc}")
+        # Not a warning to read past: with the plane unreadable this run cannot see who
+        # else is working, which is the half of coordination that is not the lease.
+        print(f"\n✗ could not read the coordination plane: {exc}")
         act = {"others": {}, "signals": [], "new_signals": []}
+        plane_broken = True
 
     if act["others"]:
         print("\n  Other runs working this project right now:")
@@ -2280,6 +2405,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("\n✗ task-pipeline is not installed. agent-sync binds to its stages and")
         print("  will not improvise a substitute flow.")
         print("\nNEXT:\n  npx sshlg-skills install")
+        return 1
+
+    if plane_broken:
+        print("\nNEXT: repair the coordination plane — until it reads, this run is working")
+        print("  blind to every other one.")
         return 1
 
     print("\nNEXT: acquire a lease before you touch a guarded file —")
@@ -2946,9 +3076,10 @@ def cmd_check(_args: argparse.Namespace) -> int:
         else:
             ok.append(f"register {reg} allocates from {spec['file']} ({reg}-{m.group(1)})")
 
-    # A guard glob that matches nothing protects nothing.
+    # A guard glob that matches nothing protects nothing. Resolved by the same function
+    # the guard itself applies, so the two commands cannot disagree about one pattern.
     for pattern in (cfg.get("guardedFiles") or []):
-        hits = [q for q in root.glob(pattern) if q.is_file()]
+        hits = glob_files(root, pattern)
         if not hits:
             problems.append(f"guarded pattern '{pattern}' matches no file — it guards nothing")
     if cfg.get("guardedFiles"):
@@ -2957,7 +3088,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
         warn.append("no guarded files — nothing requires a lease in this repository")
 
     for pattern, spec in (cfg.get("claimTags") or {}).items():
-        files = [q for q in root.glob(pattern) if q.is_file()]
+        files = glob_files(root, pattern)
         if not files:
             problems.append(f"claimTags pattern '{pattern}' matches no file")
             continue
@@ -3064,18 +3195,32 @@ def cmd_check(_args: argparse.Namespace) -> int:
             problems.append("no agent instruction file links the snapshot — agents will "
                             "not find it, and will infer the pipeline instead")
 
-    # Baselines: without one, reconcile cannot separate history from new work.
-    if regs:
-        try:
-            s = Sync()
-            ev, _ = s.events("asbuilt")
-            based = {e["key"] for e in ev if e["op"] == "baseline"}
-            for reg in regs:
-                if reg not in based:
-                    warn.append(f"register {reg} has no as-built baseline — "
-                                "run `reconcile --set-baseline` once")
-        except Fail:
-            pass
+    # Every log this project keeps must be replayable. A log past the unparseable limit is
+    # refused by every reader, so a setup carrying one is broken however well it is wired —
+    # and the failure used to be swallowed here by a bare `except Fail: pass`.
+    try:
+        s = Sync()
+    except Fail as exc:
+        problems.append(f"cannot open the project: {exc}")
+        s = None
+    if s is not None:
+        for which in sorted(LOGS):
+            try:
+                s.events(which)
+            except Fail as exc:
+                problems.append(f"{which} log: {exc}")
+
+        # Baselines: without one, reconcile cannot separate history from new work.
+        if regs:
+            try:
+                ev, _ = s.events("asbuilt")
+                based = {e["key"] for e in ev if e["op"] == "baseline"}
+                for reg in regs:
+                    if reg not in based:
+                        warn.append(f"register {reg} has no as-built baseline — "
+                                    "run `reconcile --set-baseline` once")
+            except Fail:
+                pass          # already reported above; one line per defect, not two
 
     tracked_state = git("ls-files", "--", STATE_DIR)
     if tracked_state:
@@ -3152,6 +3297,32 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     git("fetch", "--quiet", "origin", target)
     upstream = f"origin/{target}" if git("rev-parse", "--verify", "--quiet", f"origin/{target}") else target
+
+    # The conflict preflight, the diff and the merge must all be against the SAME base.
+    # They were not: everything was measured against `origin/<target>` and the merge was
+    # then made into the LOCAL `<target>`, which nothing advances. So `merge` printed the
+    # staleness it had just measured, printed "✓ merged", wrote a merge-log entry and
+    # released the lease — and the push was rejected as non-fast-forward. The work had not
+    # landed, the log said it had, and the task was free for somebody else to take.
+    if upstream != target:
+        local_exists = bool(git("rev-parse", "--verify", "--quiet", f"refs/heads/{target}"))
+        behind_local = git("rev-list", "--count", f"{target}..{upstream}") if local_exists else "0"
+        ahead_local = git("rev-list", "--count", f"{upstream}..{target}") if local_exists else "0"
+        if local_exists and behind_local not in ("", "0") and ahead_local not in ("", "0"):
+            raise Fail(
+                f"local {target} has diverged from {upstream} — {ahead_local} commit(s) here "
+                f"that are not there, {behind_local} there that are not here. Reconcile it "
+                f"first; merging into it would produce a branch nobody can push")
+        if not local_exists or behind_local not in ("", "0"):
+            moved = subprocess.run(
+                ["git", "update-ref", f"refs/heads/{target}",
+                 git("rev-parse", upstream)], capture_output=True, text=True)
+            if moved.returncode != 0:
+                raise Fail(f"could not fast-forward {target} to {upstream}: "
+                           f"{moved.stderr.strip()[:160]}")
+            if local_exists:
+                print(f"  {target} fast-forwarded {behind_local} commit(s) to {upstream}")
+
     behind = git("rev-list", "--count", f"{branch}..{upstream}")
     changed = [l for l in (git("diff", "--name-only", f"{upstream}...{branch}") or "").splitlines() if l]
     stat = git("diff", "--shortstat", f"{upstream}...{branch}") or "no changes"

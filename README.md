@@ -385,9 +385,11 @@ Details and removal:
 ## Where it plugs into task-pipeline
 
 `agent-sync` supplies stages; it does not define them. It binds to task-pipeline's
-stages 0, 3, 4, 5, 9 and 10 — lease before the brief is committed, reserve ids before
-they reach git, register file ownership for parallel groups, signal and regenerate the
-board at docs, release everything at acceptance. Wiring:
+stages 0, 1, 3, 4, 5, 9 and 10 — lease before the brief is committed, reconcile before
+code is written, reserve ids before they reach git, register file ownership for parallel
+groups, signal and regenerate the board at docs, release everything at acceptance. The
+stage numbers are stated once, in the marker at the top of the binding reference, and a
+check fails when a document stops agreeing with it. Wiring:
 [`references/pipeline-binding.md`](plugins/agent-sync/skills/agent-sync/references/pipeline-binding.md).
 
 ## Limits, stated plainly
@@ -411,7 +413,8 @@ board at docs, release everything at acceptance. Wiring:
 | `task-pipeline is not installed` and `status` stops | Intentional — there are no stages to bind to. `npx sshlg-skills install` |
 | `⚠ this lease is advisory, not enforced` | `gated: false` in the config, or a `leaseBackend` that is neither `local` nor `git`. Fix the mode — an unknown one claims nothing on purpose |
 | `lease: local — advisory across machines` | Expected on the default. Set `leaseBackend: "git"` (and a reachable `leaseRemote`) when agents run on more than one machine |
-| Every `acquire` reports `lost` | Check the holder in `status`. If the log itself is unreadable, `acquire` raises instead — that is a parse failure, not a race |
+| Every `acquire` reports `lost` | Check the holder in `status`. The lease is decided by a lock file or a git ref, never by the log, so this is a real holder — not a parse failure |
+| A command stops with `the … log is N/M unparseable` | Past 2%, every command that *replays* a log refuses it rather than acting on a partial history. Fix or remove the malformed lines; `acquire` is unaffected, because a lease is not decided there |
 | Guarded edit blocked in Claude Code | Working as designed: `acquire` the key first, or unstage the file |
 | Guarded edit *not* blocked | You are not on Claude Code. Run `guard <path>` yourself; the run is `ungated` |
 | `AGENT_SYNC_OUTLINE_COLLECTION is not set` | Run `bootstrap` and paste the printed id into `.env.agent-sync` |

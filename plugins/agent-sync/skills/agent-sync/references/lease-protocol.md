@@ -42,19 +42,36 @@ tests for the exact bullet you emitted skips malformed lines *before* they can b
 counted, so the ratio reads 0% while nothing parses — the guard and the counter both
 go quiet at once. This is not hypothetical; it is how the bug above stayed invisible.
 
-**An unreadable log is not a lost race.** When more than 2% of a log fails to parse,
-`acquire` **raises** instead of reporting `lost`, and the board gate fails. Reporting
-a lost race would name a holder who does not exist and send the caller looking for
-them.
+**An unreadable log is not a lost race.** Past 2% unparseable, **every command that
+replays a log refuses it** — the read itself fails, so `status`, `board`, `check`,
+`reconcile` and `reserve` stop and name the ratio instead of acting on a partial
+history. Replaying it would report holders who do not exist and silence where the real
+ones are, and both of those look exactly like an answer.
+
+`acquire` is not in that list, and the reason is the design: the lease is decided by the
+lock file or the git ref, never by the log, so a corrupt log cannot make a lease look
+lost. Until 1.6.0 the threshold was a constant nothing read — declared, quoted in three
+documents, and implemented nowhere except a warning line on the board that returned zero.
 
 ## Acquiring — the third design, and the first that is true
 
 ```
-1. reap     if .agent-sync/leases/<K>.lock exists and is expired, remove it
-2. create   os.open(lock, O_CREAT | O_EXCL) — this is the decision, and it is atomic
-3. lost     FileExistsError -> read the holder out of the file and report it
-4. won      write {run, ts, ttl, repo}; publish op=acquire to the plane for visibility
+1. free     os.open(lock, O_CREAT | O_EXCL) — this is the decision, and it is atomic
+2. held     live holder -> report it; this run -> already ours
+3. expired  take the steal section, re-read expiry inside it, then reap and create
+4. lost     FileExistsError, or the section is held -> read the holder and report it
+5. won      write {run, ts, ttl, repo}; publish op=acquire to the plane for visibility
 ```
+
+**Step 3 is one critical section, not two calls.** `unlink` followed by `O_EXCL create`
+leaves a gap, and a second stealer that has already read the lock as expired removes the
+lock the first one just created — both then hold what each believes is exclusive. Twelve
+racing processes never showed it; a 300 ms delay injected between the two calls produced
+two winners out of two, and in production that delay is an ordinary scheduler hiccup. So
+`<K>.lock.steal` is created with `O_EXCL`, the expiry is re-read **inside** it (the holder
+may have renewed, or another stealer may have finished), and it carries its own 30-second
+abandonment grace — without one, a crash between two filesystem calls would cost the key
+until somebody deleted a file nobody documents.
 
 **Publishing is not the decision.** A failure to reach the knowledge base costs
 visibility, never correctness: the lock is already held. So the append is wrapped and
@@ -105,9 +122,10 @@ Default `ttl` is 2700 s (45 minutes). `renew` is emitted at most once per
 and by the agent itself everywhere else. A `renew` for a key this run does not hold
 refreshes nothing and says so.
 
-**Stealing an expired lease is the ordinary `acquire` path.** There is no force flag:
-the reap step removes an expired lock and the create proceeds. The steal is visible on
-the plane with both run ids, so an operator can see that it happened and when.
+**Stealing an expired lease is the ordinary `acquire` path.** There is no force flag: the
+steal section above removes an expired lock and creates the new one, as one operation. The
+steal is visible on the plane with both run ids, so an operator can see that it happened
+and when.
 
 ## Releasing
 

@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.5.3"
+  version: "1.6.0"
   author: ssheleg
 ---
 
@@ -303,7 +303,7 @@ which side a document belongs on.
 This skill supplies stages; it does not define them. Stage names are
 `task-pipeline`'s own.
 
-Four of the eleven stages carry a rule the others do not, and each is about ordering:
+Five of the eleven stages carry a rule the others do not, and each is about ordering:
 **0** `acquire` before the brief is committed; **1** `reconcile` and resolve every
 divergence before writing code; **3** `reserve` every id before it reaches git; **9**
 `record`, `signal`, `reconcile`, `board` — the main write point. **10** ends the run:

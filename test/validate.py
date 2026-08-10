@@ -1137,6 +1137,259 @@ def check_doctrine_is_current() -> None:
                     "atomic primitive since 1.0.0, and the knowledge base never decides one")
 
 
+def check_steal_is_atomic() -> None:
+    """Stealing an expired lease must not have a window two runs can both pass through.
+
+    `unlink` then `O_EXCL create` are two operations. A second stealer that has already
+    seen the lock expired can remove the lock the first one just created, and both then
+    hold what each believes is an exclusive lease. Twelve racing processes did not expose
+    it — with a 300 ms gap injected between the two calls, two of two won.
+
+    A race is the wrong shape for a regression test, so the invariant is checked directly:
+    the reap-and-create is one critical section, and a run that finds another stealer
+    inside it loses rather than proceeding. That names an internal file, deliberately —
+    the alternative is a test that passes by luck on the broken code, which is what the
+    twelve-process version did.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — steal atomicity check skipped")
+        return
+    mod = _load_script("agent_sync_steal_probe")
+    expired = json.dumps({"run": "r-dead", "ttl": 60,
+                          "ts": datetime_minus(mod, 9999), "repo": "x"})
+
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("steal atomicity: init failed")
+            return
+        leases = Path(project) / ".agent-sync" / "leases"
+        leases.mkdir(parents=True, exist_ok=True)
+        lock = leases / "STEAL-1.lock"
+        guard = leases / "STEAL-1.lock.steal"
+
+        # 1. Another stealer is inside the section: this run must lose, not steal.
+        lock.write_text(expired)
+        guard.write_text("someone-else")
+        out = _run_script(project, "acquire", "STEAL-1", run_id="contender")
+        if "won" in out.stdout:
+            err("steal atomicity: a run stole an expired lease while another stealer held "
+                "the section — the reap and the create are not one operation, so two runs "
+                "can both end up holding it")
+        guard.unlink(missing_ok=True)
+
+        # 2. A section abandoned by a crash must not block stealing forever.
+        lock.write_text(expired)
+        guard.write_text("crashed")
+        old = time.time() - 3600
+        os.utime(guard, (old, old))
+        out = _run_script(project, "acquire", "STEAL-1", run_id="later")
+        if "won" not in out.stdout:
+            err("steal atomicity: an abandoned steal section blocks the lease permanently — "
+                "the mutex needs its own expiry, or a crash costs the key until a human "
+                "deletes a file nobody documents")
+        guard.unlink(missing_ok=True)
+
+        # 3. And the ordinary property still holds: many racers, exactly one winner.
+        lock.write_text(expired)
+        outs = []
+        with tempfile.TemporaryDirectory() as _:
+            import concurrent.futures as cf
+            with cf.ThreadPoolExecutor(max_workers=12) as pool:
+                futures = [pool.submit(_run_script, project, "acquire", "STEAL-1",
+                                       run_id=f"racer{i}") for i in range(12)]
+                outs = [f.result() for f in futures]
+        winners = [o for o in outs if "won" in o.stdout]
+        if len(winners) != 1:
+            err(f"steal atomicity: {len(winners)} of 12 racing runs won one expired lease")
+
+
+def check_merge_refuses_stale_target() -> None:
+    """A merge into a stale integration branch must not be reported as landed.
+
+    `merge` computed conflicts and the diff against `origin/<target>` and then merged into
+    the LOCAL `<target>`, which nothing fast-forwards. It printed the staleness it had just
+    measured — "main moved: 1 commit(s)" — then "✓ merged", wrote a merge-log entry, and
+    released the lease. The push was rejected as non-fast-forward, so the work had not
+    landed, the log said it had, and the task was free for somebody else to take.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — stale-merge check skipped")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        remote, work, other = (Path(tmp) / n for n in ("remote.git", "work", "other"))
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)],
+                       capture_output=True)
+        _git_project(str(work.parent), branch="main") if False else None
+        work.mkdir()
+        g = lambda *a, **kw: subprocess.run(  # noqa: E731
+            ["git", *a], cwd=kw.get("cwd", str(work)), capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "v@e")
+        g("config", "user.name", "v")
+        g("remote", "add", "origin", str(remote))
+        (work / "f.txt").write_text("base\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "base")
+        if _run_script(str(work), "init", "--backend", "fs").returncode != 0:
+            err("stale merge: init failed")
+            return
+        g("add", "-A")
+        g("commit", "-q", "-m", "cfg")
+        g("push", "-q", "-u", "origin", "main")
+
+        # A second agent lands something on the integration branch.
+        subprocess.run(["git", "clone", "-q", str(remote), str(other)], capture_output=True)
+        for argv in (["git", "config", "user.email", "o@e"], ["git", "config", "user.name", "o"]):
+            subprocess.run(argv, cwd=str(other), capture_output=True)
+        (other / "theirs.txt").write_text("theirs\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(other), capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "landed-by-another-agent"],
+                       cwd=str(other), capture_output=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=str(other),
+                       capture_output=True)
+        theirs = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(other),
+                                capture_output=True, text=True).stdout.strip()
+
+        g("checkout", "-q", "-b", "feature/x")
+        (work / "mine.txt").write_text("mine\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "mine")
+
+        out = _run_script(str(work), "merge", "--key", "T-1", "--summary", "landed")
+        merged = g("log", "--format=%H", "main").stdout.split()
+        log_written = (work / "docs" / "MERGES.md").exists()
+
+        if out.returncode == 0 and theirs not in merged:
+            err("merge: reported success while merging into a stale local integration "
+                "branch — the other agent's commit is not in it, the push will be rejected, "
+                "and the merge log already says the work landed")
+        if out.returncode == 0 and not log_written:
+            err("merge: reported success and wrote no merge-log entry")
+        if out.returncode != 0 and log_written:
+            err("merge: refused, and still recorded a merge that never happened")
+
+
+def check_guard_and_check_agree_on_globs() -> None:
+    """One pattern, one meaning. The guard and `check` read them differently.
+
+    The guard used `Path.match`, which anchors at the RIGHT: `docs/DECISIONS.md` matched
+    `vendor/docs/DECISIONS.md`, a file `check` — which enumerates with `glob` — never saw
+    and never validated. In the other direction `Path.match` does not walk `**` before
+    3.13, so `docs/**/*.md` guarded less than `check` reported. A pattern that means two
+    things has no meaning.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — glob agreement check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        root = Path(project)
+        for rel in ("docs/DECISIONS.md", "docs/deep/NOTES.md", "vendor/docs/DECISIONS.md"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("x\n")
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("glob agreement: init failed")
+            return
+        _write_cfg(project, guardedFiles=["docs/DECISIONS.md", "docs/**/*.md"])
+
+        cases = {
+            "docs/DECISIONS.md": True,        # named exactly
+            "docs/deep/NOTES.md": True,       # under the recursive pattern
+            "vendor/docs/DECISIONS.md": False,  # NOT the file the config names
+        }
+        for rel, guarded in cases.items():
+            out = _run_script(project, "guard", rel, run_id="nobody")
+            denied = out.returncode == 2
+            if denied != guarded:
+                err(f"glob agreement: `{rel}` is "
+                    f"{'' if guarded else 'not '}guarded by the config, but the guard "
+                    f"{'allowed' if guarded else 'denied'} it — the guard and `check` do not "
+                    "read one pattern the same way")
+
+
+def check_unparseable_log_fails_loudly() -> None:
+    """Past 2%, a log is refused rather than replayed. Three documents promised this.
+
+    `MAX_UNPARSEABLE` was declared and never read. The only trace of the rule was a line
+    on the board that printed a warning and returned 0, while `SKILL.md`,
+    `lease-protocol.md` and the README all stated that a log this broken stops the run.
+    A replay of a log that mostly does not parse reports holders who do not exist and
+    silence where the holders really are.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — unparseable-log check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("unparseable log: init failed")
+            return
+        shard = Path(project) / ".agent-sync" / "30-claims-r-corrupt.md"
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        good = ("- `2026-08-01T10:00:00Z` `op=acquire` `key=K-{}` `run=r-a` `ttl=60`\n")
+        shard.write_text("".join(good.format(i) for i in range(8))
+                         + "- `not-an-entry at all\n- `also broken\n")
+
+        out = _run_script(project, "board")
+        if out.returncode == 0:
+            err("unparseable log: `board` regenerated the board from a log that is 20% "
+                "unreadable and exited 0 — the page now states holdings nobody can verify")
+        if "unparseable" not in (out.stdout + out.stderr).lower():
+            err("unparseable log: `board` failed without naming the reason")
+
+        out = _run_script(project, "check")
+        if "unparseable" not in out.stdout.lower():
+            err("unparseable log: `check` calls the setup healthy with an unreadable log")
+
+        out = _run_script(project, "status")
+        if out.returncode == 0:
+            err("unparseable log: `status` reported normally over an unreadable plane")
+
+
+STAGE_MARKER = re.compile(r"agent-sync:stages\s+rules=([\d,]+)\s+wired=([\d,]+)")
+
+
+def check_stage_binding_agrees() -> None:
+    """The stage binding is stated once, and the other surfaces quote it.
+
+    Three documents gave three answers. `SKILL.md` said "four of the eleven stages" and
+    then listed five (0, 1, 3, 9, 10); the README said 0, 3, 4, 5, 9 and 10;
+    `pipeline-binding.md` agreed with the README and also called stage 1 "nothing shared
+    to coordinate" — the stage `SKILL.md` puts `reconcile` on, and the stage the tool's
+    own doctrine says must resolve every divergence before code is written. An agent
+    wiring `pipeline.json` from one of the three gets a pipeline missing a rule.
+    """
+    binding = ROOT / "plugins/agent-sync/skills/agent-sync/references/pipeline-binding.md"
+    text = binding.read_text() if binding.exists() else ""
+    m = STAGE_MARKER.search(text)
+    if not m:
+        err("stage binding: pipeline-binding.md carries no `agent-sync:stages` marker — "
+            "the numbers live in prose in three files, and they have already disagreed")
+        return
+    rules = [s for s in m.group(1).split(",") if s]
+    wired = [s for s in m.group(2).split(",") if s]
+
+    for stage in wired:
+        if f'"id": {stage},' not in text:
+            err(f"stage binding: stage {stage} is declared wired but the pipeline.json "
+                f"example in pipeline-binding.md has no `\"id\": {stage}` entry")
+
+    skill = (ROOT / "plugins/agent-sync/skills/agent-sync/SKILL.md").read_text()
+    words = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven"}
+    if f"{words.get(len(rules), '?')} of the eleven stages" not in skill:
+        err(f"stage binding: SKILL.md does not say '{words.get(len(rules))} of the eleven "
+            f"stages' — the marker declares {len(rules)} stages carrying a rule")
+    for stage in rules:
+        if f"**{stage}**" not in skill:
+            err(f"stage binding: SKILL.md's binding paragraph never names stage {stage}")
+
+    readme = (ROOT / "README.md").read_text()
+    spelled = ", ".join(wired[:-1]) + " and " + wired[-1]
+    if spelled not in readme:
+        err(f"stage binding: README does not name the wired stages as '{spelled}'")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -1162,6 +1415,11 @@ def main() -> int:
     check_no_success_on_failed_publish()
     check_guard_denial_names_only_what_it_knows()
     check_doctrine_is_current()
+    check_steal_is_atomic()
+    check_merge_refuses_stale_target()
+    check_guard_and_check_agree_on_globs()
+    check_unparseable_log_fails_loudly()
+    check_stage_binding_agrees()
 
     for n in notes:
         print(f"note: {n}")
@@ -1270,6 +1528,32 @@ def self_test() -> int:
             lambda t: t.replace("Coordination layer for multi-agent repositories.",
                                 "Coordination layer for multi-agent repositories, so "
                                 + "no backend needs " + "compare-and-swap.")),
+        # --- the 1.6.0 defects ---
+        # The steal section made per-process, which is the same as not having one.
+        "steal section is not exclusive": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('        guard = lock.with_name(lock.name + ".steal")',
+                                '        guard = lock.with_name(lock.name + ".steal."'
+                                ' + str(os.getpid()))')),
+        # The fast-forward removed: merge measures one base and merges into another.
+        "merge into a stale integration branch": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('        if not local_exists or behind_local not in ("", "0"):',
+                                "        if False:")),
+        # Back to right-anchored matching, which guards files the config never named.
+        "guard matches paths from the right": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("if not any(matches_glob(rel, p) for p in patterns):",
+                                "if not any(Path(rel).match(p) for p in patterns):")),
+        # The threshold declared and not read — exactly how it shipped for five versions.
+        "unparseable logs are replayed anyway": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        if total and bad / total > MAX_UNPARSEABLE:",
+                                "        if False:")),
+        # The stage numbers back to prose in three files.
+        "stage binding loses its source": (
+            "plugins/agent-sync/skills/agent-sync/references/pipeline-binding.md",
+            lambda t: re.sub(r"<!-- agent-sync:stages[^>]*-->\n", "", t)),
         "stray SKILL.md": (None, None),
     }
     original_root = ROOT
