@@ -235,10 +235,10 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" <command>
 | Command | Does |
 |---|---|
 | `init` | **Run first.** Ask where state lives, write config + gitignored env file, print your step |
-| `status` | Inspect, repair, report — including other runs' leases and signals new since you last looked |
+| `status` | Inspect, repair, report — other runs' leases, signals new since you last looked, and `check`'s verdict on the setup |
 | `bootstrap` | Create the cloud container and print the id to paste into the env file |
 | `acquire <KEY>` | Take the lease on a task id. Prints `won`, or `lost <holder>` |
-| `renew <KEY>` | Extend the lease. In Claude Code the `PostToolUse` hook does this for you |
+| `renew <KEY>` | Extend the lease — moves the timestamp expiry is computed from. In Claude Code the `PostToolUse` hook does this for you |
 | `release <KEY>` | Give the lease back. Always, including on failure |
 | `reserve <REG>` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |
@@ -273,11 +273,13 @@ see who has what, and the shared roadmap does not become the file every branch e
 python3 "$SKILL_DIR/scripts/agent_sync.py" merge --key ASC-072 --summary "what landed"
 ```
 
-Conflicts are computed with `git merge-tree` **before anything is touched** — on conflict
-it names the files, changes nothing and exits non-zero, so a resolution nobody reviewed
-never reaches the integration branch. Then it merges `--no-ff`, records the merge, and
-releases every lease this run holds. `--dry-run` stops after the checks; `--push` pushes
-afterwards.
+The local integration branch is fast-forwarded to `origin/<target>` first, so the
+preflight and the merge share a base; one that has genuinely diverged is refused with both
+counts. Conflicts are then computed with `git merge-tree` **before anything is touched** —
+on conflict it names the files, changes nothing and exits non-zero, so a resolution nobody
+reviewed never reaches the integration branch. Then it merges `--no-ff`, records the merge,
+and releases the lease named by `--key`. `--dry-run` stops after the checks; `--push`
+pushes afterwards.
 
 **The merge log** — `docs/MERGES.md`, configurable via `mergeLog` — answers the question an
 agent coming back from a branch cannot answer from `git log` alone: *what landed while I
@@ -296,8 +298,9 @@ right one. Full doctrine:
 [`references/branching.md`](plugins/agent-sync/skills/agent-sync/references/branching.md).
 
 **The lease is not the claim.** The lease says who holds the task *now* and expires; the
-durable claim is the tag in git (`[name]`, `todo (claimed: <role>)`). `acquire` writes
-that tag through and `release` clears it, so one fact keeps one home.
+durable claim is the tag in git — `todo (claimed: r-7f3a91)`, rendered from the
+`claimTags.held` template, naming the **run**, not a role. `acquire` writes that tag
+through and `release` restores exactly what was there, so one fact keeps one home.
 
 ## Configuration
 
@@ -319,7 +322,12 @@ that tag through and `release` clears it, so one fact keeps one home.
 | `integrationBranch` | where work lands and the only branch a claim is written on (default: the repo's own) |
 | `mergeLog` | `file` and `retentionDays` for the merge log (default `docs/MERGES.md`, 7) |
 
-`.env.agent-sync` — gitignored, mode 600:
+`.env.agent-sync` — gitignored, mode 600. It is looked for in this repository, then in
+each **superproject** above it (so one credentials file serves a tree of submodules), and
+nowhere else. `AGENT_SYNC_ENV=/path/to/file` names one explicitly and wins over both.
+Until 1.7.0 the search continued into any parent directory, so a stray file in a home or
+work directory silently pointed every project beneath it at one collection — `check`
+now prints which file is in force, and says when it comes from outside the repository.
 
 ```
 AGENT_SYNC_BACKEND=outline
@@ -384,9 +392,11 @@ Details and removal:
 ## Where it plugs into task-pipeline
 
 `agent-sync` supplies stages; it does not define them. It binds to task-pipeline's
-stages 0, 3, 4, 5, 9 and 10 — lease before the brief is committed, reserve ids before
-they reach git, register file ownership for parallel groups, signal and regenerate the
-board at docs, release everything at acceptance. Wiring:
+stages 0, 1, 3, 4, 5, 9 and 10 — lease before the brief is committed, reconcile before
+code is written, reserve ids before they reach git, register file ownership for parallel
+groups, signal and regenerate the board at docs, release everything at acceptance. The
+stage numbers are stated once, in the marker at the top of the binding reference, and a
+check fails when a document stops agreeing with it. Wiring:
 [`references/pipeline-binding.md`](plugins/agent-sync/skills/agent-sync/references/pipeline-binding.md).
 
 ## Limits, stated plainly
@@ -410,7 +420,8 @@ board at docs, release everything at acceptance. Wiring:
 | `task-pipeline is not installed` and `status` stops | Intentional — there are no stages to bind to. `npx sshlg-skills install` |
 | `⚠ this lease is advisory, not enforced` | `gated: false` in the config, or a `leaseBackend` that is neither `local` nor `git`. Fix the mode — an unknown one claims nothing on purpose |
 | `lease: local — advisory across machines` | Expected on the default. Set `leaseBackend: "git"` (and a reachable `leaseRemote`) when agents run on more than one machine |
-| Every `acquire` reports `lost` | Check the holder in `status`. If the log itself is unreadable, `acquire` raises instead — that is a parse failure, not a race |
+| Every `acquire` reports `lost` | Check the holder in `status`. The lease is decided by a lock file or a git ref, never by the log, so this is a real holder — not a parse failure |
+| A command stops with `the … log is N/M unparseable` | Past 2%, every command that *replays* a log refuses it rather than acting on a partial history. Fix or remove the malformed lines; `acquire` is unaffected, because a lease is not decided there |
 | Guarded edit blocked in Claude Code | Working as designed: `acquire` the key first, or unstage the file |
 | Guarded edit *not* blocked | You are not on Claude Code. Run `guard <path>` yourself; the run is `ungated` |
 | `AGENT_SYNC_OUTLINE_COLLECTION is not set` | Run `bootstrap` and paste the printed id into `.env.agent-sync` |
@@ -437,7 +448,7 @@ npm test                             # both of the above
 ```
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
-scripts, the slash command, `agent-sync.schema.json`, and eight reference contracts the
+scripts, the slash command, `agent-sync.schema.json`, and ten reference contracts the
 agent loads on their own trigger rather than by default:
 
 | Reference | Read it when |

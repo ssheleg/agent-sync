@@ -1,3 +1,232 @@
+## v1.7.0
+
+**Observability, honest degradation, and the removal of things that were never load-bearing.**
+1.5.3 stopped the tool saying untrue things; 1.6.0 made its guarantees hold. This closes the
+remaining findings from the 2026-08-10 audit — each one a place where the tool was quiet rather
+than wrong, which is the harder failure to notice.
+
+### `status` and `check` gave two answers about one project
+
+`status` printed `NEXT: acquire a lease` and exited 0 on a setup `check` called NOT healthy — a
+guard pattern matching no file, a snapshot nobody links, an env file tracked by git. `status` is
+the command every session runs and the only one most agents ever read, so anything it stays quiet
+about is effectively unreported.
+
+The validation now lives in one function, `check_setup()`, which both commands call. `status`
+prints the count, the first four problems and one next action; `check` prints the whole list.
+
+### Credentials were adopted from anywhere above the project
+
+`find_env_file` walked every parent directory until something matched, so a stray
+`.env.agent-sync` in a home or work directory silently configured every project beneath it and
+pointed them all at one collection — a coordination plane shared by projects with nothing to do
+with each other. A found file looks exactly like a configured one, so nothing reported it.
+
+The search is now `AGENT_SYNC_ENV` if set, then this repository, then each **superproject** in
+turn — a tree git can vouch for, which is the case the walk existed to serve. `check` prints which
+file is in force and says when it comes from outside the repository.
+
+### "New since you last looked" lost entries that arrived out of order
+
+The watermark was an index into a list re-sorted on every read. An entry appended with an earlier
+timestamp — clock skew, or a shard that was briefly unreachable — lands before the mark, shifts
+everything after it, and is never reported; the slice returns an entry already seen instead. The
+one section of `status` whose job is to announce what changed went quiet about exactly the change
+that arrived late.
+
+Entries are now remembered by identity, capped at 500, with a floor timestamp covering only what
+fell out of that window — set only when something actually did, or the fix would have re-created
+the bug in a new shape.
+
+### `merge` released every lease the run held
+
+The documentation says it releases the lease; it released all of them, quietly freeing work that
+had not landed. It now releases the one named by `--key`, and says what it left held.
+
+### An `acquire`/`release` round-trip left a diff
+
+`SKILL.md` promises `git diff` empty afterwards. The claimed row was rebuilt from its cells, so
+indentation and the original line ending were dropped — an unexplained change to a shared registry
+file, which is the one kind of file agents are told never to touch casually. The bytes outside the
+edited cell are now carried through rather than reconstructed.
+
+### Declarations that were never load-bearing
+
+`LOGS` carried a `blockers` document nothing wrote and nothing read, so a reader looking for
+blockers found an empty page and concluded there were none. `_held_legacy` and
+`Adapter.is_exclusive` had no callers. `Sync.settle` was computed and never used —
+`settleSeconds` stays in the schema for a backend that must wait for writes to become visible,
+and `check` now says plainly that nothing shipped reads it.
+
+`os.uname()` and a literal `/dev/null` are gone in favour of `platform.node()` and `os.devnull`;
+the coordinator now runs wherever python3 does, and only the enforcement hooks need bash.
+
+### New checks
+
+`check_status_reports_the_setup_verdict`, `check_env_discovery_is_bounded`,
+`check_watermark_survives_a_late_entry`, `check_no_orphan_logs`, `check_no_dead_declarations`,
+`check_claim_round_trip_is_byte_exact` — with six more self-test fixtures. The validator now
+plants and catches 27 distinct defects.
+
+## v1.6.0
+
+**Four guarantees that were described but not delivered, and the one number now stated once.**
+1.5.3 stopped the tool reporting things that were untrue; this release makes the properties it
+claims actually hold, each with a check that has been watched fail against the defect it exists to
+catch.
+
+### Stealing an expired lease had a window two runs could both pass through
+
+`unlink` then `O_EXCL create` are two operations. A second stealer that has already read the lock
+as expired removes the lock the first one just created, and both then hold what each believes is an
+exclusive lease. Twelve racing processes never exposed it — with a 300 ms delay injected between the
+two calls, two of two won, and in production that delay is an ordinary scheduler hiccup.
+
+The reap and the create are now one critical section: `<key>.lock.steal` is created with `O_EXCL`,
+the expiry is re-read **inside** it (the holder may have renewed; another stealer may have finished),
+and the section carries a 30-second abandonment grace, because without one a crash between two
+filesystem calls costs the key until a human deletes a file nobody documents.
+
+This mattered more after 1.5.3 than before it: with `renew` finally refreshing leases, the steal path
+stops being the common case — but for four versions every long task went through it.
+
+### `merge` measured one base and merged into another
+
+Conflicts and the diff were computed against `origin/<target>`; the merge was made into the **local**
+`<target>`, which nothing advances. So `merge` printed the staleness it had just measured — `main
+moved: 1 commit(s)` — then `✓ merged as …`, wrote a merge-log entry, released the lease, and the push
+was rejected as non-fast-forward. The work had not landed, `docs/MERGES.md` said it had, and the task
+was free for somebody else to take.
+
+The local integration branch is now fast-forwarded to its upstream before anything else, so the
+preflight and the merge share a base. One that has genuinely diverged cannot be fast-forwarded and is
+refused, with both counts named.
+
+### One glob meant two things
+
+The guard matched with `Path.match`, which anchors at the **right**: with `docs/DECISIONS.md` in
+`guardedFiles`, an edit to `vendor/docs/DECISIONS.md` was denied — a file `check` never enumerated
+and never validated, protected by a rule nobody wrote. In the other direction `Path.match` does not
+walk `**` before Python 3.13, so `docs/**/*.md` guarded less than `check` reported. A pattern that
+means two things means nothing. Both commands now resolve patterns through one function, anchored at
+the repository root.
+
+### The 2% rule was a constant nothing read
+
+`MAX_UNPARSEABLE` was declared in 1.0.0 and never referenced. `SKILL.md`, `lease-protocol.md` and the
+README all stated that a log past the threshold stops the run; the only implementation was a warning
+line on the board that returned 0. Every reader now refuses a log past the limit and names the ratio,
+so `status`, `board`, `check`, `reconcile` and `reserve` stop rather than replaying a partial history
+— which reports holders who do not exist and silence where the real ones are, both of which look like
+an answer.
+
+`acquire` is deliberately not in that list, and the documents now say so: a lease is decided by the
+lock or the ref, never by the log, so a corrupt log cannot make one look lost.
+
+### The stage binding said three different things
+
+`SKILL.md` announced "four of the eleven stages" and listed five (0, 1, 3, 9, 10); the README named
+0, 3, 4, 5, 9 and 10; `pipeline-binding.md` agreed with the README and separately called stage 1
+*"nothing shared to coordinate"* — the stage `reconcile` belongs to, and the one the tool's own
+doctrine says must resolve every divergence before code is written. An agent wiring `pipeline.json`
+from any one of the three got a pipeline missing a rule.
+
+The numbers now live in a marker in `pipeline-binding.md` — `rules=0,1,3,9,10`,
+`wired=0,1,3,4,5,9,10` — the two lists answer two different questions instead of being conflated,
+stage 1 has its row and its `pipeline.json` entry, and a check fails when a surface stops agreeing.
+
+### New checks
+
+`check_steal_is_atomic`, `check_merge_refuses_stale_target`, `check_guard_and_check_agree_on_globs`,
+`check_unparseable_log_fails_loudly`, `check_stage_binding_agrees` — plus five self-test fixtures
+planting each defect back.
+
+## v1.5.3
+
+**Five surfaces told the caller something that was not true.** An audit on 2026-08-10 ran the
+commands instead of reading them, and every finding below was reproduced before it was fixed. The
+validator was green throughout — which is the finding behind the findings, and the reason this
+release ships six new checks that drive the tool rather than its functions.
+
+### `reserve` handed three runs the same id
+
+`reserve` replayed `log_id("reservations")` — the document **this run writes**. Every other run's
+shard was invisible to it, so three runs each saw an empty history, each seeded a `base` from the
+register, and each was handed `DEC-0007`. Measured, three processes, one number.
+
+The pure allocator was correct and tested; nothing ever asked it about the whole log. This is the
+same failure that disqualified per-writer documents as a *lease* store in 1.0.0 — eight processes
+reading only their own shard, eight winners — arriving in the allocation path, where the tested
+unit hid it. Allocation now runs over the merged log.
+
+Merging alone would have replaced one collision with another: two runs opening a register in the
+same minute both append the same seed, and a `base` that re-seated unconditionally restarts the
+count and hands the second run the id the first just took. A `base` now only ever moves allocation
+**forward**; one at or below the current position is ignored.
+
+### `renew` renewed nothing
+
+It appended `op=renew` to the record plane — which has not decided a lease since 1.0.0 — and
+touched a throttle file. The timestamp expiry is actually computed from, the one inside the lock
+(or the git ref payload), was written once, by `acquire`.
+
+So a run holding a lease lost it at TTL **while still working**: `whoami` reported `holds:
+nothing`, its own `PreToolUse` guard began denying its edits, and another run acquired the task it
+was in the middle of. With the default 2700 s, every task longer than forty-five minutes. The
+`PostToolUse` hook made no difference, because there was nothing for it to move — and from the
+record plane's side the renewals arrived exactly on schedule, so nothing looked wrong anywhere.
+`renew` now rewrites the lock in `local` mode and re-pushes the ref with `--force-with-lease`
+against the exact object it read in `git` mode.
+
+### `check` rejected the config `init` had just written
+
+`check` carried its own literal list of legal keys. `mergeLog` — written by `init` itself — and
+`integrationBranch` — in the schema, in the shipped example, read by the code — were not in it, so
+a freshly initialised project reported `config key 'mergeLog' is not in the schema — it will be
+ignored`. Both halves false: it is in the schema, and it is not ignored.
+
+That is worse than a wrong message; it is an instruction. An agent making `check` green deletes
+working configuration. The list now lives in one place, `CONFIG_KEYS`, and the validator asserts it
+equals the schema's properties exactly.
+
+### Three commands reported success they had not achieved
+
+`release-id` printed `released DEC-0007` and exited 0 on a backend that records nothing — the id
+stayed a hole the board reports as a leak, and the only party who could have fixed it had been told
+it was handled. `record` and `signal` printed success and exited 0 while stderr said the entry was
+never published. All three now fail loudly.
+
+An adapter `OSError` also walked past every `except Fail` into `main`: an unwritable state
+directory handed the agent a Python traceback as the state of the coordination plane. Store errors
+are now the tool's own failure type.
+
+### The guard named a holder who held something else
+
+A denial read `<path> is a guarded registry file and this run holds no lease — r-x holds a lease
+right now`, where `r-x` held an unrelated task. Beside a path, that sentence gets repeated as "r-x
+holds this file". The denial now names the run **and its key**, and says plainly that exit 2 is a
+statement about the asking run, not about the file.
+
+### The marketplace listing still sold the design 1.0.0 refuted
+
+`marketplace.json` — the first thing anyone reads — described coordination as "decided by replaying
+one append-only log so no backend needs compare-and-swap". That is the belief the first trap in
+`SKILL.md` exists to forbid. Rewritten, and a check now fails on the phrase.
+
+### Documentation corrected where it described behaviour that did not exist
+
+`SKILL.md` and the Cursor rule on what exit 2 means; `lease-protocol.md` on what `renew` moves and
+on the log a reader replays; the claim-tag vocabulary in `README.md` and `lease-protocol.md`, which
+showed a role where the tool writes a run id; `hooks.md` on the `NotebookEdit` matcher, on what
+`session-end.sh` actually does, and on the two timeouts that really apply.
+
+### New checks
+
+`check_reserve_is_race_free`, `check_renew_extends_the_lease`, `check_config_round_trip`,
+`check_no_success_on_failed_publish`, `check_guard_denial_names_only_what_it_knows`,
+`check_doctrine_is_current`. Each drives the real commands from more than one identity, because
+every defect above lived in the gap between two things the validator already tested separately.
+
 ## v1.5.2
 
 ### `reserve` handed out ids that were already written

@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.5.2"
+  version: "1.7.0"
   author: ssheleg
 ---
 
@@ -43,8 +43,8 @@ coordination plane, where `status` shows it to every agent without anyone fetchi
 branch. Committed to a branch, a claim is invisible until the merge and turns the shared
 roadmap into a file two branches both edit. Land work with `merge`: conflicts computed by
 `git merge-tree` **before anything is touched**, named and refused if any, the merge
-recorded in `docs/MERGES.md` (recent days in full, older compacted on write), the lease
-released. `merges` tells the next agent what landed while it was away. **Read
+recorded in `docs/MERGES.md` (recent days in full, older compacted on write), the `--key`
+lease released. `merges` tells the next agent what landed while it was away. **Read
 `references/branching.md`** before merging.
 
 **3. Hooks exist only in Claude Code.** Elsewhere nothing blocks a guarded edit: run
@@ -97,10 +97,8 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" adopt
 Confirm the registers and guarded files with the operator first: a register pointed at the
 wrong file makes every later check confidently wrong, and a guarded list that misses a
 shared file leaves the one place collisions happen unprotected. In a submodule it declares
-no registers: decisions belong to the parent repository.
-
-Then: `init` → paste the approved config → `reconcile --set-baseline` → `setup` →
-commit the snapshot and link it from the project's agent instructions.
+no registers: decisions belong to the parent repository. Then take the chain above from
+`init`.
 
 ## First command in a project: `init`
 
@@ -147,7 +145,8 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" status
 ```
 
 Idempotent. Inspects, repairs what is missing, prints a status block, names exactly
-ONE next action.
+ONE next action — and carries `check`'s verdict, so the command every session runs and
+the command that validates the setup cannot give two answers about one project.
 
 **Read the two awareness sections it prints — they are the point, not decoration.**
 
@@ -191,7 +190,7 @@ npx sshlg-skills install
 | `whoami` | Print this run's id and its held leases |
 | `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
 | `adopt` | Inspect an existing project and **propose** a config — writes nothing |
-| `merge` | Land this branch: conflicts checked **before** anything is touched, merge log written, lease released. `--key`, `--summary`, `--dry-run`, `--push` |
+| `merge` | Land this branch: local target fast-forwarded, conflicts checked **before** anything is touched, merge log written, the `--key` lease released. `--summary`, `--dry-run`, `--push` |
 | `merges` | What landed while you were on your branch. `--all` includes the compacted tail |
 | `check` | Validate the whole setup end to end. Non-zero when it is not healthy |
 | `scaffold [--full]` | Create only what is missing, never a line over anything that exists. `--full` also seeds the question register, the index, the dependency board, the data model with its entity register, and the docs gate |
@@ -214,10 +213,8 @@ shared.
 
 The third matters because a plain shell command has no session id and a hook does. So
 `SessionStart` stamps `.agent-sync/sessions/<CLI pid>` with the session it knows, and a later
-command finds itself by walking its own process ancestry to a stamped pid — exact, and
-deliberately not command-line parsing: the throwaway shell every tool call runs in carries
-claude paths in its argv, so every heuristic aimed at the binary matched it instead. Stamps
-are removed when their process is gone.
+command finds itself by walking its own process ancestry to a stamped pid. Why that and not
+command-line parsing: `references/earned-rules.md`.
 
 When none of the four can be established the run says so — *"this identity is shared with any other
 session in this checkout"* — rather than presenting a shared entry as separation.
@@ -246,8 +243,11 @@ The config lists registry files several agents write. Before editing one:
 python3 "$SKILL_DIR/scripts/agent_sync.py" guard docs/DECISIONS.md
 ```
 
-Exit 2 means another run holds it. Do not edit anyway, and do not "just fix one line" —
-a clobbered decision looks exactly like a decision.
+**Exit 2 is about *this run*: it holds no lease** — not that somebody else holds that
+file. One lease covers every guarded file; hold one or write none. A denial names the
+other run **and its key**, because "r-x holds a lease" beside a path gets repeated as
+"r-x holds this file". Do not edit anyway, and do not "just fix one line" — a clobbered
+decision looks exactly like a decision.
 
 Claude Code's `PreToolUse` hook runs this for you. Elsewhere nothing does.
 
@@ -260,9 +260,9 @@ both use it.
 python3 "$SKILL_DIR/scripts/agent_sync.py" reserve DEC   # → DEC-0216
 ```
 
-Allocation is positional over the log, so every agent computes the same answer. Reserve
-and not write it to git? `release-id` it — otherwise the number is a hole the board
-reports as a leak, and nobody can tell a hole from work on a branch.
+Allocation is positional over the **merged** log — every shard, never just this run's —
+so every agent computes the same answer. Reserved and not written to git? `release-id`
+it, or the number is a hole the board reports as a leak.
 
 ## Nothing in a log is ever edited or deleted
 
@@ -304,7 +304,7 @@ which side a document belongs on.
 This skill supplies stages; it does not define them. Stage names are
 `task-pipeline`'s own.
 
-Four of the eleven stages carry a rule the others do not, and each is about ordering:
+Five of the eleven stages carry a rule the others do not, and each is about ordering:
 **0** `acquire` before the brief is committed; **1** `reconcile` and resolve every
 divergence before writing code; **3** `reserve` every id before it reaches git; **9**
 `record`, `signal`, `reconcile`, `board` — the main write point. **10** ends the run:
@@ -368,12 +368,6 @@ The mirror is a **rendering** of git, stamped with the source commit. It has no
 authority. When its stamp and `HEAD` disagree, the board gate fails — that is
 drift, not a formatting problem.
 
-## Two rules, and the failures that taught them
-
-Identity comes before coordination: a lease is only a lease if two agents get two identities. A
-submodule commit is unfinished until its parent points at it. Both:
-[`references/earned-rules.md`](references/earned-rules.md).
-
 ## Non-negotiables
 
 - Append, read back, then act. Never rewrite a coordination document.
@@ -399,6 +393,7 @@ Each file is loaded on its own trigger, not by default.
 | `references/two-sources.md` | before the first reconcile, or when deciding where a document belongs |
 | `references/roadmap.md` | configuring `claimTags`, taking or closing a task, or re-planning a board |
 | `references/branching.md` | starting work that will produce commits, merging a branch, or asking what landed while you were away |
+| `references/earned-rules.md` | asking why identity resolves the way it does, or why `finish` exists |
 
 If this copy arrived without `references/`, fetch them from
 `https://raw.githubusercontent.com/ssheleg/agent-sync/main/plugins/agent-sync/skills/agent-sync/references/<file>`.

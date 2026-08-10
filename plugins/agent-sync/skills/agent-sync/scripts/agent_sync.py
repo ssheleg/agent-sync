@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import random
 import re
 import stat
@@ -32,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.5.2"
+VERSION = "1.7.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -66,7 +67,6 @@ LOGS = {
     "claims": "30 Claims",
     "reservations": "40 Reservations",
     "signals": "50 Signals",
-    "blockers": "60 Blockers",
     # The as-built record: what agents actually implemented, as they implemented it.
     # Git documentation says how it SHOULD be — written before the code and often
     # without it. This says how it IS, derived from what was really written. They are
@@ -87,6 +87,24 @@ MAX_UNPARSEABLE = 0.02
 DEFAULT_SETTLE = 3.0
 DEFAULT_TTL = 2700
 DEFAULT_RENEW = 300
+# How long a steal section may be held before it is treated as abandoned. It covers two
+# filesystem calls, so anything longer than this is a crashed process, not slow work.
+STEAL_GRACE = 30
+# How many signal identities `status` remembers as already shown. Bounded, with a floor
+# timestamp beside it so the entries that fall out are not announced a second time.
+SEEN_CAP = 500
+
+# Every key `.claude/agent-sync.json` may carry. One list, and `agent-sync.schema.json`
+# must agree with it exactly — the validator asserts that, because the two were already
+# a second copy of each other once and disagreed: `check` called `mergeLog` (written by
+# `init` itself) and `integrationBranch` (in the schema, in the example, read below)
+# unknown keys that "will be ignored". Both statements were false, and the second was an
+# instruction: an agent making `check` green deletes working configuration.
+CONFIG_KEYS = frozenset({
+    "$schema", "backend", "leaseTtlSeconds", "renewIntervalSeconds", "gated",
+    "idRegisters", "guardedFiles", "claimTags", "gates", "mirror", "setupFile",
+    "leaseBackend", "leaseRemote", "settleSeconds", "integrationBranch", "mergeLog",
+})
 
 
 # --------------------------------------------------------------------------- utils
@@ -180,6 +198,51 @@ class Fail(Exception):
     """A failure the caller must see. Never swallowed into a success."""
 
 
+_GLOB_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def matches_glob(rel: str, pattern: str) -> bool:
+    """Repo-root-anchored glob — ONE implementation, for the guard and for `check`.
+
+    They used to have two, and the two disagreed in both directions about the same
+    pattern. `Path.match` anchors at the RIGHT, so `docs/DECISIONS.md` also matched
+    `vendor/docs/DECISIONS.md` — a file `check` (which enumerates with `glob`) never saw
+    and never validated, guarded by a rule nobody wrote. And `Path.match` does not walk
+    `**` before Python 3.13, so `docs/**/*.md` guarded less than `check` reported it did.
+
+    A pattern that means two things means nothing, so the translation lives here: `**` is
+    zero or more directories, `*` and `?` never cross a separator, everything else is
+    literal, and the whole path must match from the repository root.
+    """
+    rx = _GLOB_CACHE.get(pattern)
+    if rx is None:
+        parts: list[str] = []
+        for seg in pattern.strip("/").split("/"):
+            if seg == "**":
+                parts.append("(?:[^/]+/)*")
+                continue
+            out = ""
+            for ch in seg:
+                out += "[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch)
+            parts.append(out + "/")
+        body = "".join(parts)
+        rx = re.compile("^" + (body[:-1] if body.endswith("/") else body) + "$")
+        _GLOB_CACHE[pattern] = rx
+    return bool(rx.match(rel.replace(os.sep, "/")))
+
+
+def glob_files(root: Path, pattern: str) -> list[Path]:
+    """Every existing file the pattern covers, by the same rule the guard applies."""
+    skip = {".git", "node_modules", STATE_DIR.name}
+    out: list[Path] = []
+    for path in root.rglob("*"):
+        if skip & set(path.relative_to(root).parts):
+            continue
+        if path.is_file() and matches_glob(str(path.relative_to(root)), pattern):
+            out.append(path)
+    return out
+
+
 # --------------------------------------------------------------------------- config
 
 def find_env_file(root: Path) -> Path | None:
@@ -191,25 +254,34 @@ def find_env_file(root: Path) -> Path | None:
     unable to see anyone: three agents entered from one umbrella, coordinating with
     nobody, and each one saying `ungated` while believing it was configured.
 
-    One credential file therefore serves the whole tree: local root first, then the
-    superproject git reports, then plain parent directories.
+    So one credential file serves the whole tree — but only a tree git can vouch for.
+    The search is: `AGENT_SYNC_ENV` if set, then the local root, then each superproject
+    in turn. It used to continue into **plain parent directories** until something
+    matched, which meant a stray `.env.agent-sync` in a home or work directory silently
+    configured every project beneath it and pointed them all at one collection — a
+    coordination plane shared by projects with nothing to do with each other, discovered
+    by nobody, because a found file looks exactly like a configured one.
     """
+    explicit = os.environ.get("AGENT_SYNC_ENV")
+    if explicit:
+        path = Path(explicit).expanduser()
+        return path if path.exists() else None
+
     local = root / ENV_FILE
     if local.exists():
         return local
 
-    superproject = git("rev-parse", "--show-superproject-working-tree", cwd=root)
-    if superproject:
+    seen: set[str] = set()
+    current = root
+    for _ in range(8):                      # a submodule chain, not the whole filesystem
+        superproject = git("rev-parse", "--show-superproject-working-tree", cwd=current)
+        if not superproject or superproject in seen:
+            break
+        seen.add(superproject)
         candidate = Path(superproject) / ENV_FILE
         if candidate.exists():
             return candidate
-
-    for parent in root.resolve().parents:
-        candidate = parent / ENV_FILE
-        if candidate.exists():
-            return candidate
-        if (parent / ".git").exists() and (parent / CONFIG_PATH).exists():
-            break   # a configured project that simply has no env file — stop here
+        current = Path(superproject)
     return None
 
 
@@ -395,10 +467,6 @@ class Adapter:
         return bool(self.capabilities["atomicAppend"]
                     and self.capabilities["totalOrderRead"])
 
-    @property
-    def is_exclusive(self) -> bool:
-        """Whether a won lease is a guarantee or advice. Never assume the first."""
-        return bool(self.capabilities.get("exclusiveLease"))
 
 
 class OutlineAdapter(Adapter):
@@ -600,27 +668,46 @@ class FsAdapter(Adapter):
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", path).strip("-").lower()
         return self.base / f"{safe}.md"
 
+    # A store failure is the tool's own failure type, never a bare OSError. Callers
+    # catch `Fail` and turn it into one sentence a reader can act on; an OSError walks
+    # straight past them into `main`, and the agent is handed a Python traceback for a
+    # read-only directory — which it then reports as the state of the coordination plane.
     def tree_ensure(self, path: str) -> str:
         p = self._p(path)
-        if not p.exists():
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("")
+        try:
+            if not p.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("")
+        except OSError as exc:
+            raise Fail(f"cannot open the local plane at {p}: {exc}") from exc
         return str(p)
 
     def log_append(self, oid: str, line: str) -> None:
-        with open(oid, "a") as fh:
-            fh.write(line.rstrip("\n") + "\n")
+        try:
+            with open(oid, "a") as fh:
+                fh.write(line.rstrip("\n") + "\n")
+        except OSError as exc:
+            raise Fail(f"cannot append to {oid}: {exc}") from exc
 
     def log_read(self, oid: str) -> str:
         p = Path(oid)
-        return p.read_text() if p.exists() else ""
+        try:
+            return p.read_text() if p.exists() else ""
+        except OSError as exc:
+            raise Fail(f"cannot read {oid}: {exc}") from exc
 
     def doc_put(self, oid: str, text: str) -> None:
-        Path(oid).write_text(text)
+        try:
+            Path(oid).write_text(text)
+        except OSError as exc:
+            raise Fail(f"cannot write {oid}: {exc}") from exc
 
     def doc_get(self, oid: str) -> str:
         p = Path(oid)
-        return p.read_text() if p.exists() else ""
+        try:
+            return p.read_text() if p.exists() else ""
+        except OSError as exc:
+            raise Fail(f"cannot read {oid}: {exc}") from exc
 
     def log_shards(self, prefix: str) -> list[str]:
         stem = re.sub(r"[^A-Za-z0-9._-]+", "-", prefix).strip("-").lower()
@@ -709,11 +796,18 @@ def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, l
         if ev["key"] != reg:
             continue
         if ev["op"] == "base":
-            base = int(ev.get("value") or 0)
-            # A later `base` re-seats the allocation, so the count restarts with it. Without this
-            # reset, a re-base hands out `new_base + served` and skips as many ids as were served
-            # under the old one — and re-basing is not exotic: it is what happens whenever the
-            # register grew by a path other than this tool, which is the common case.
+            value = int(ev.get("value") or 0)
+            # A base only ever moves allocation FORWARD. Two runs opening the same register in
+            # the same minute both append the same seed, and a base that re-seated
+            # unconditionally would restart the count and hand the second run the id the first
+            # had just been given — the collision, arriving through the door built to prevent it.
+            if base is not None and value <= base + served:
+                continue
+            base = value
+            # A re-base restarts the count. Without this reset, it hands out `new_base + served`
+            # and skips as many ids as were served under the old one — and re-basing is not
+            # exotic: it is what happens whenever the register grew by a path other than this
+            # tool, which is the common case.
             served = 0
             # Ids freed below the new base are not free any more. The register moved past them, so
             # something is written there now, and handing one back would be the very collision the
@@ -747,7 +841,6 @@ class Sync:
         self.adapter = make_adapter(self.cfg, self.root)
         self.rid = run_id(self.root)
         self.ttl = int(self.cfg.get("leaseTtlSeconds") or DEFAULT_TTL)
-        self.settle = float(self.cfg.get("settleSeconds") or DEFAULT_SETTLE)
 
     @property
     def gated(self) -> bool:
@@ -807,6 +900,20 @@ class Sync:
 
         # Deterministic for every reader: time, then run, then position within a shard.
         events.sort(key=lambda e: (e["ts"], e["run"], int(e["_i"])))
+
+        # Past the threshold the log is refused, not replayed. `MAX_UNPARSEABLE` was
+        # declared and never read: the only trace of this rule was a line on the board
+        # that printed a warning and returned 0, while SKILL.md, lease-protocol.md and the
+        # README all said a log this broken stops the run. Replaying it reports holders who
+        # do not exist and silence where the real ones are — which is strictly worse than
+        # refusing, because both look like an answer.
+        total = len(events) + bad
+        if total and bad / total > MAX_UNPARSEABLE:
+            raise Fail(
+                f"the {which} log is {bad}/{total} unparseable "
+                f"({bad / total:.0%}, over the {MAX_UNPARSEABLE:.0%} limit) — refusing to "
+                "replay it. Entry-shaped lines that do not match the grammar are counted, "
+                "never guessed at; fix or remove them (see references/lease-protocol.md)")
         return events, bad
 
     # -- leases ------------------------------------------------------------
@@ -870,8 +977,8 @@ class Sync:
                 return False, held.get("run")
 
         payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name(), "host": os.uname().nodename})
-        empty_tree = git("hash-object", "-t", "tree", "/dev/null")
+                              "repo": repo_name(), "host": platform.node()})
+        empty_tree = git("hash-object", "-t", "tree", os.devnull)
         # A lease object is plumbing, not authorship, so it must not depend on the
         # machine having a git identity. Without these `-c` flags `commit-tree`
         # refuses wherever user.email is unset and cannot be auto-detected — CI
@@ -927,6 +1034,51 @@ class Sync:
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{re.sub(r'[^A-Za-z0-9_-]', '-', key)}.lock"
 
+    def _steal_expired(self, lock: Path, payload: str) -> bool:
+        """Replace an expired lock — reap and create as ONE critical section.
+
+        They used to be two calls with a gap between them, and the gap is a hole in the
+        exclusion: a second stealer that has already read the lock as expired removes the
+        lock the first one just created, and both then hold what each believes is an
+        exclusive lease. Twelve racing processes never showed it; a 300 ms delay injected
+        between the two calls produced two winners out of two, and in production that
+        delay is an ordinary scheduler hiccup.
+
+        `O_EXCL` on a second name makes the section itself exclusive, and the expiry is
+        re-read INSIDE it — so a run that gets in after the winner sees a live lease and
+        loses, rather than reaping the lease it just missed. The section covers two
+        filesystem calls, so its own abandonment grace is short; without one, a crash
+        between them would cost the key until somebody deleted a file by hand.
+        """
+        guard = lock.with_name(lock.name + ".steal")
+        try:
+            if guard.exists() and time.time() - guard.stat().st_mtime > STEAL_GRACE:
+                guard.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except OSError:
+            return False                      # another run is stealing this very lock
+        try:
+            os.close(fd)
+            try:
+                held = json.loads(lock.read_text())
+            except (json.JSONDecodeError, OSError):
+                held = {}
+            if held and time.time() <= parse_iso(held.get("ts", "")) + int(
+                    held.get("ttl", self.ttl)):
+                return False                  # renewed, or already stolen and live again
+            lock.unlink(missing_ok=True)
+            fd2 = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd2, "w") as fh:
+                fh.write(payload)
+            return True
+        except OSError:
+            return False
+        finally:
+            guard.unlink(missing_ok=True)
+
     def acquire(self, key: str) -> tuple[bool, str | None]:
         """Exclusion comes from an atomic file create; the cloud carries the record.
 
@@ -955,33 +1107,36 @@ class Sync:
             return won, holder
 
         lock = self._local_lock(key)
+        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
+                              "repo": repo_name()})
 
-        # Reap an expired lock first: it is a crashed run, not a live holder.
         if lock.exists():
             try:
                 held = json.loads(lock.read_text())
             except (json.JSONDecodeError, OSError):
                 held = {}
-            expired = time.time() > parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl))
             if held.get("run") == self.rid:
                 self._touch_renew()
                 return True, self.rid
-            if not expired:
+            if time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
                 return False, held.get("run")
-            lock.unlink(missing_ok=True)
-
-        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name()})
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            if not self._steal_expired(lock, payload):
+                try:
+                    other = json.loads(lock.read_text()).get("run")
+                except (json.JSONDecodeError, OSError):
+                    other = None
+                return False, other
+        else:
             try:
-                other = json.loads(lock.read_text()).get("run")
-            except (json.JSONDecodeError, OSError):
-                other = None
-            return False, other
-        with os.fdopen(fd, "w") as fh:
-            fh.write(payload)
+                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                try:
+                    other = json.loads(lock.read_text()).get("run")
+                except (json.JSONDecodeError, OSError):
+                    other = None
+                return False, other
+            with os.fdopen(fd, "w") as fh:
+                fh.write(payload)
 
         self._touch_renew()
         for n in self.write_claim(key, self.rid):
@@ -998,6 +1153,61 @@ class Sync:
                       file=sys.stderr)
         return True, self.rid
 
+    def _refresh_lease(self, key: str) -> bool:
+        """Move the timestamp this lease is expired by, in the plane that arbitrates it.
+
+        This is what `renew` means, and for four minor versions it did not happen. `renew`
+        appended `op=renew` to the RECORD plane — which has not decided a lease since
+        1.0.0 — and touched a throttle file. The lock's own `ts` was written once, by
+        `acquire`. So a run holding a lease lost it at TTL while still working: its own
+        guard began denying it, and another run acquired the task it was in the middle of.
+        The `PostToolUse` hook changed nothing, because there was nothing for it to move.
+        """
+        if self.lease_mode == "git":
+            sha, held = self._git_read_lease(key)
+            if not sha or held.get("run") != self.rid:
+                return False
+            payload = json.dumps({**held, "ts": now_iso()})
+            empty_tree = git("hash-object", "-t", "tree", os.devnull)
+            made = subprocess.run(
+                ["git", "-c", "user.name=agent-sync", "-c", "user.email=agent-sync@localhost",
+                 "commit-tree", empty_tree],
+                input=payload, capture_output=True, text=True)
+            commit = made.stdout.strip()
+            if not commit:
+                return False
+            # Against the exact object just read: a renewal must never overwrite a lease
+            # somebody else took while this run was between the read and the push.
+            r = subprocess.run(["git", "push", self._git_remote(),
+                                f"--force-with-lease={self._ref(key)}:{sha}",
+                                f"{commit}:{self._ref(key)}"], capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"note: could not renew {key} on the remote: {r.stderr.strip()[:160]}",
+                      file=sys.stderr)
+                return False
+            self._note_local(key, payload)
+            return True
+
+        lock = self._local_lock(key)
+        if not lock.exists():
+            return False
+        try:
+            held = json.loads(lock.read_text())
+        except (json.JSONDecodeError, OSError):
+            return False
+        if held.get("run") != self.rid:
+            return False
+        held["ts"] = now_iso()
+        tmp = lock.with_name(f"{lock.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(held))
+            tmp.replace(lock)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            print(f"note: could not renew {key} ({exc})", file=sys.stderr)
+            return False
+        return True
+
     def renew(self, key: str | None = None) -> bool:
         marker = self.root / STATE_DIR / "last-renew"
         interval = int(self.cfg.get("renewIntervalSeconds") or DEFAULT_RENEW)
@@ -1007,12 +1217,13 @@ class Sync:
         if not keys:
             self._touch_renew()
             return False
-        if self.adapter.is_lease_authority:
+        renewed = [k for k in keys if self._refresh_lease(k)]
+        if self.adapter.is_lease_authority and renewed:
             oid = self.log_id("claims")
-            for k in keys:
+            for k in renewed:
                 self.adapter.log_append(oid, fmt_line("renew", k, self.rid))
         self._touch_renew()
-        return True
+        return bool(renewed)
 
     def _touch_renew(self) -> None:
         marker = self.root / STATE_DIR / "last-renew"
@@ -1081,22 +1292,6 @@ class Sync:
                 mine.append(q.stem)
         return sorted(mine)
 
-    def _held_legacy(self) -> list[str]:
-        if not self.adapter.is_lease_authority:
-            d = self.root / STATE_DIR / "leases"
-            out = []
-            for p in (d.glob("*.lock") if d.exists() else []):
-                try:
-                    if json.loads(p.read_text()).get("run") == self.rid:
-                        out.append(p.stem)
-                except json.JSONDecodeError:
-                    continue
-            return out
-        events, _ = self.events("claims")
-        now = time.time()
-        keys = {e["key"] for e in events}
-        return sorted(k for k in keys if resolve_holder(events, k, now) == self.rid)
-
     # -- ids ---------------------------------------------------------------
 
     def reserve(self, reg: str) -> int:
@@ -1105,13 +1300,18 @@ class Sync:
                 f"backend '{self.adapter.name}' cannot reserve ids safely "
                 "(atomicAppend is false). Allocate by hand and record it, or configure a "
                 "cloud backend. Pretending would hand two agents the same id.")
+        # Every shard, not just this run's. `log_id` returns the document THIS run writes,
+        # and reading it alone was the whole defect: three runs each replayed a log
+        # containing only their own lines, each seeded a base from the register, and each
+        # was handed the same number — while `_leaks` on the same data, read merged,
+        # reported the truth. Allocation is positional over the WHOLE log or it is nothing.
         oid = self.log_id("reservations")
-        events, _ = parse_log(self.adapter.log_read(oid))
+        events, _ = self.events("reservations")
         base, _free, _assign = resolve_reservations(events, reg)
         if not base:
             base = self._seed_base(reg)
             self.adapter.log_append(oid, fmt_line("base", reg, self.rid, value=f"{base:04d}"))
-            events, _ = parse_log(self.adapter.log_read(oid))
+            events, _ = self.events("reservations")
         else:
             # The log knows what *this tool* handed out. The register knows what is actually
             # written, by every path including the ones that never touch this tool — a person
@@ -1132,10 +1332,10 @@ class Sync:
             if probed and probed[-1][1] < floor:
                 self.adapter.log_append(
                     oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
-                events, _ = parse_log(self.adapter.log_read(oid))
+                events, _ = self.events("reservations")
         self.adapter.log_append(oid, fmt_line("reserve", reg, self.rid))
         time.sleep(0.25 + random.random() * 0.15)
-        events, _ = parse_log(self.adapter.log_read(oid))
+        events, _ = self.events("reservations")
         _b, _f, assignments = resolve_reservations(events, reg)
         mine = [v for r, v in assignments if r == self.rid]
         if not mine:
@@ -1155,9 +1355,18 @@ class Sync:
         return int(m.group(1))
 
     def release_id(self, reg: str, value: str) -> None:
-        if self.adapter.is_lease_authority:
-            self.adapter.log_append(self.log_id("reservations"),
-                                    fmt_line("release_id", reg, self.rid, value=value))
+        """Return an id to the pool — or say plainly that nothing recorded it.
+
+        On a backend that cannot order writes this used to do nothing and print
+        "released" anyway. The id stayed a hole the board reports as a leak, and the only
+        party who could have fixed that had been told it was handled."""
+        if not self.adapter.is_lease_authority:
+            raise Fail(
+                f"backend '{self.adapter.name}' cannot record a released id "
+                "(atomicAppend is false), so nothing was returned to the pool. Note it in "
+                f"the register by hand, or configure a backend that can: {reg}-{value}")
+        self.adapter.log_append(self.log_id("reservations"),
+                                fmt_line("release_id", reg, self.rid, value=value))
 
     # -- journal / signals -------------------------------------------------
 
@@ -1178,39 +1387,72 @@ class Sync:
                   file=sys.stderr)
             return False
 
-    def journal(self, text: str) -> None:
+    def journal(self, text: str) -> bool:
         try:
             oid = self.adapter.tree_ensure(f"20 Runs — {self.rid}")
             self.adapter.log_append(oid, fmt_line(
                 "journal", self.rid, self.rid, sha=head_sha(),
                 note=text.replace("`", "'")[:400]))
+            return True
         except Fail as exc:
             print(f"agent-sync: journal NOT published ({exc})", file=sys.stderr)
+            return False
 
-    def signal(self, dep: str, state: str) -> None:
+    def signal(self, dep: str, state: str) -> bool:
         allowed = {"filed", "accepted", "delivered", "closed", "refused"}
         if state not in allowed:
             raise Fail(f"state must be one of {sorted(allowed)}")
-        self._publish("signals", fmt_line(
+        return self._publish("signals", fmt_line(
             "signal", dep, self.rid, state=state, repo=repo_name(), sha=head_sha()))
 
     # -- awareness ---------------------------------------------------------
 
-    def _watermark(self, which: str) -> int:
+    @staticmethod
+    def _fingerprint(ev: dict[str, str]) -> str:
+        return "|".join((ev.get("ts", ""), ev.get("run", ""), ev.get("key", ""),
+                         ev.get("op", ""), ev.get("state", "")))
+
+    def _seen(self, which: str, events: list[dict[str, str]]) -> tuple[set[str], str]:
+        """What this run has already been shown, by identity rather than by position.
+
+        This was an INDEX into a list re-sorted on every read. An entry appended by
+        another run with an earlier timestamp — clock skew, or a shard that was
+        unreachable a moment ago — lands before the mark, shifts everything after it, and
+        is never reported: the slice hands back an entry already seen instead. The one
+        section of `status` whose job is to say "this changed while you were away" went
+        quiet about precisely the change that arrived late.
+
+        Returns the seen fingerprints and a floor timestamp. The floor bounds the file:
+        older entries fell out of the kept window, and anything below it was necessarily
+        shown in an earlier run.
+        """
         p = self.root / STATE_DIR / "seen.json"
         try:
-            return int(json.loads(p.read_text()).get(which, 0))
+            entry = json.loads(p.read_text()).get(which)
         except (OSError, ValueError, AttributeError):
-            return 0
+            return set(), ""
+        if isinstance(entry, dict):
+            return set(entry.get("fingerprints") or []), str(entry.get("floor") or "")
+        if isinstance(entry, int):
+            # The old index watermark meant "the first N were shown". Honour that reading
+            # once, so upgrading does not re-announce a year of signals.
+            return {self._fingerprint(e) for e in events[:entry]}, ""
+        return set(), ""
 
-    def _set_watermark(self, which: str, value: int) -> None:
+    def _set_seen(self, which: str, events: list[dict[str, str]]) -> None:
         p = self.root / STATE_DIR / "seen.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         try:
             data = json.loads(p.read_text())
         except (OSError, ValueError):
             data = {}
-        data[which] = value
+        kept = events[-SEEN_CAP:]
+        # The floor exists ONLY to cover entries that fell out of the kept window. Setting
+        # it whenever anything is remembered would re-create the bug in a new shape: an
+        # entry that arrives with an older timestamp is below the floor, and gets filtered
+        # out as "necessarily seen" when nothing has ever shown it.
+        data[which] = {"fingerprints": [self._fingerprint(e) for e in kept],
+                       "floor": kept[0]["ts"] if len(events) > SEEN_CAP and kept else ""}
         p.write_text(json.dumps(data))
 
     def activity(self, limit: int = 6, mark_read: bool = True) -> dict[str, Any]:
@@ -1223,10 +1465,11 @@ class Sync:
         others = {k: v for k, v in self.all_holdings().items() if v["run"] != self.rid}
 
         signals, _ = self.events("signals")
-        seen = self._watermark("signals")
-        fresh = signals[seen:] if len(signals) > seen else []
+        seen, floor = self._seen("signals", signals)
+        fresh = [e for e in signals
+                 if self._fingerprint(e) not in seen and e.get("ts", "") >= floor]
         if mark_read:
-            self._set_watermark("signals", len(signals))
+            self._set_seen("signals", signals)
 
         return {"others": others, "signals": signals[-limit:], "new_signals": fresh}
 
@@ -1235,20 +1478,35 @@ class Sync:
     def _claim_targets(self, key: str) -> list[tuple[Path, dict[str, Any]]]:
         out = []
         for pattern, spec in (self.cfg.get("claimTags") or {}).items():
-            for path in sorted(self.root.glob(pattern)):
-                if path.is_file():
-                    out.append((path, spec))
+            for path in sorted(glob_files(self.root, pattern)):
+                out.append((path, spec))
         return out
+
+    @staticmethod
+    def _split_row(line: str) -> tuple[str, list[str], str] | None:
+        """(prefix, cells, suffix) — everything needed to put the row back untouched.
+
+        The row used to be rebuilt from its cells alone, so the indentation and the
+        original line ending were dropped: a round-trip left a diff on a shared registry
+        file that nobody made, on the one kind of file agents are told never to touch
+        casually. `SKILL.md` promises `git diff` empty after acquire-then-release, and now
+        the bytes outside the edited cell are carried through rather than reconstructed.
+        """
+        stripped = line.lstrip()
+        if not stripped.startswith("|"):
+            return None
+        prefix = line[:len(line) - len(stripped)]
+        core = stripped.rstrip()
+        suffix = stripped[len(core):]
+        if core.endswith("|"):
+            core, suffix = core[:-1], "|" + suffix
+        return prefix, core[1:].split("|"), suffix
 
     @staticmethod
     def _row_cells(line: str) -> list[str] | None:
         """Split a markdown table row, or None if this is not one."""
-        if not line.lstrip().startswith("|"):
-            return None
-        raw = line.strip()
-        if raw.endswith("|"):
-            raw = raw[:-1]
-        return raw[1:].split("|")
+        split = Sync._split_row(line)
+        return split[1] if split else None
 
     # -- branch discipline -------------------------------------------------
 
@@ -1393,8 +1651,9 @@ class Sync:
                 continue
 
             i = hits[0]
-            cells = self._row_cells(lines[i])
-            assert cells is not None
+            split = self._split_row(lines[i])
+            assert split is not None
+            row_prefix, cells, row_suffix = split
             if idx < 0:
                 idx = len(cells) + idx
             if not 0 <= idx < len(cells):
@@ -1427,7 +1686,7 @@ class Sync:
                 if not state.get(key):
                     state.pop(key, None)
 
-            lines[i] = "|" + "|".join(cells) + "|\n"
+            lines[i] = row_prefix + "|" + "|".join(cells) + row_suffix
             tmp = path.with_suffix(path.suffix + ".agent-sync.tmp")
             tmp.write_text("".join(lines))
             tmp.replace(path)
@@ -1486,9 +1745,9 @@ class Sync:
 
     # -- as-built record and reconciliation ---------------------------------
 
-    def record(self, text: str, decision: str = "", files: str = "") -> None:
+    def record(self, text: str, decision: str = "", files: str = "") -> bool:
         """Append what was ACTUALLY built. Not a plan, not an intention."""
-        self._publish("asbuilt", fmt_line(
+        return self._publish("asbuilt", fmt_line(
             "asbuilt", decision or "-", self.rid, repo=repo_name(), sha=head_sha(),
             files=files.replace("`", "'")[:200],
             note=text.replace("`", "'")[:400]))
@@ -1629,7 +1888,7 @@ class Sync:
     def guard(self, path: str) -> tuple[bool, str]:
         rel = os.path.relpath(os.path.abspath(path), str(self.root))
         patterns = self.cfg.get("guardedFiles") or []
-        if not any(Path(rel).match(p) for p in patterns):
+        if not any(matches_glob(rel, p) for p in patterns):
             return True, "not a guarded file"
 
         # A lease is required in every mode. What differs between backends is how
@@ -1641,29 +1900,20 @@ class Sync:
             note = "" if self.gated else " (advisory: arbitrated locally only)"
             return True, f"held by this run ({', '.join(held)}){note}"
 
+        # Name the OTHER key, never just the other run. "r-x holds a lease right now"
+        # beside a path reads as "r-x holds this file" — which is not what was checked,
+        # and an agent that repeats it puts a fact in the transcript with no source.
         other = self._any_other_holder()
-        who = f" — {other} holds a lease right now" if other else ""
-        return False, (f"{rel} is a guarded registry file and this run holds no lease{who}. "
+        who = (f" Another run ({other[0]}) holds {other[1]} — a different task, not this file."
+               if other else "")
+        return False, (f"{rel} is a guarded registry file and this run holds no lease.{who} "
                        f"Acquire one first: agent_sync.py acquire <TASK-ID>")
 
-    def _any_other_holder(self) -> str | None:
-        if self.adapter.is_lease_authority:
-            events, _ = self.events("claims")
-            now = time.time()
-            for key in {e["key"] for e in events}:
-                holder = resolve_holder(events, key, now)
-                if holder and holder != self.rid:
-                    return holder
-            return None
-        d = self.root / STATE_DIR / "leases"
-        for p in (d.glob("*.lock") if d.exists() else []):
-            try:
-                held = json.loads(p.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-            if held.get("run") != self.rid and \
-                    time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
-                return str(held.get("run"))
+    def _any_other_holder(self) -> tuple[str, str] | None:
+        """(run, key) of some lease another run holds — both halves, or neither."""
+        for key, holding in sorted(self.all_holdings().items()):
+            if holding.get("run") and holding["run"] != self.rid:
+                return str(holding["run"]), key
         return None
 
     # -- board -------------------------------------------------------------
@@ -2137,11 +2387,27 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
     # Who else is in here, and what landed while this run was away. Without this a
     # lease only tells an agent it is blocked, never who by or on what.
+    plane_broken = False
+
+    # The two logs this command reports on, checked before it reports on them. With a
+    # local lease the claims log is a record rather than the source of holdings, so
+    # nothing on the awareness path would have touched it — and `status` would print a
+    # confident "other runs: none" over a log that cannot be replayed at all.
+    for which in ("claims", "signals"):
+        try:
+            s.events(which)
+        except Fail as exc:
+            print(f"\n✗ {exc}")
+            plane_broken = True
+
     try:
         act = s.activity()
     except Fail as exc:
-        print(f"\n⚠ could not read the coordination plane: {exc}")
+        # Not a warning to read past: with the plane unreadable this run cannot see who
+        # else is working, which is the half of coordination that is not the lease.
+        print(f"\n✗ could not read the coordination plane: {exc}")
         act = {"others": {}, "signals": [], "new_signals": []}
+        plane_broken = True
 
     if act["others"]:
         print("\n  Other runs working this project right now:")
@@ -2179,6 +2445,28 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("\n✗ task-pipeline is not installed. agent-sync binds to its stages and")
         print("  will not improvise a substitute flow.")
         print("\nNEXT:\n  npx sshlg-skills install")
+        return 1
+
+    if plane_broken:
+        print("\nNEXT: repair the coordination plane — until it reads, this run is working")
+        print("  blind to every other one.")
+        return 1
+
+    # The same verdict `check` gives, from the command every session actually runs. Two
+    # commands answering one question differently is how a broken setup stays invisible:
+    # `status` used to print "NEXT: acquire a lease" on a project `check` called unhealthy.
+    try:
+        _ok, _warn, setup_problems = check_setup(root)
+    except Fail as exc:
+        setup_problems = [str(exc)]
+    if setup_problems:
+        print(f"\n✗ `check` reports {len(setup_problems)} problem(s) with this setup:")
+        for problem in setup_problems[:4]:
+            print(f"    · {problem}")
+        if len(setup_problems) > 4:
+            print(f"    · … and {len(setup_problems) - 4} more")
+        print("\nNEXT: fix the setup before coordinating on it —")
+        print("  agent_sync.py check")
         return 1
 
     print("\nNEXT: acquire a lease before you touch a guarded file —")
@@ -2258,12 +2546,12 @@ def cmd_release_id(args: argparse.Namespace) -> int:
 
 
 def cmd_journal(args: argparse.Namespace) -> int:
-    Sync().journal(" ".join(args.text))
-    return 0
+    return 0 if Sync().journal(" ".join(args.text)) else 1
 
 
 def cmd_signal(args: argparse.Namespace) -> int:
-    Sync().signal(args.dep, args.state)
+    if not Sync().signal(args.dep, args.state):
+        return 1
     print(f"{args.dep} → {args.state}")
     return 0
 
@@ -2296,7 +2584,11 @@ def cmd_board(args: argparse.Namespace) -> int:
 
 
 def cmd_record(args: argparse.Namespace) -> int:
-    Sync().record(" ".join(args.text), decision=args.decision or "", files=args.files or "")
+    # Non-zero when the entry did not land. Printing "recorded" over a stderr line saying
+    # the opposite is how an agent ends up reporting an as-built record that does not exist.
+    if not Sync().record(" ".join(args.text), decision=args.decision or "",
+                         files=args.files or ""):
+        return 1
     print("recorded")
     return 0
 
@@ -2791,39 +3083,35 @@ def cmd_finish(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_check(_args: argparse.Namespace) -> int:
+def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
     """Validate the whole setup, end to end, and refuse to call a broken one healthy.
 
     Every item here failed for real at some point in this tool's own adoption. A glob
     that matches nothing, a register pattern that matches nothing, a gate command that
     does not exist, a snapshot nobody links — each looks like a working install and
     protects nothing.
+
+    Returns `(ok, warn, problems)` rather than printing, because `status` reports the same
+    verdict and the two must not be able to disagree. They did: `status` printed "NEXT:
+    acquire a lease" and exited 0 on a project `check` called NOT healthy — and `status`
+    is the command every session runs, so the defect had a place to hide in plain sight.
     """
-    root = project_root()
-    os.chdir(root)
-    load_env_file(root)
     problems: list[str] = []
     warn: list[str] = []
     ok: list[str] = []
 
     cfg_path = root / CONFIG_PATH
     if not cfg_path.exists():
-        print("✗ not initialised — run `adopt`, then `init`")
-        return 1
+        raise Fail("not initialised — run `adopt`, then `init`")
     try:
         cfg = json.loads(cfg_path.read_text())
     except json.JSONDecodeError as exc:
-        print(f"✗ {CONFIG_PATH} is not valid JSON: {exc}")
-        return 1
+        raise Fail(f"{CONFIG_PATH} is not valid JSON: {exc}") from exc
     ok.append(f"config parses ({CONFIG_PATH})")
 
     if cfg.get("backend") not in ("outline", "fs"):
         problems.append(f"backend '{cfg.get('backend')}' is not a known adapter")
-    unknown = set(cfg) - {"$schema", "backend", "leaseTtlSeconds", "renewIntervalSeconds",
-                          "gated", "idRegisters", "guardedFiles", "claimTags", "gates",
-                          "mirror", "setupFile", "leaseBackend", "leaseRemote",
-                          "settleSeconds"}
-    for k in sorted(unknown):
+    for k in sorted(set(cfg) - CONFIG_KEYS):
         problems.append(f"config key '{k}' is not in the schema — it will be ignored")
 
     # Registers must exist AND their allocation pattern must actually match.
@@ -2845,9 +3133,10 @@ def cmd_check(_args: argparse.Namespace) -> int:
         else:
             ok.append(f"register {reg} allocates from {spec['file']} ({reg}-{m.group(1)})")
 
-    # A guard glob that matches nothing protects nothing.
+    # A guard glob that matches nothing protects nothing. Resolved by the same function
+    # the guard itself applies, so the two commands cannot disagree about one pattern.
     for pattern in (cfg.get("guardedFiles") or []):
-        hits = [q for q in root.glob(pattern) if q.is_file()]
+        hits = glob_files(root, pattern)
         if not hits:
             problems.append(f"guarded pattern '{pattern}' matches no file — it guards nothing")
     if cfg.get("guardedFiles"):
@@ -2856,7 +3145,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
         warn.append("no guarded files — nothing requires a lease in this repository")
 
     for pattern, spec in (cfg.get("claimTags") or {}).items():
-        files = [q for q in root.glob(pattern) if q.is_file()]
+        files = glob_files(root, pattern)
         if not files:
             problems.append(f"claimTags pattern '{pattern}' matches no file")
             continue
@@ -2904,8 +3193,14 @@ def cmd_check(_args: argparse.Namespace) -> int:
         if not mirror.get("sources"):
             problems.append("mirror is enabled with no sources — it renders nothing")
 
-    # Identity and reachability.
+    # Identity and reachability. Which file is in force is reported in every mode: it may
+    # be the local one, a superproject's, or one named by AGENT_SYNC_ENV, and an operator
+    # debugging a degraded run needs to know which of the three answered.
     env = find_env_file(root)
+    if env is not None and env.parent != root:
+        ok.append(f"credentials file in force: {env} (outside this repository)")
+    elif env is not None:
+        ok.append(f"credentials file in force: {env}")
     if cfg.get("backend") == "outline":
         if env is None:
             problems.append(f"no {ENV_FILE} found here or in any parent — the backend "
@@ -2963,18 +3258,32 @@ def cmd_check(_args: argparse.Namespace) -> int:
             problems.append("no agent instruction file links the snapshot — agents will "
                             "not find it, and will infer the pipeline instead")
 
-    # Baselines: without one, reconcile cannot separate history from new work.
-    if regs:
-        try:
-            s = Sync()
-            ev, _ = s.events("asbuilt")
-            based = {e["key"] for e in ev if e["op"] == "baseline"}
-            for reg in regs:
-                if reg not in based:
-                    warn.append(f"register {reg} has no as-built baseline — "
-                                "run `reconcile --set-baseline` once")
-        except Fail:
-            pass
+    # Every log this project keeps must be replayable. A log past the unparseable limit is
+    # refused by every reader, so a setup carrying one is broken however well it is wired —
+    # and the failure used to be swallowed here by a bare `except Fail: pass`.
+    try:
+        s = Sync()
+    except Fail as exc:
+        problems.append(f"cannot open the project: {exc}")
+        s = None
+    if s is not None:
+        for which in sorted(LOGS):
+            try:
+                s.events(which)
+            except Fail as exc:
+                problems.append(f"{which} log: {exc}")
+
+        # Baselines: without one, reconcile cannot separate history from new work.
+        if regs:
+            try:
+                ev, _ = s.events("asbuilt")
+                based = {e["key"] for e in ev if e["op"] == "baseline"}
+                for reg in regs:
+                    if reg not in based:
+                        warn.append(f"register {reg} has no as-built baseline — "
+                                    "run `reconcile --set-baseline` once")
+            except Fail:
+                pass          # already reported above; one line per defect, not two
 
     tracked_state = git("ls-files", "--", STATE_DIR)
     if tracked_state:
@@ -2985,6 +3294,24 @@ def cmd_check(_args: argparse.Namespace) -> int:
             f"Run: git rm -r --cached {STATE_DIR} && commit")
     else:
         ok.append(f"{STATE_DIR}/ is not tracked")
+
+    if cfg.get("settleSeconds") is not None:
+        warn.append("settleSeconds is set but no shipped adapter reads it — it is retained "
+                    "for a backend that must wait for writes to become visible, and does "
+                    "nothing here")
+
+    return ok, warn, problems
+
+
+def cmd_check(_args: argparse.Namespace) -> int:
+    root = project_root()
+    os.chdir(root)
+    load_env_file(root)
+    try:
+        ok, warn, problems = check_setup(root)
+    except Fail as exc:
+        print(f"✗ {exc}")
+        return 1
 
     for line in ok:
         print(f"  ✓ {line}")
@@ -3051,6 +3378,32 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     git("fetch", "--quiet", "origin", target)
     upstream = f"origin/{target}" if git("rev-parse", "--verify", "--quiet", f"origin/{target}") else target
+
+    # The conflict preflight, the diff and the merge must all be against the SAME base.
+    # They were not: everything was measured against `origin/<target>` and the merge was
+    # then made into the LOCAL `<target>`, which nothing advances. So `merge` printed the
+    # staleness it had just measured, printed "✓ merged", wrote a merge-log entry and
+    # released the lease — and the push was rejected as non-fast-forward. The work had not
+    # landed, the log said it had, and the task was free for somebody else to take.
+    if upstream != target:
+        local_exists = bool(git("rev-parse", "--verify", "--quiet", f"refs/heads/{target}"))
+        behind_local = git("rev-list", "--count", f"{target}..{upstream}") if local_exists else "0"
+        ahead_local = git("rev-list", "--count", f"{upstream}..{target}") if local_exists else "0"
+        if local_exists and behind_local not in ("", "0") and ahead_local not in ("", "0"):
+            raise Fail(
+                f"local {target} has diverged from {upstream} — {ahead_local} commit(s) here "
+                f"that are not there, {behind_local} there that are not here. Reconcile it "
+                f"first; merging into it would produce a branch nobody can push")
+        if not local_exists or behind_local not in ("", "0"):
+            moved = subprocess.run(
+                ["git", "update-ref", f"refs/heads/{target}",
+                 git("rev-parse", upstream)], capture_output=True, text=True)
+            if moved.returncode != 0:
+                raise Fail(f"could not fast-forward {target} to {upstream}: "
+                           f"{moved.stderr.strip()[:160]}")
+            if local_exists:
+                print(f"  {target} fast-forwarded {behind_local} commit(s) to {upstream}")
+
     behind = git("rev-list", "--count", f"{branch}..{upstream}")
     changed = [l for l in (git("diff", "--name-only", f"{upstream}...{branch}") or "").splitlines() if l]
     stat = git("diff", "--shortstat", f"{upstream}...{branch}") or "no changes"
@@ -3105,7 +3458,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
                     f"docs(merges): record {branch} → {target}"], capture_output=True)
     print(f"✓ recorded in {rel_log}")
 
-    for key in (s.held() or []):
+    # Only the lease this merge landed. It used to release every lease the run held, which
+    # is a different statement from the one the documentation makes and quietly frees work
+    # that has not landed.
+    held = s.held()
+    if args.key:
+        to_release = [args.key] if args.key in held else []
+        if not to_release and held:
+            print(f"note: this run does not hold {args.key}; leaving "
+                  f"{', '.join(held)} held")
+    else:
+        to_release = held
+    for key in to_release:
         s.release(key)
         print(f"✓ released {key}")
 

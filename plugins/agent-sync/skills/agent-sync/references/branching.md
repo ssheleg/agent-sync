@@ -45,8 +45,15 @@ In order, and every check before anything is touched:
 
 1. **Refuses a detached HEAD, the integration branch itself, and a dirty tree.** A merge
    cannot tell uncommitted work from the branch's own commits.
-2. **Fetches the integration branch** and reports how far it moved since the branch
-   started — the number that predicts how stale the work is.
+2. **Fetches the integration branch and fast-forwards the local one to it**, so the
+   preflight and the merge share a base, then reports how far it moved since the branch
+   started. Until 1.6.0 they did not share one: conflicts and the diff were measured
+   against `origin/<target>` while the merge went into a local `<target>` nothing
+   advanced — so `merge` printed the staleness it had just measured, printed `✓ merged`,
+   wrote the log entry and released the lease, and the push was rejected. The work had not
+   landed, the log said it had, and the task was free for somebody else. A local branch
+   that has *diverged* (commits on both sides) cannot be fast-forwarded and is refused
+   with both counts.
 3. **Computes conflicts with `git merge-tree`**, in memory. A merge that starts and then
    aborts leaves the operator in a repository they did not ask for. On conflict it names
    the files, changes nothing, and exits non-zero: resolve in your own branch, where the
@@ -55,8 +62,14 @@ In order, and every check before anything is touched:
    the same files, they merge into what is about to land.
 5. Merges `--no-ff`, so the branch stays visible in history.
 6. **Writes the merge log** and commits it.
-7. **Releases every lease this run holds.** A run that ends holding one blocks the next
-   agent for the whole TTL.
+7. **Releases the lease named by `--key`.** Only that one: releasing every lease the run
+   holds is a different statement from the one this step makes, and it quietly frees work
+   that has not landed. Without `--key` there is nothing to name, so it releases what the
+   run holds and says so. A run that ends holding a lease blocks the next agent for the
+   whole TTL — so release, but release what you landed.
+
+The remote is `origin`, the conventional home of the integration branch. `leaseRemote` is a
+different setting for a different job: where the lease refs live.
 
 `--dry-run` stops after step 4. `--push` pushes the integration branch afterwards;
 without it, `finish` is the next call — it checks every repository, not just this one.
