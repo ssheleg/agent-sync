@@ -4,7 +4,7 @@
 
 | Date | Commit | What ran |
 |---|---|---|
-| 2026-08-10 | `1ac6f14` | Audit of 1.5.2, then 1.5.3 → 1.6.0 → 1.7.0 |
+| 2026-08-10 | `1f1f7b9` | Audit of 1.5.2, then 1.5.3 → 1.6.0 → 1.7.0, released and published |
 
 ## Standing instructions
 
@@ -13,7 +13,7 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
 
 1. **A check that has never been watched fail is not evidence.** Every check in `test/validate.py`
    has a self-test fixture that plants its defect back. Adding a check without one is adding a
-   green light with no bulb. *(Became partly mechanical this run — the self-test enumerates 27
+   green light with no bulb. *(Became partly mechanical this run — the self-test enumerates 28
    fixtures — but "add the fixture with the check" is still a habit, not a gate.)*
 2. **Test the composition, not only the unit.** Every defect the 2026-08-10 audit found lived in
    the gap between two things already tested separately: the allocator was correct and `reserve`
@@ -22,12 +22,16 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
 3. **Run the commands before writing about them.** The audit that found six shipped defects did it
    by executing `init`, `check`, `reserve`, `renew`, `merge` and reading the output — not by
    reading the source. The validator was green throughout.
-4. **Print success only after it is established.** `record`, `release-id`, `merge` and `board` each
+4. **Run them somewhere that lacks your conveniences.** This machine has the whole skill family
+   installed, so `status` never reached its task-pipeline gate here and a defect behind that gate
+   was invisible for a full day of green local runs. CI found it in sixteen seconds. When a check
+   passes locally, ask what this box has that a runner does not.
+5. **Print success only after it is established.** `record`, `release-id`, `merge` and `board` each
    printed a result before, or without, checking that it had been achieved. An agent quotes stdout.
-5. **When one fact lives in two files, one of them is already wrong.** `CONFIG_KEYS` vs the schema,
+6. **When one fact lives in two files, one of them is already wrong.** `CONFIG_KEYS` vs the schema,
    the stage numbers in three documents, the guard's glob vs `check`'s. The fix is a single source
    plus a check that the others quote it — `lease_guarantee()` is the pattern to copy.
-6. **`SKILL.md` is at its token ceiling.** Every addition must displace something. Move the *why*
+7. **`SKILL.md` is at its token ceiling.** Every addition must displace something. Move the *why*
    into `references/` and leave the rule in the body; the budget is a real constraint, not a lint.
 
 ## Entries
@@ -53,9 +57,9 @@ sentence about what a lease is worth; nothing asserted the lease behaves that wa
 checks. Neither could see the gap between them, and a suite made only of such checks reports green
 with confidence proportional to its coverage of the wrong thing.
 
-**Fix, by grade.** Mechanical: seventeen new checks that drive the real commands from more than one
-identity, plus seventeen self-test fixtures planting each defect back. Standing instructions 1–3
-above, for the habits the checks cannot encode.
+**Fix, by grade.** Mechanical: eighteen new checks that drive the real commands from more than one
+identity (17 → 35 in `main()`), plus fourteen new self-test fixtures planting each defect back
+(14 → 28). Standing instructions 1–4 above, for the habits the checks cannot encode.
 
 **The check that catches it next time.** `check_reserve_is_race_free`,
 `check_renew_extends_the_lease`, `check_config_round_trip`, `check_no_success_on_failed_publish`,
