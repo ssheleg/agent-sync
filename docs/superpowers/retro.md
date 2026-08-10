@@ -5,7 +5,8 @@
 | Date | Commit | What ran |
 |---|---|---|
 | 2026-08-10 | `1f1f7b9` | Audit of 1.5.2, then 1.5.3 → 1.6.0 → 1.7.0, released and published |
-| 2026-08-10 | `HEAD` | Second audit along the agent-usage axis → 1.7.1 |
+| 2026-08-10 | `7457c52` | Second audit along the agent-usage axis → 1.7.1 |
+| 2026-08-10 | `18b29b8` | Board cleared → 1.8.0 |
 
 ## Standing instructions
 
@@ -40,6 +41,40 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
    rule changes, grep the generators before closing the task.
 
 ## Entries
+
+### 2026-08-10 (board clearing) — standing instruction 4 fired, twice, in one day
+
+**Symptom.** Two checks written this run passed locally and failed on CI, both because this
+machine has something a runner does not. `check_status_reports_the_setup_verdict` passed because
+the skill family is installed here. `check_merge_releases_only_its_key` passed because
+`~/.gitconfig` supplies a git identity here, so anything the tool itself commits has an author.
+
+**Surfaced at.** The release run, both times — after the tag was pushed.
+
+**Owned by.** The fixtures. Neither defect was in the product: `merge` refused correctly and
+restored the branch, with an accurate message. The tests were the things that only worked here.
+
+**Root cause.** A fixture that inherits the developer's environment is testing the developer's
+environment. The first fix was to read `HOME`; the second needed `GIT_CONFIG_GLOBAL` and
+`GIT_CONFIG_SYSTEM` too, because unsetting the *repository* keys still left the global file
+answering. Standing instruction 4 named this class after the first one and did not prevent the
+second — because it said *ask what this box has*, and the answer the second time was a different
+thing entirely.
+
+**Fix, by grade.** Mechanical: `check_commands_work_without_the_family_installed` proves its own
+isolation before asserting; `check_merge_refuses_without_an_identity` isolates all three config
+scopes; `_git_project` gives every fixture a repository identity the way a real repository has one.
+Product: `merge` now checks for a committer identity in its preflight, where the rest of its checks
+already live.
+
+**The check that catches it next time.** The two above — and the honest note that they catch two
+*specific* absences, not the class. The class is caught by CI, which is why a release that fails
+there is information rather than an obstacle.
+
+**A finding worth keeping.** Planting "a live lease can be taken by a second run" needed two
+mutations, not one: breaking `acquire`'s expiry check alone still refuses the steal, because
+`_steal_expired` re-reads the expiry inside the critical section. The single-point fixture was
+MISSED, and that miss is the evidence that the exclusion has two independent layers.
 
 ### 2026-08-10 (second pass) — the code was right and the instructions were two versions old
 
