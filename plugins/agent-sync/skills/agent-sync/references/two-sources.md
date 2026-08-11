@@ -3,6 +3,16 @@
 **Read this when** starting a task, finishing one, or deciding where a piece of
 documentation belongs.
 
+## Contents
+
+- [They answer different questions](#they-answer-different-questions)
+- [The duty, both ends of a task](#the-duty-both-ends-of-a-task)
+- [What `reconcile` decides, and what it refuses to](#what-reconcile-decides-and-what-it-refuses-to)
+- [The baseline — why the check is a ratchet](#the-baseline--why-the-check-is-a-ratchet)
+- [Where a piece of documentation belongs](#where-a-piece-of-documentation-belongs)
+- [Lifetime, and why nothing is deleted](#lifetime-and-why-nothing-is-deleted)
+
+
 ## They answer different questions
 
 | Source | Answers | Written | Authority over |

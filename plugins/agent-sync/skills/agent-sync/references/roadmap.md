@@ -3,6 +3,16 @@
 **Read this when** configuring `claimTags`, taking or releasing a task, closing one, or
 re-planning work that is already on a board.
 
+## Contents
+
+- [The two records, and why both exist](#the-two-records-and-why-both-exist)
+- [How the write is made safe](#how-the-write-is-made-safe)
+- [Configuring it](#configuring-it)
+- [Closing a task](#closing-a-task)
+- [Re-planning](#re-planning)
+- [When the claim cannot be written](#when-the-claim-cannot-be-written)
+
+
 The roadmap is where a project says *what is being done and by whom*. With several
 agents it is also the file most likely to be written by two of them at once, which is why
 it is guarded — and why the tool touches it as narrowly as it possibly can.

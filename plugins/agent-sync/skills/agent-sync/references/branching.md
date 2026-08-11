@@ -3,6 +3,15 @@
 **Read this when** starting work that will produce commits, merging a branch, or deciding
 where a claim should be written.
 
+## Contents
+
+- [The rule](#the-rule)
+- [Where a claim lives](#where-a-claim-lives)
+- [Landing the work](#landing-the-work)
+- [The merge log](#the-merge-log)
+- [What this does not do](#what-this-does-not-do)
+
+
 ## The rule
 
 > **Work happens on a branch. The integration branch is somebody else's stable base.**

@@ -2,6 +2,17 @@
 
 **Read this when** making any Outline API call or debugging one.
 
+## Contents
+
+- [Shape of the API](#shape-of-the-api)
+- [Capabilities](#capabilities)
+- [Primitive mapping](#primitive-mapping)
+- [Calling it without leaking the token](#calling-it-without-leaking-the-token)
+- [Rate limits](#rate-limits)
+- [Getting a token](#getting-a-token)
+- [Verifying an instance](#verifying-an-instance)
+
+
 [Outline](https://www.getoutline.com) is a collaborative knowledge base, available
 hosted or self-hosted. Both work; the instance URL is configuration, never code.
 

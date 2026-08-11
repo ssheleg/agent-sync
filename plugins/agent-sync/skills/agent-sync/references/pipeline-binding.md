@@ -2,6 +2,16 @@
 
 **Read this when** wiring `pipeline.json`, or adding a stage hook.
 
+## Contents
+
+- [The numbers, once](#the-numbers-once)
+- [Where it plugs in](#where-it-plugs-in)
+- [pipeline.json](#pipelinejson)
+- [What must be guarded](#what-must-be-guarded)
+- [Preflight](#preflight)
+- [Gate expressions](#gate-expressions)
+
+
 `agent-sync` supplies stages; it does not define them. The stage names below are
 `task-pipeline`'s own — do not rename, renumber or fork them.
 

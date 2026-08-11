@@ -1,3 +1,13 @@
+## v1.8.1
+
+### Changed
+
+- **Six references over 100 lines now open with a `## Contents` list.** The
+  canon asks for it because a partial read is what an agent actually does with
+  a long reference; without the list, a partial read returns an arbitrary
+  slice. Generated from each file's own `##` headings, so the list cannot
+  disagree with the document.
+
 ## v1.8.0
 
 **The board, cleared.** Nine rows opened by the two audits of 2026-08-10, closed with a check, a

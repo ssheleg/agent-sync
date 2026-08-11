@@ -3,6 +3,16 @@
 **Read this when** changing acquisition, expiry, stealing, or id allocation — or
 when two agents disagree about who holds something.
 
+## Contents
+
+- [Line grammar](#line-grammar)
+- [Acquiring — the third design, and the first that is true](#acquiring--the-third-design-and-the-first-that-is-true)
+- [Expiry and stealing](#expiry-and-stealing)
+- [Releasing](#releasing)
+- [Id reservation](#id-reservation)
+- [The lease is not the claim](#the-lease-is-not-the-claim)
+
+
 Two different mechanisms, and confusing them is how this went wrong twice:
 
 > **A lease is decided by an atomic operation** — `O_EXCL` on one filesystem, or a pushed
