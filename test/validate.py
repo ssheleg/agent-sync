@@ -1608,7 +1608,10 @@ def check_release_notes_are_extractable() -> None:
         err(f"release notes: no CHANGELOG section found for {version} — the tag will be "
             "pushed, the workflow will fail at that step, and nothing will publish")
     # And it must STOP at the next heading, or the notes carry the whole history.
-    headings = [l for l in out.stdout.splitlines() if re.match(r"^## v?\d", l)]
+    # The pattern accepts the bracketed form too: the extraction's own terminator
+    # stops at `## [1.9.0]`, so a spill check blind to brackets could not see the
+    # one case the terminator was widened to handle.
+    headings = [l for l in out.stdout.splitlines() if re.match(r"^## \[?v?\d", l)]
     if headings:
         err(f"release notes: the extracted section runs past its own version into "
             f"{headings[0]!r} — the stop pattern does not match the heading style")
@@ -2207,9 +2210,16 @@ def self_test() -> int:
                 '            lines[i] = "|" + "|".join(cells) + "|\\n"')),
         # The defect that kept three tagged releases off npm: the extraction matched
         # `## 1.5.2` while the CHANGELOG writes `## v1.5.2`.
+        #
+        # The source string tracks the workflow's current pattern and must be
+        # updated with it. When the family canonicalised on one accepting shape
+        # (B-11), this replace stopped matching, the defect stopped being planted,
+        # and the self-test reported `undetected` — a guard that had been proving
+        # nothing would have looked like a guard that passed.
         "release notes cannot be extracted": (
             ".github/workflows/release.yml",
-            lambda t: t.replace('$0 ~ "^## v?" v "([^0-9]|$)"', '$0 ~ "^## " v "([^0-9]|$)"')),
+            lambda t: t.replace('$0 ~ "^## \\\\[?v?" v "\\\\]?([^0-9]|$)"',
+                                '$0 ~ "^## " v "([^0-9]|$)"')),
         # --- the 1.7.1 defects: how the skill reads to the agent using it ---
         "the slash command offers a verb the CLI lacks": (
             "plugins/agent-sync/commands/agent-sync.md",
