@@ -1,3 +1,15 @@
+## v1.8.3
+
+### Changed
+
+- **The body is back inside the token budget** — ~5124 → ~4996 of 5000. Two sections
+  were restating references that already carry the depth: *Two documentation sources*
+  duplicated three sections of `two-sources.md`, and the stage list duplicated
+  `pipeline-binding.md`. The body keeps the principle and the trap — `reconcile` is
+  mechanical and refuses to judge whether the built thing matches the document, so
+  reading its green as agreement is how a divergence survives both ends — and the depth
+  stays where it already was.
+
 ## v1.8.2
 
 ### Changed

@@ -11,7 +11,7 @@
       "displayName": "Agent Sync",
       "source": "./plugins/agent-sync",
       "description": "Coordination layer for multi-agent repositories. Gives task-pipeline runs leases with a TTL, race-free ID reservation, a cross-repo signal feed, an append-only run journal and a machine-generated read-only board. A lease is decided by a primitive that genuinely has compare-and-swap — an atomic file create on one machine, a pushed git ref across machines — never by the knowledge base, which loses concurrent writes; the store carries the record and the ID allocation, which is positional over the merged log. The knowledge backend is a pluggable adapter (Outline, filesystem) declaring its own capabilities and degrading out loud. Ships Claude Code hooks that deny edits to guarded registry files without a live lease.",
-      "version": "1.8.2",
+      "version": "1.8.3",
       "author": {
         "name": "ssheleg",
         "url": "https://x.com/sshlg93"

@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.8.2"
+  version: "1.8.3"
   author: ssheleg
 ---
 
@@ -87,8 +87,8 @@ nothing.
 ## Existing project: start with `adopt`
 
 Run `adopt` before `init`. It reads the repository and prints what it found — id
-registers, registry files, gates — plus the decisions it **refuses to make for you**,
-then proposes a config. It writes nothing.
+registers, registry files, gates — plus the decisions it **refuses to make for you** —
+then proposes a config.
 
 ```bash
 python3 "$SKILL_DIR/scripts/agent_sync.py" adopt
@@ -275,45 +275,38 @@ overwritten. Lifetimes: `references/two-sources.md`.
 
 ## Two documentation sources, and the duty to reconcile them
 
-Git docs answer **how it should be** — written before the code, often without it.
-The as-built record answers **how it actually is** — derived from what agents really
-wrote. Neither is a copy of the other, and neither outranks the other, because they
-answer different questions. **The gap between them is the finding**, not a defect.
+Git docs answer **how it should be**; the as-built record answers **how it actually
+is**. Neither outranks the other, because they answer different questions — and
+**the gap between them is the finding**, not a defect.
 
-The duty runs at both ends of every task:
+The duty runs at both ends of a task: `reconcile` and resolve every divergence before
+starting, then `record` and `reconcile` again after finishing. Building on an
+unresolved divergence is writing code against a system that does not exist.
 
-- **Before starting** (docs-study stage) — `reconcile`, then read both sides for the area
-  you are about to touch, and resolve each divergence: the git doc is stale, the as-built
-  record is wrong, or they genuinely disagree and that is a decision. Building on an
-  unresolved divergence is writing code against a system that does not exist.
-- **After finishing** (docs stage) — `record` what you built, update the git documents
-  that state intent, then `reconcile` again. A task that updated one side leaves the next
-  agent a divergence to find the hard way.
-
-`reconcile` is mechanical and says so: it compares ids, commits and presence, and refuses
-to judge whether the built thing matches the document. That reading is yours.
+**The trap: `reconcile` is mechanical and refuses to judge** whether the built thing
+matches the document — it compares ids, commits and presence. That reading is yours,
+and treating its green as agreement is how a divergence survives both ends.
 
 Every project also carries a **generated snapshot** of its own wiring (`setup`) — commit
 it and link it from the agent instructions, so agents read the pipeline instead of
 inferring it.
 
 **Read `references/two-sources.md`** before the first reconcile, and whenever deciding
-which side a document belongs on.
+which side a document belongs on: it carries what each side is for, what `reconcile`
+decides, why the check is a ratchet, where a document belongs, and why nothing is
+deleted.
 
 ## Binding to task-pipeline
 
-This skill supplies stages; it does not define them. Stage names are
-`task-pipeline`'s own.
+This skill supplies stages; the names are `task-pipeline`'s own.
 
-Five of the eleven stages carry a rule the others do not, and each is about ordering:
-**0** `acquire` before the brief is committed; **1** `reconcile` and resolve every
-divergence before writing code; **3** `reserve` every id before it reaches git; **9**
-`record`, `signal`, `reconcile`, `board` — the main write point. **10** ends the run:
-`merge` if the work is on a branch, otherwise `release` every lease by hand. Full table
-with the reasoning per stage: `references/pipeline-binding.md`.
+Five of the eleven stages carry an ordering rule: **0** `acquire` before the brief is
+committed; **1** `reconcile` before writing code; **3** `reserve` every id before it
+reaches git; **9** the main write point; **10** `merge` or `release` every lease.
 
-**Read `references/pipeline-binding.md` when wiring `pipeline.json`** — it holds the
-`skills[]` entries and the gate expressions.
+**Read `references/pipeline-binding.md`** when wiring `pipeline.json` — it holds the
+per-stage reasoning, the `skills[]` entries, what must be guarded, and the gate
+expressions.
 
 ## Configuration
 
