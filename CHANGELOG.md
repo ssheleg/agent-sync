@@ -1,3 +1,12 @@
+## v1.8.2
+
+### Changed
+
+- `references/hooks.md` crossed 100 lines and gains the `## Contents` list the canon
+  requires past that mark — generated from its own six headings. v1.8.1 did this for the
+  six references that were over the line then; this one grew past it afterwards, which
+  is the shape of the defect: the rule fires on a length that keeps changing.
+
 ## v1.8.1
 
 ### Changed

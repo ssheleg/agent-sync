@@ -2,6 +2,15 @@
 
 **Read this when** installing, debugging or removing the enforcement hooks.
 
+## Contents
+
+- The limit, first
+- Contract
+- Installed hooks
+- Performance
+- Debugging
+- Removing them
+
 ## The limit, first
 
 **Hooks exist only in Claude Code.** On Cursor, Codex and the other agents the
