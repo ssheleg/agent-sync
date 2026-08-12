@@ -1,8 +1,8 @@
 {
   "name": "agent-sync",
   "displayName": "Agent Sync",
-  "version": "1.8.3",
-  "description": "Coordination layer for multi-agent repositories \u2014 leases with TTL, race-free ID reservation, a run journal, a cross-repo signal feed and a generated board, over a pluggable knowledge cloud.",
+  "version": "1.9.0",
+  "description": "Coordination layer for multi-agent repositories — leases with TTL, race-free ID reservation, a run journal, a cross-repo signal feed and a generated board, over a pluggable knowledge cloud.",
   "author": {
     "name": "ssheleg",
     "url": "https://x.com/sshlg93"

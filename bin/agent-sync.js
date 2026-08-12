@@ -95,11 +95,45 @@ function install(argv) {
       ? C.green('\n✓ installed')
       : C.red('\n✗ at least one channel failed — see the output above')
   );
+  // Before the "Next:" block, so the last thing on screen stays the instruction
+  // rather than the tail of a delegated command.
+  offerRouters();
   console.log(`
 ${C.bold('Next:')} restart Claude Code, then run ${C.bold('/agent-sync init')} in your project.
 It will ask where coordination state should live before writing anything.
 `);
   return ok ? 0 : 1;
+}
+
+/**
+ * Ask the family launcher to write the routing block, for this member only.
+ *
+ * Delegated rather than reimplemented, for three reasons. The block describes
+ * what the machine actually has, so a lone member rendering the whole thing
+ * would produce a table for routers nobody installed. `--member` limits the
+ * write to the `agent-sync` section and leaves everyone else's alone, which is
+ * what lets the bundle and a single installer both write. And the launcher is
+ * the only writer that copies the operator's global instruction file before
+ * touching it — that file has no version control behind it.
+ *
+ * `--no-install` keeps this from silently downloading a package nobody asked
+ * for. When the launcher is absent, print the command rather than fail: ending
+ * an install in an error because an OPTIONAL follow-up is missing reads as a
+ * failed install.
+ */
+function offerRouters() {
+  const r = spawnSync(
+    'npx',
+    ['--no-install', 'sshlg-skills', 'routers', '--member', NAME],
+    { stdio: 'inherit', shell: process.platform === 'win32' }
+  );
+  if (r.status !== 0) {
+    console.log(
+      `\nTo have this skill apply by default in every project, add the ` +
+      `family's\nrouting block to your agent's global instructions:\n\n` +
+      `  npx --yes sshlg-skills routers --member ${NAME}\n`
+    );
+  }
 }
 
 /**
