@@ -1,3 +1,14 @@
+## v1.10.0
+
+Following `task-pipeline` v1.53.0, which renamed the artifact root's default from
+`docs/superpowers/` to `docs/evidence/` and made the root resolvable (`paths.artifacts`
+in `pipeline.json`, else an existing `docs/evidence/`, else an existing
+`docs/superpowers/` — **the legacy name stays supported and no run warns about it**).
+
+Shipped surfaces name the new default now, which is why this is a minor rather than a
+patch. This project's own records moved with the directory and were not rewritten: a
+brief describes where things were when it was written.
+
 ## v1.9.0
 
 ### Changed
