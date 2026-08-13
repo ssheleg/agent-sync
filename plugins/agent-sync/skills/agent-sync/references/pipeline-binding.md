@@ -108,7 +108,7 @@ since the pipeline's documentation track it is longer than the registers:
 | the decision register (`docs/DECISIONS.md` or `docs/adr/`) | append-only; a concurrent write loses an entry |
 | `docs/OPEN_QUESTIONS.md`, `docs/ROADMAP.md` | the same |
 | **`docs/DOCMAP.md`** | seeded into every project the pipeline touches; holds the registers, the propagation matrix and the ratchet floors. Losing it loses the map |
-| **`docs/superpowers/retro.md`** | capped at ten standing instructions, so a concurrent write silently **drops a lesson** instead of conflicting visibly |
+| **`docs/evidence/retro.md`** | capped at ten standing instructions, so a concurrent write silently **drops a lesson** instead of conflicting visibly |
 
 The schema keeps `agent-sync.json` to known keys, which is why this reasoning lives
 here and not as a comment in the config.
