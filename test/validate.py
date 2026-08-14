@@ -1573,6 +1573,60 @@ def check_claim_round_trip_is_byte_exact() -> None:
                 f"before {before!r}, after {roadmap.read_bytes()!r}")
 
 
+def check_claim_lands_on_the_row_whose_id_cell_matches() -> None:
+    """A row that CITES another id must not defeat that id's claim tag.
+
+    Boards cross-reference constantly — "closed by B-12", "supersedes B-07" — and the
+    row selector matched the id anywhere in the line, so every cited id had two or more
+    candidate rows and the tag was refused. Measured on the family's own board on
+    2026-08-14: 14 rows cited others, so **19 of 41 ids could never be tagged**.
+
+    The refusal itself was right; what was wrong is that `acquire` still returned `won`.
+    The lease was granted while the registry silently carried no claim, which is the
+    state the claim exists to make visible.
+
+    A markdown board says which row is which in its FIRST cell. That is the answer, and
+    it needs no configuration.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — claim id-cell check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        roadmap = Path(project) / "ROADMAP.md"
+        # T-1 appears twice: its own row, and T-2 citing it — the ordinary shape of a board.
+        roadmap.write_text(
+            "| Task | State |\n|---|---|\n"
+            "| T-1 | todo |\n"
+            "| T-2 | blocked until T-1 ships |\n"
+        )
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("claim id-cell: init failed")
+            return
+        _write_cfg(project, claimTags={"ROADMAP.md": {"mode": "cell", "cell": -1,
+                                                     "held": "{prev} (claimed: {holder})"}})
+        before = roadmap.read_text()
+        _run_script(project, "acquire", "T-1", run_id="idcell")
+        after = roadmap.read_text()
+        if after == before:
+            err("claim id-cell: acquire wrote no claim — a row citing T-1 defeated the "
+                "selector, and the lease was granted with the registry unmarked")
+            return
+        rows = [l for l in after.splitlines() if l.startswith("| T-")]
+        tagged = [l for l in rows if "(claimed:" in l]
+        if len(tagged) != 1:
+            err(f"claim id-cell: {len(tagged)} rows carry the tag, expected exactly 1")
+            return
+        if not tagged[0].split("|")[1].strip() == "T-1":
+            err(f"claim id-cell: the tag landed on {tagged[0].split('|')[1].strip()!r}, "
+                "not on the row whose id cell is T-1")
+            return
+        _run_script(project, "release", "T-1", run_id="idcell")
+        if roadmap.read_text() != before:
+            err("claim id-cell: release did not restore the file — "
+                f"before {before!r}, after {roadmap.read_text()!r}")
+
+
 def check_release_notes_are_extractable() -> None:
     """The release workflow must be able to find this version's CHANGELOG section.
 
@@ -2037,6 +2091,7 @@ def main() -> int:
     check_no_orphan_logs()
     check_no_dead_declarations()
     check_claim_round_trip_is_byte_exact()
+    check_claim_lands_on_the_row_whose_id_cell_matches()
     check_release_notes_are_extractable()
     check_every_advertised_verb_exists()
     check_generated_docs_carry_current_doctrine()

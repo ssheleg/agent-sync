@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -1667,6 +1667,22 @@ class Sync:
                     narrowed = [i for i in hits if marker in lines[i]]
                     if len(narrowed) == 1:
                         hits = narrowed
+
+            # A board says which row is which in its FIRST cell. Every other match is a
+            # row CITING this id — "closed by B-12", "blocked until T-1 ships" — and boards
+            # cross-reference constantly: on the family's own board 14 rows cited others, so
+            # 19 of 41 ids had two candidate rows and their claim was refused. The refusal
+            # was right; granting the lease anyway was not, because the registry then carries
+            # no claim while `acquire` reports `won`. Tried after the marker so a release
+            # still trusts what it actually wrote.
+            if len(hits) > 1:
+                own = []
+                for i in hits:
+                    cells = self._row_cells(lines[i])
+                    if cells and cells[0].strip() == key:
+                        own.append(i)
+                if len(own) == 1:
+                    hits = own
 
             if len(hits) > 1:
                 notes.append(f"{rel}: `{key}` appears in {len(hits)} table rows — refusing "
