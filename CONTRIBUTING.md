@@ -80,6 +80,13 @@ This is not hypothetical. On 2026-07-29 `agent-sync` 1.3.4 was on npm, installed
 `list` still said 1.3.3 — so a project whose onboarding compares the running version against `list`
 told every agent to update to a version it already had.
 
+## Coordinating with other agents
+
+`docs/AGENT_SYNC.md` describes how coordination is wired in this repository and
+what it does **not** guarantee. It is generated from `.claude/agent-sync.json`:
+read it before editing a file that config guards, and regenerate it with
+`agent_sync.py setup` in the same change that alters the config.
+
 ## Commits
 
 Conventional commits. One logical change each. Note in the message when a change

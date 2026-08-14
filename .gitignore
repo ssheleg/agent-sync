@@ -6,3 +6,6 @@ graphify-out/
 
 # agent-sync run state — per-machine, never shared
 .agent-sync/
+
+# agent-sync — local credentials and run state, never committed
+.env.agent-sync
