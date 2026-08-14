@@ -1,3 +1,32 @@
+## v1.10.1
+
+The claim tag could not be placed on nearly half a real board, and the lease was granted
+anyway.
+
+### Fixed
+
+- **A row that CITES an id no longer defeats that id's claim.** `claimTags` in `cell` mode
+  selected every row *containing* the id, so an ordinary board sentence — "closed by
+  B-12", "blocked until T-1 ships" — made the id ambiguous and the tag was refused.
+  Cross-referencing is what boards do: measured on `sshlg-skills`' own board on
+  2026-08-14, **14 of 41 rows cited others, leaving 19 ids that could never be tagged**.
+
+  The refusal itself was correct — guessing which row carries a claim is how a claim lands
+  on somebody else's work. What was wrong is that `acquire` still returned `won`: the
+  lease was granted while the registry silently carried no claim, which is precisely the
+  state a claim exists to make visible.
+
+  A markdown board declares which row is which in its **first cell**. `acquire` now
+  narrows to the row whose id cell equals the key, and refuses only when no row's id cell
+  matches. Tried *after* the existing marker narrowing, so `release` still trusts the
+  marker it actually wrote rather than re-deriving the row.
+
+  Covered by `check_claim_lands_on_the_row_whose_id_cell_matches()`, which builds a two-row
+  board where the second row cites the first, and asserts the tag lands on exactly one row
+  and that it is the right one — then that release still restores the file byte for byte.
+  Watched failing before the fix: *"acquire wrote no claim — a row citing T-1 defeated the
+  selector, and the lease was granted with the registry unmarked"*.
+
 ## v1.10.0
 
 Following `task-pipeline` v1.53.0, which renamed the artifact root's default from
