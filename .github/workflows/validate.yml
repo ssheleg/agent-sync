@@ -22,6 +22,9 @@ jobs:
       - name: House validator
         run: python3 test/validate.py
 
+      - name: Claim cell and id registers (6 cases, 4 of them watched failing)
+        run: python3 test/claim_cell_test.py
+
       - name: Validator must still be able to fail
         run: python3 test/validate.py --self-test
 

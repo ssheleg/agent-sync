@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.10.1"
+VERSION = "1.11.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -199,6 +199,24 @@ class Fail(Exception):
 
 
 _GLOB_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+
+def id_pattern(spec: dict) -> str | None:
+    """The regex that finds a register's next free id, under either accepted key.
+
+    The script read `nextFreeIdPattern`; every config this family ships writes `pattern`.
+    Both are accepted now, because a key mismatch is a documentation problem and should
+    not be a crash — but ABSENCE returns None rather than `""`, which is the whole defect:
+    `re.search("", text)` matches the empty string at position 0, so `check` took the found
+    branch and died with `IndexError: no such group` instead of saying the register has no
+    pattern. A component that never received its input approved and then fell over.
+    """
+    for k in ("nextFreeIdPattern", "pattern"):
+        v = spec.get(k)
+        if v:
+            return v
+    return None
 
 
 def matches_glob(rel: str, pattern: str) -> bool:
@@ -1372,7 +1390,12 @@ class Sync:
         path = self.root / spec["file"]
         if not path.exists():
             raise Fail(f"register file {spec['file']} does not exist")
-        m = re.search(spec["nextFreeIdPattern"], path.read_text())
+        pat = id_pattern(spec)
+        if not pat:
+            raise Fail(f"register has no id pattern — set `pattern` (or the legacy "
+                       f"`nextFreeIdPattern`) for {spec['file']}; without one there is "
+                       f"nothing to read a next free id out of")
+        m = re.search(pat, path.read_text())
         if not m:
             raise Fail(f"could not read the next free id out of {spec['file']}")
         return int(m.group(1))
@@ -1720,7 +1743,23 @@ class Sync:
             else:
                 if saved is None:
                     continue                      # nothing of ours to undo
-                cells[idx] = saved
+                # Restoring VERBATIM loses any edit made while the claim was held, and in
+                # this family the claim cell IS the status cell — so `close then release`
+                # silently reopened a row closed with evidence minutes earlier (B-35,
+                # 2026-08-14, caught by `finish` reporting the board uncommitted, not by
+                # anybody reading it). The protocol's intent is to remove this run's
+                # marker, not to rewind the cell, so when the text moved on, strip the
+                # marker and keep the movement.
+                template = spec.get("held") or "{prev} (claimed: {holder})"
+                marker = template.replace("{prev}", "").replace("{holder}", self.rid).strip()
+                expected = template.replace("{prev}", saved.strip()).replace("{holder}", self.rid)
+                if current.strip() == expected.strip() or not marker:
+                    cells[idx] = saved
+                else:
+                    stripped = current.replace(marker, "").rstrip()
+                    cells[idx] = (stripped if stripped.strip() else saved)
+                    notes.append(f"{rel}: `{key}`'s cell changed while the claim was held — "
+                                 f"kept the change and removed only the claim marker")
                 state.get(key, {}).pop(str(rel), None)
                 if not state.get(key):
                     state.pop(key, None)
@@ -3182,10 +3221,17 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
             problems.append(f"register {reg}: file '{spec.get('file')}' does not exist")
             continue
         text = f.read_text()
+        pat = id_pattern(spec)
+        if not pat:
+            problems.append(f"register {reg}: no id pattern — set `pattern` (or the legacy "
+                            f"`nextFreeIdPattern`). An absent one used to become "
+                            f"`re.search(\"\", text)`, which matches at position 0, so this "
+                            f"check took the found branch and crashed instead of reporting")
+            continue
         try:
-            m = re.search(spec.get("nextFreeIdPattern", ""), text)
+            m = re.search(pat, text)
         except re.error as exc:
-            problems.append(f"register {reg}: nextFreeIdPattern is not valid regex ({exc})")
+            problems.append(f"register {reg}: id pattern is not valid regex ({exc})")
             continue
         if not m:
             problems.append(f"register {reg}: nextFreeIdPattern matches nothing in "

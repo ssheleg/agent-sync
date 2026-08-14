@@ -3,3 +3,6 @@ node_modules/
 *.pyc
 __pycache__/
 graphify-out/
+
+# agent-sync run state — per-machine, never shared
+.agent-sync/

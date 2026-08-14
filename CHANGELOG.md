@@ -1,3 +1,31 @@
+## v1.11.0 — releasing stops rewinding a cell, and a register with no pattern says so
+
+Two more defects in the same afternoon that produced v1.10.1, both from using this tool
+on a board that had just been worked through.
+
+### Fixed
+
+- **Releasing no longer rewinds a cell that moved.** The restore was verbatim, and in this
+  family the claim cell IS the status cell — so `close then release` silently reopened a
+  row closed with evidence minutes earlier. Caught by `finish` reporting the board
+  uncommitted, not by anybody reading it. The protocol's intent is to remove *this run's*
+  marker, not to rewind the cell, so a changed cell keeps its change, loses only the
+  marker, and the note says so. An untouched cell is still restored exactly.
+- **An id register with no pattern reports instead of crashing.** The script read
+  `nextFreeIdPattern`; every config this family ships writes `pattern`. Both are accepted
+  now — but the defect was the fallback: absence became `re.search("", text)`, which
+  matches the empty string at position 0, so `check` took the found branch and died with
+  `IndexError: no such group` rather than saying the register has no pattern. A component
+  that never received its input approved and then fell over.
+
+### Added
+
+- **`test/claim_cell_test.py`** — 6 cases driving the shipped script as a process against
+  real project directories, because these defects are about what the command does to a
+  file on disk. **Four were watched failing** against the pre-fix script, including that
+  exact `IndexError`. One of the six is a regression test for v1.10.1's own fix: a board
+  where an id is cited by two other rows must still tag the row that owns it.
+
 ## v1.10.1
 
 The claim tag could not be placed on nearly half a real board, and the lease was granted
