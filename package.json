@@ -1,13 +1,15 @@
 {
   "name": "@ssheleg/agent-sync",
-  "version": "1.11.1",
-  "description": "Let concurrent coding agents share one project without colliding \u2014 leases with TTL, race-free id reservation, a run journal and a generated board, over a pluggable knowledge cloud.",
+  "version": "1.12.0",
+  "description": "Let concurrent coding agents share one project without colliding — leases with TTL, race-free id reservation, a run journal and a generated board, over a pluggable knowledge cloud.",
   "bin": {
     "agent-sync": "bin/agent-sync.js"
   },
   "files": [
     "bin/",
     "plugins/",
+    "!plugins/**/__pycache__",
+    "!plugins/**/*.pyc",
     "agent-sync.schema.json",
     "agent-sync.example.json",
     "README.md",

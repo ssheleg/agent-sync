@@ -1,3 +1,47 @@
+## v1.12.0 — 246 kB of someone else's bytecode, in every install
+
+**The published tarball carried a `.pyc` both ignore files were written to exclude.**
+`@ssheleg/agent-sync@1.11.1` ships
+`plugins/agent-sync/skills/agent-sync/scripts/__pycache__/agent_sync.cpython-312.pyc` —
+**245.8 kB against 175.7 kB of source beside it**, 40% of the tarball, compiled by
+whatever interpreter the publisher happened to be running. Verified by unpacking the
+published artefact, not by reading the manifest.
+
+`.gitignore:3-4` and `.npmignore:1-2` both exclude `__pycache__/` and `*.pyc`. **Neither
+is consulted once `files` names a directory** — the whitelist wins, so the intent was
+recorded twice and enforced nowhere. `files` now carries `!plugins/**/__pycache__` and
+`!plugins/**/*.pyc`, and the packed result drops from **231.5 kB / 28 files to
+125.8 kB / 27**.
+
+**A filesystem walk would not have caught this**, which is why the new check asks npm.
+`check_the_tarball_carries_no_bytecode()` reads `npm pack --dry-run --json` — the
+packer's own answer to *what would ship* — and fails on any `.pyc` or `__pycache__` in
+it. Where npm is absent it discloses rather than passing: a check that cannot look must
+never read as one that looked. Watched failing against the exact state that shipped, and
+added to `--self-test`, now **38 fixtures**.
+
+### Fixed — three documents that told the reader something untrue
+
+- **`references/hooks.md` said the hooks are removed by editing `.claude/settings.json`.**
+  Nothing here ever writes a `hooks` block there, and Claude Code has no per-hook disable
+  for a hook a plugin ships. A user who wanted them gone edited a file with no such block
+  and concluded it had worked, while the SessionStart hook kept speaking in every session.
+  The two real levers are named now — `enabledPlugins[…] = false` or `plugin uninstall` —
+  plus the fact that every hook already self-disables in a project with no
+  `.claude/agent-sync.json`.
+- **`CONTRIBUTING.md` said five version surfaces move together; the validator enforces
+  six.** The missing one is `VERSION` in `scripts/agent_sync.py`, and it is exactly what
+  forced the 1.11.1 patch: a bump driver written from that page moved four of six and CI
+  refused the tag. It is the constant `status` prints into every session, so its drift is
+  invisible in the manifests and loud in the banner.
+- **`CONTRIBUTING.md` said the self-test injects five defects; it injected thirty-seven.**
+  The count is read off the run's own last line now. The number is the whole claim — a
+  contributor who reads *five* will not think to add a fixture for the sixth thing they
+  change.
+
+Found by the nine-repository audit of 2026-08-16 (umbrella `B-72`; the three documents
+are `F-agent-sync-05`, `-08` and `-11`).
+
 ## v1.11.1 — the gate can see an invariant it breaks elsewhere
 
 **This gate can now see an invariant it breaks one repository away.** The family umbrella

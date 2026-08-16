@@ -103,6 +103,18 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"docs/DECISIONS.md"},"cwd":"
 
 ## Removing them
 
-Delete the `hooks` block from the project's `.claude/settings.json`. The skill keeps
-working — every guard is also available as a command, and the board simply records
-runs as `ungated` from then on.
+**Not** by editing `.claude/settings.json` — nothing here ever writes a `hooks`
+block there, and Claude Code has no per-hook disable for a hook a plugin ships. A
+reader who follows that instruction edits a file with no such block and concludes
+the removal worked while every hook keeps firing.
+
+Two levers actually work:
+
+- `enabledPlugins["agent-sync@agent-sync"] = false` in `~/.claude/settings.json` —
+  enablement is the only switch a plugin hook has; or
+- `claude plugin uninstall agent-sync@agent-sync`.
+
+And one you usually do not need: every hook already self-disables in a project with
+no `.claude/agent-sync.json` (`hooks/_lib.sh`), so a repository that never opted in
+is not paying for them. The skill keeps working either way — every guard is also
+available as a command, and the board simply records runs as `ungated` from then on.

@@ -16,9 +16,15 @@ Then prove the validator can still fail:
 python3 test/validate.py --self-test
 ```
 
-It copies the tree, injects five defects one at a time — an over-cap description, a
-version drift, a leaked host name, a token passed in `argv`, a stray `SKILL.md` —
-and requires each to be caught. A validator that cannot fail is decoration.
+It copies the tree and injects one defect at a time — an over-cap description, a
+version drift, a leaked host name, a token passed in `argv`, a stray `SKILL.md`,
+bytecode in the npm tarball, and the rest — requiring each to be caught. A
+validator that cannot fail is decoration.
+
+**The count is read off the run's own last line, not from this page.** It said
+*five* while the suite injected thirty-seven, and the number is the whole claim:
+a contributor who reads five will not think to add a fixture for the sixth thing
+they change.
 
 Exercise the coordinator itself against a scratch repository:
 
@@ -53,10 +59,17 @@ AGENT_SYNC_RUN_ID=beta  python3 "$S" acquire T-1   # lost, names alpha
 
 ## Versioning
 
-Five places move together, and the validator enforces it:
+**Six** places move together, and the validator enforces all six:
 
 `.claude-plugin/marketplace.json` · `plugins/agent-sync/.claude-plugin/plugin.json` ·
-`package.json` · the top `CHANGELOG.md` entry · `metadata.version` in `SKILL.md`.
+`package.json` · the top `CHANGELOG.md` entry · `metadata.version` in `SKILL.md` ·
+`VERSION` in `plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py`.
+
+The sixth is the one that cost a patch release. This page said five, a bump driver
+written from it moved four, and v1.11.1 exists because CI refused the tag — the
+`VERSION` constant is what `status` prints into every session, so its drift is
+invisible in the manifests and loud in the banner. Match both the quoted and the
+bare form when bumping it.
 
 
 ### The family catalogue moves with the release
