@@ -7,6 +7,17 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 `self-test` means the validator also plants that exact defect back and confirms the check fires
 (`python3 test/validate.py --self-test`).
 
+
+## v1.12.0 — the tarball stops carrying someone else's bytecode
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| The published tarball contains no compiled Python | `npm pack --dry-run` after adding the `files[]` negations | 0 `.pyc` entries; **231.5 kB / 28 files → 125.8 kB / 27** | 2026-08-16 |
+| The defect was real in the published artifact, not just locally | `npm pack @ssheleg/agent-sync@1.11.1 && tar tzf` | `…/scripts/__pycache__/agent_sync.cpython-312.pyc` — a different interpreter from this machine's 3.14, so it came off the publisher's | 2026-08-16 |
+| The guard asks npm rather than walking the filesystem | removed the negations, ran `test/validate.py` | exit 1, naming the file and the remedy | 2026-08-16 |
+| The guard is in the self-test | `python3 test/validate.py --self-test` | `SELF-TEST PASS … (38 fixtures, 8 at a time)`, up from 37 | 2026-08-16 |
+| The release shipped | `npm view @ssheleg/agent-sync version`; CI on the tag | `1.12.0`; `validate` and `release` both `completed success` | 2026-08-16 |
+
 ## v1.5.3 — the tool stops reporting what is not true
 
 | REQ | What must hold | Verified by | Last run |
