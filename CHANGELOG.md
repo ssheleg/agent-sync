@@ -422,6 +422,11 @@ plants and catches 27 distinct defects.
 
 ## v1.6.0
 
+> **Never released on its own.** There is no `v1.6.0` tag and no `1.6.0` on npm,
+> so `npm install @ssheleg/agent-sync@1.6.0` and `git checkout v1.6.0` both fail. This section
+> describes work that shipped inside a later version. The note is here because
+> the section reads as a release (2026-08-17, umbrella `B-71`).
+
 **Four guarantees that were described but not delivered, and the one number now stated once.**
 1.5.3 stopped the tool reporting things that were untrue; this release makes the properties it
 claims actually hold, each with a check that has been watched fail against the defect it exists to
@@ -494,6 +499,11 @@ stage 1 has its row and its `pipeline.json` entry, and a check fails when a surf
 planting each defect back.
 
 ## v1.5.3
+
+> **Never released on its own.** There is no `v1.5.3` tag and no `1.5.3` on npm,
+> so `npm install @ssheleg/agent-sync@1.5.3` and `git checkout v1.5.3` both fail. This section
+> describes work that shipped inside a later version. The note is here because
+> the section reads as a release (2026-08-17, umbrella `B-71`).
 
 **Five surfaces told the caller something that was not true.** An audit on 2026-08-10 ran the
 commands instead of reading them, and every finding below was reproduced before it was fixed. The
