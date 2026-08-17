@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -1271,18 +1271,44 @@ class Sync:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(now_iso())
 
+    @staticmethod
+    def _lease_alive(held: dict, default_ttl: int) -> bool:
+        """Is this lease still within its TTL? The ONE definition of held.
+
+        `acquire` has always answered this question — `_steal_expired` exists
+        precisely to take a lease whose TTL has run out. `release` did not ask it,
+        and read any lock file as held. So the file carried two notions of *held*
+        and they disagreed exactly where it mattered: a lease from a run that died
+        was expired for `acquire` and eternal for `release`, and no command could
+        clear it. Measured in the field at **604x** its 2700-second TTL, released
+        only by deleting the file by hand — which is the one thing a coordination
+        tool exists to stop anybody doing.
+        """
+        try:
+            return time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", default_ttl))
+        except (ValueError, TypeError):
+            # An unparseable timestamp is not a licence to hold forever.
+            return False
+
     def _lease_holder(self, key: str) -> str | None:
-        """Who holds this lease right now, in whichever plane arbitrates it."""
+        """Who holds this lease right now, in whichever plane arbitrates it.
+
+        `None` for an expired lease as well as an absent one: the TTL is the
+        contract, and a lease past it is not held by anybody.
+        """
         if self.lease_mode == "git":
             sha, held = self._git_read_lease(key)
-            return held.get("run") if sha else None
+            if not sha or not self._lease_alive(held, self.ttl):
+                return None
+            return held.get("run")
         lock = self._local_lock(key)
         if not lock.exists():
             return None
         try:
-            return json.loads(lock.read_text()).get("run")
+            held = json.loads(lock.read_text())
         except (json.JSONDecodeError, OSError):
             return None
+        return held.get("run") if self._lease_alive(held, self.ttl) else None
 
     def release(self, key: str) -> bool:
         """Release only what this run holds, and say so plainly when it does not.
@@ -1308,10 +1334,20 @@ class Sync:
         lock = self._local_lock(key)
         if lock.exists():
             try:
-                if json.loads(lock.read_text()).get("run") in (self.rid, None):
-                    lock.unlink(missing_ok=True)
+                held = json.loads(lock.read_text())
             except (json.JSONDecodeError, OSError):
                 lock.unlink(missing_ok=True)
+            else:
+                owner = held.get("run")
+                if owner in (self.rid, None):
+                    lock.unlink(missing_ok=True)
+                elif not self._lease_alive(held, self.ttl):
+                    # Reaped, not stolen — and said out loud, because the operator
+                    # asked to release THEIR lease and is getting somebody else's
+                    # corpse cleared as well.
+                    print(f"  reaped {key}: expired lease from {owner}, "
+                          f"whose run left it past its TTL")
+                    lock.unlink(missing_ok=True)
         if self.adapter.is_lease_authority:
             try:
                 self.adapter.log_append(self.log_id("claims"),

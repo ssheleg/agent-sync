@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, os.pardir, "plugins", "agent-sync", "skills", "agent-sync",
@@ -163,6 +164,51 @@ def a_genuinely_ambiguous_id_still_refuses():
         f"a duplicated id was tagged without complaint: {out[-300:]}")
 
 
+def an_expired_foreign_lease_can_be_reaped():
+    """THE #4 INCIDENT. A lease from a run that died is expired for `acquire` and
+    was eternal for `release`, so no command could clear it — measured in the field
+    at 604x its TTL, released only by deleting the file by hand."""
+    d = project(["| B-01 | the thing itself | open |\n"])
+    lock = os.path.join(d, ".agent-sync", "leases", "B-01.lock")
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    # A dead run's lease, written 10 days ago with a 2700s TTL.
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 864000))
+    with open(lock, "w") as fh:
+        json.dump({"run": "r-deadbeef", "ts": old, "ttl": 2700}, fh)
+    r = cli(d, "release", "B-01")
+    assert r.returncode == 0, f"still refused: {r.stdout}{r.stderr}"
+    assert "reaped" in r.stdout, f"reaped silently: {r.stdout!r}"
+    assert "r-deadbeef" in r.stdout, f"did not name whose lease: {r.stdout!r}"
+    assert not os.path.exists(lock), "the lock survived the reap"
+
+
+def a_live_foreign_lease_is_still_refused():
+    """The direction that must NOT change: a lease inside its TTL belongs to
+    somebody, and reaping it is the collision a lease exists to prevent."""
+    d = project(["| B-01 | the thing itself | open |\n"])
+    lock = os.path.join(d, ".agent-sync", "leases", "B-01.lock")
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(lock, "w") as fh:
+        json.dump({"run": "r-alive", "ts": fresh, "ttl": 2700}, fh)
+    r = cli(d, "release", "B-01")
+    assert r.returncode != 0, f"reaped a live lease: {r.stdout}{r.stderr}"
+    assert os.path.exists(lock), "a live lease was removed"
+
+
+def a_lease_with_an_unreadable_timestamp_is_not_eternal():
+    """An unparseable `ts` is not a licence to hold forever — the shape that would
+    otherwise turn a corrupt lock into the same unclearable state."""
+    d = project(["| B-01 | the thing itself | open |\n"])
+    lock = os.path.join(d, ".agent-sync", "leases", "B-01.lock")
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    with open(lock, "w") as fh:
+        json.dump({"run": "r-corrupt", "ts": "not-a-date", "ttl": 2700}, fh)
+    r = cli(d, "release", "B-01")
+    assert r.returncode == 0, f"an undatable lock stayed eternal: {r.stdout}{r.stderr}"
+    assert not os.path.exists(lock), "the lock survived"
+
+
 for n, f in [
     ("a cited id is still taggable (B-42)", a_cited_id_is_still_taggable),
     ("releasing keeps a close written while held (B-35)", releasing_keeps_a_close_written_while_held),
@@ -170,10 +216,13 @@ for n, f in [
     ("a register with the shipped `pattern` key works (B-34)", a_register_with_the_shipped_key_works),
     ("a register with no pattern reports rather than crashes (B-34)", a_register_with_no_pattern_reports_rather_than_crashes),
     ("a genuinely duplicated id still refuses", a_genuinely_ambiguous_id_still_refuses),
+    ("an expired foreign lease can be reaped", an_expired_foreign_lease_can_be_reaped),
+    ("a live foreign lease is still refused", a_live_foreign_lease_is_still_refused),
+    ("an undatable lease is not eternal", a_lease_with_an_unreadable_timestamp_is_not_eternal),
 ]:
     case(n, f)
 
 if failures:
-    print(f"\nFAIL: {len(failures)} of 6")
+    print(f"\nFAIL: {len(failures)} of 9")
     sys.exit(1)
-print("\nPASS: claim cell + id registers — 6 cases")
+print("\nPASS: claim cell, id registers and lease reaping — 9 cases")

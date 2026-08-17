@@ -1,3 +1,44 @@
+## v1.13.0 — the file carried two notions of *held* and they disagreed where it mattered
+
+**A lease from a run that died could not be cleared by any command.** Measured in the field:
+three locks past their TTL, one of them by **604x**, and the only way out was deleting the file
+by hand — which is the single thing a coordination tool exists to stop anybody doing. The
+refusal itself was correct; there was simply no path.
+
+The cause is one function. `acquire` has always known a TTL runs out — `_steal_expired` exists
+for exactly that. `_lease_holder`, which `release` consults, read **any** lock file as held and
+never looked at the timestamp. So an expired lease was *gone* for `acquire` and *eternal* for
+`release`, and the file never noticed it was answering one question two ways.
+
+`_lease_alive()` is now the one definition, used by both. `release` reaps an expired foreign
+lease and **says whose it was**, because the operator asked to release their own lease and is
+getting somebody else's corpse cleared alongside it.
+
+**What did not change is the half that matters.** A lease inside its TTL is still refused, and
+that is fixtured beside the reap so the two cannot drift. An unparseable timestamp is treated
+as expired rather than as a licence to hold forever — a corrupt lock was the other way to reach
+the same unclearable state.
+
+Fixtures 6 → **9**, each driving the shipped script as a process against a real project.
+Closes #4.
+
+### Also closed by measurement: #1
+
+`claimTags` whole-row id matching made the claim unwritable on boards with a `Depends` column —
+filed against **1.3.5**, and fixed by **B-42** on 2026-08-14 without anyone connecting the two.
+Re-run against this version on the exact board shape the issue names (`| id | what | acceptance
+| depends | decisions | status |`, with `T-02` and `T-03` both citing `T-01`):
+
+```
+$ agent_sync.py acquire T-01
+docs/ROADMAP.md: `T-01` claim written through
+| T-01 | … | open (claimed: r-cca8b75db) |
+| T-02 | … | open |          ← untouched
+| T-03 | … | open |          ← untouched
+```
+
+Closes #1.
+
 ## v1.12.0 — 246 kB of someone else's bytecode, in every install
 
 **The published tarball carried a `.pyc` both ignore files were written to exclude.**
