@@ -1,6 +1,6 @@
 ---
 description: Coordinate concurrent agents — initialise the shared knowledge store, check status, take a task, reserve an id, or regenerate the board.
-argument-hint: "[init|status|check|acquire <KEY>|release <KEY>|reserve <REG>|board|merge|finish]"
+argument-hint: "[init|status|check|acquire <KEY>|release <KEY>|reserve <REG>|residue|board|merge|finish]"
 ---
 
 Invoke the `agent-sync` skill.
@@ -15,6 +15,9 @@ instance URL) or local files. Never guess that answer.
 If the project is already initialised, report status and name exactly one next
 action.
 
+With `residue`, report the expired locks still on disk — what this run can prove it owns and
+has spent, and the foreign or ambiguously owned ones it reports and leaves alone.
+
 With `finish`, run the end-of-work check instead: every repository clean, pushed and pointed at,
-and no lease left held. In a project of git submodules that is the one failure nobody sees — the
+no lease left held, and what the run leaves behind named rather than assumed. In a project of git submodules that is the one failure nobody sees — the
 submodule is pushed and the parent still points at the commit before the work.

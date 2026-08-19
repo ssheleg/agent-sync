@@ -187,6 +187,8 @@ npx sshlg-skills install
 | `guard <path>` | Answer whether this run may write that path. Exit 0 = yes, 2 = no |
 | `board` | Regenerate the shared board and this repo's page. `--mirror` also renders the configured git docs into the plane |
 | `whoami` | Print this run's id and its held leases |
+| `residue` | Expired locks still on disk: this run's spent ones, and the foreign or ambiguous ones it reports and never touches |
+| `reap [KEY…]` | Clear only what this run **proves** it owns and has spent, then re-read the directory to confirm it went |
 | `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
 | `adopt` | Inspect an existing project and **propose** a config — writes nothing |
 | `merge` | Land this branch: local target fast-forwarded, conflicts checked **before** anything is touched, merge log written, the `--key` lease released. `--summary`, `--dry-run`, `--push` |
@@ -360,6 +362,7 @@ drift, not a formatting problem.
 
 - Append, read back, then act. Never rewrite a coordination document.
 - `release` what you `acquire`, on every path including failure.
+- A run reports what it leaves behind: expiry ends a lease, not the file — `residue`.
 - Credentials never reach `argv`, a log line, or the repository.
 - Degrade out loud. `ungated` is an acceptable state; a false claim of enforcement is not.
 - Two agents in one checkout are two identities, or the lease is decoration.

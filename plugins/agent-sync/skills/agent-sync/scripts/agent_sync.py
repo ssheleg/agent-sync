@@ -113,12 +113,24 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def parse_iso(ts: str) -> float:
+def parse_iso_or_none(ts: str) -> float | None:
+    """The instant this string names, or None when it names none.
+
+    `parse_iso` folds an unreadable timestamp into 0.0, and every expiry test then reads
+    that as "expired in 1970". For exclusion that is the right answer — a lock whose clock
+    cannot be read must not go on holding a key. For residue it is the wrong one: *spent*
+    and *unreadable* are different verdicts, and only the first may be cleared.
+    """
     try:
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc).timestamp()
-    except ValueError:
-        return 0.0
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_iso(ts: str) -> float:
+    at = parse_iso_or_none(ts)
+    return 0.0 if at is None else at
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -827,6 +839,129 @@ def resolve_holder(events: list[dict[str, str]], key: str, at: float) -> str | N
     return str(h["run"]) if h else None
 
 
+# What a lock file turns out to be once the TTL has been applied to it. `live` is not
+# residue; the other three are, and they are not interchangeable — the first may be
+# cleared, the other two may only be reported.
+LIVE = "live"
+REAPABLE = "reapable"
+FOREIGN = "foreign"
+AMBIGUOUS = "ambiguous"
+
+
+def classify_lock(key: str, raw: str, *, rid: str, identity_is_strong: bool,
+                  repo: str, host: str, default_ttl: int, at: float) -> dict[str, Any]:
+    """One lock file, read as a live lease or as one of three kinds of residue.
+
+    Pure — everything it needs is an argument — so each verdict below is a fixture rather
+    than a scenario somebody has to reproduce with two sessions and a clock.
+
+    **Why this function has to exist.** Every reader of lease state in this tool folds the
+    TTL into the read: `held()`, `_lease_holder()` and `all_holdings()` each answer *none*
+    for an expired lock and *none* for a lock that is not there. That is correct for
+    exclusion and it is why seventeen expired locks across nine repositories of one family
+    were reported by nothing — `status` printed `leases held: none` and `finish` printed
+    "no lease left held" standing on top of them. Expiry ends a lease. It does not remove
+    a file, and nothing here could see the difference.
+
+    **The split is the load-bearing part.** `reapable` means state this run can PROVE it
+    owns and has spent, and the proof is deliberately narrow:
+
+    - the lock is past its TTL — a live lease is held, not residue;
+    - it records a `run`, and that run is this one;
+    - **this run's identity is not the shared fallback.** `run_id()` keys its marker by
+      session, and a shell with no session id is served one shared entry whose own
+      docstring says the identity "is shared with any other session in this checkout".
+      Under that key a matching run id proves nothing, so it does not license a delete.
+    - its `repo` is this checkout, and its `host` — written by the git lease mode, absent
+      in local mode, where the lease is machine-local by construction — is this machine.
+
+    Everything else is reported and left alone: `foreign` where it demonstrably belongs to
+    somebody else, `ambiguous` where the question cannot be answered at all. In doubt the
+    answer is `ambiguous`, never `reapable`.
+    """
+    out: dict[str, Any] = {"key": key, "state": AMBIGUOUS, "run": None, "repo": None,
+                           "host": None, "ts": "", "expired_for": None, "why": ""}
+    try:
+        held = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        out["why"] = "the lock is not readable JSON, so nothing in it identifies an owner"
+        return out
+    if not isinstance(held, dict):
+        out["why"] = "the lock is not an object, so nothing in it identifies an owner"
+        return out
+
+    out["run"] = held.get("run") or None
+    out["repo"] = held.get("repo") or None
+    out["host"] = held.get("host") or None
+    out["ts"] = str(held.get("ts") or "")
+
+    taken = parse_iso_or_none(out["ts"])
+    if taken is None:
+        out["why"] = (f"its timestamp ({out['ts'] or 'absent'}) is not one, so whether this "
+                      "lock is spent cannot be established")
+        return out
+    try:
+        ttl = int(held.get("ttl", default_ttl))
+    except (TypeError, ValueError):
+        out["why"] = (f"its ttl ({held.get('ttl')!r}) is not a number, so whether this lock "
+                      "is spent cannot be established")
+        return out
+
+    expires = taken + ttl
+    if at <= expires:
+        out["state"] = LIVE
+        out["why"] = (f"held by {out['run'] or 'an unnamed run'} for another "
+                      f"{int(expires - at)}s")
+        return out
+    out["expired_for"] = int(at - expires)
+
+    if not out["run"]:
+        out["why"] = "it records no run, so there is nobody it can be proved to belong to"
+        return out
+    if out["host"] and out["host"] != host:
+        out["state"] = FOREIGN
+        out["why"] = f"it was taken on {out['host']}, which is not this machine"
+        return out
+    if out["run"] != rid:
+        out["state"] = FOREIGN
+        out["why"] = f"it belongs to run {out['run']}, not to this one"
+        return out
+    if out["repo"] and out["repo"] != repo:
+        out["why"] = (f"its run id matches, but it names repository {out['repo']} while this "
+                      f"checkout is {repo}")
+        return out
+    if not identity_is_strong:
+        out["why"] = ("its run id matches, but this run's identity is the shared fallback — "
+                      "any other session in this checkout answers to the same id, so the "
+                      "match proves nothing")
+        return out
+    out["state"] = REAPABLE
+    out["why"] = "this run took it and let it expire"
+    return out
+
+
+def since(seconds: int) -> str:
+    """A duration an operator can act on."""
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+
+
+def spent(entry: dict[str, Any]) -> str:
+    """How long this lock has been residue — said once, so no surface can phrase it
+    differently. A lock whose clock cannot be read is not "expired an unknown time ago";
+    it is a lock nobody can say is spent, which is why it is never reaped."""
+    if entry["state"] == LIVE:
+        return "live"
+    if entry.get("expired_for") is None:
+        return "expiry could not be established"
+    return f"expired {since(entry['expired_for'])} ago"
+
+
 def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, list[int], list[tuple[str, int]]]:
     """Positional allocation over the log. Returns (base, free_list, assignments)."""
     base = None
@@ -882,6 +1017,7 @@ class Sync:
         self.adapter = make_adapter(self.cfg, self.root)
         self.rid = run_id(self.root)
         self.ttl = int(self.cfg.get("leaseTtlSeconds") or DEFAULT_TTL)
+        self._identity: tuple[str, str] | None = None
 
     @property
     def gated(self) -> bool:
@@ -1355,6 +1491,107 @@ class Sync:
             except Fail as exc:
                 print(f"note: released locally, not published ({exc})", file=sys.stderr)
         return True
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        """(key, how) for this run's identity — resolved once, because it walks `ps`."""
+        if self._identity is None:
+            self._identity = _session_key()
+        return self._identity
+
+    @property
+    def identity_is_strong(self) -> bool:
+        """Whether a matching run id is proof of anything.
+
+        False means `_session_key()` established nothing and `run_id()` served the shared
+        entry — the identity every other session in this checkout is also given. Enough to
+        coordinate with, and deliberately not enough to delete on.
+        """
+        return bool(self.identity[0])
+
+    def residue(self) -> list[dict[str, Any]]:
+        """Every lock file in this checkout, classified — the live ones included.
+
+        The enumerating read the tool never had. `held()` below globs the same directory
+        and keeps only what is BOTH this run's and alive, which makes it a liveness
+        predicate: it cannot tell an empty directory from one full of corpses, and no
+        other reader here can either.
+        """
+        d = self.root / STATE_DIR / "leases"
+        now, host, repo = time.time(), platform.node(), repo_name()
+        out: list[dict[str, Any]] = []
+        for p in sorted(d.glob("*.lock") if d.exists() else []):
+            try:
+                raw = p.read_text()
+            except OSError as exc:
+                entry: dict[str, Any] = {
+                    "key": p.stem, "state": AMBIGUOUS, "run": None, "repo": None,
+                    "host": None, "ts": "", "expired_for": None,
+                    "why": f"the lock cannot be read ({exc})"}
+            else:
+                entry = classify_lock(p.stem, raw, rid=self.rid,
+                                      identity_is_strong=self.identity_is_strong,
+                                      repo=repo, host=host, default_ttl=self.ttl, at=now)
+            entry["path"] = p
+            out.append(entry)
+        return out
+
+    def stale(self) -> list[dict[str, Any]]:
+        """The residue only — every lock whose lease has already ended."""
+        return [e for e in self.residue() if e["state"] != LIVE]
+
+    def reap(self, keys: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+        """Clear only `reapable` residue, and prove it went by LOOKING AGAIN.
+
+        The second observation is the whole point. `unlink` returns nothing and raises
+        nothing on a filesystem where the entry survives the call — a read-only mount, an
+        NFS write that never lands, a directory whose write bit was dropped between two
+        commands, another process recreating the name — so a teardown that reports success
+        out of its own return value is reporting the wish rather than the state. What comes
+        back here is the difference between two reads of the directory.
+
+        Identity decides the second read, not absence: a key that came back as another
+        run's live lease WAS torn down, and calling that a failure would teach an operator
+        to ignore the one message that matters.
+        """
+        before = self.residue()
+        named = None
+        if keys:
+            named = set()
+            for k in keys:
+                named.add(k)
+                named.add(self._local_lock(k).stem)
+        wanted = [e for e in before
+                  if e["state"] == REAPABLE and (named is None or e["key"] in named)]
+        refused = [e for e in before
+                   if e["state"] != REAPABLE and named is not None and e["key"] in named]
+        if named is not None:
+            known = {e["key"] for e in before}
+            for k in sorted(named - known):
+                if self._local_lock(k).stem in known:
+                    continue
+                refused.append({"key": k, "state": "absent", "run": None, "ts": "",
+                                "expired_for": None,
+                                "why": "there is no lock by that name in this checkout"})
+
+        for e in wanted:
+            try:
+                e["path"].unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                e["error"] = str(exc)
+
+        after = {e["key"]: e for e in self.residue()}
+        reaped, remaining = [], []
+        for e in wanted:
+            still = after.get(e["key"])
+            if still is not None and still["run"] == e["run"] and still["ts"] == e["ts"]:
+                remaining.append(e)
+            else:
+                reaped.append(e)
+        return {"reaped": reaped, "remaining": remaining, "refused": refused,
+                "left": [e for e in before if e["state"] in (FOREIGN, AMBIGUOUS)]}
 
     def held(self) -> list[str]:
         d = self.root / STATE_DIR / "leases"
@@ -2193,6 +2430,8 @@ class Sync:
             "| What was actually built, with its commit | as-built log | permanent, append-only |",
             "| Cross-repo dependency state | signal log | permanent, append-only |",
             "| Who holds a task right now | claims log | expires by TTL |",
+            "| A lock left by a run that stopped | the lease directory | until it is "
+            "reported and reaped |",
             "| Per-run narrative | that run's journal | permanent |",
             "| The board and these pages | generated | replaced on every regeneration |",
             "",
@@ -2224,6 +2463,10 @@ class Sync:
             "merge --key → land the branch: conflicts checked first, the merge recorded,",
             "              that lease released. Without a branch, `release ID` by hand",
             "              — on every path, including failure",
+            "residue     → what this run leaves on disk. Expiry ends a lease and leaves",
+            "              the file, so `status` and `finish` enumerate them; `reap`",
+            "              clears only what THIS run can prove it owns and has spent,",
+            "              and reports foreign or ambiguously owned locks untouched",
             "```",
             "",
             f"This project's integration branch is `{self.integration_branch}`.",
@@ -2509,6 +2752,29 @@ def cmd_status(_args: argparse.Namespace) -> int:
         return 1
     print(f"  leases held    : {', '.join(held) if held else 'none'}")
 
+    # A run produces more than a diff, and what it leaves behind has to be reported by the
+    # command every session runs. Until this line existed, `status` printed `leases held:
+    # none` beside three expired locks in the directory it had just read — every reader of
+    # lease state here applies the TTL, so "expired" and "absent" were one answer.
+    stale = s.stale()
+    reapable = [e for e in stale if e["state"] == REAPABLE]
+    left_alone = [e for e in stale if e["state"] != REAPABLE]
+    if not stale:
+        print("  expired locks  : none")
+    else:
+        print(f"  expired locks  : {len(stale)} — {len(reapable)} this run's to clear, "
+              f"{len(left_alone)} left alone")
+        print("\n  Expired leases still on disk. Nobody holds these: the TTL ended the "
+              "lease\n  and left the file.")
+        for e in stale[:6]:
+            print(f"    · {e['key']}  [{e['state']}] {e['why']} ({spent(e)})")
+        if len(stale) > 6:
+            print(f"    · … and {len(stale) - 6} more — agent_sync.py residue")
+        if reapable:
+            print("    Clear what this run owns:  agent_sync.py reap")
+        if left_alone:
+            print("    The rest are foreign or ambiguously owned — reported, not touched.")
+
     # Who else is in here, and what landed while this run was away. Without this a
     # lease only tells an agent it is blocked, never who by or on what.
     plane_broken = False
@@ -2672,6 +2938,64 @@ def cmd_release_id(args: argparse.Namespace) -> int:
     Sync().release_id(args.register, args.value)
     print(f"released {args.register}-{args.value}")
     return 0
+
+
+def cmd_residue(_args: argparse.Namespace) -> int:
+    """What this run leaves behind, classified — and never quietly cleared.
+
+    Reporting and clearing are two commands on purpose. This one is safe to run anywhere,
+    including in somebody else's checkout, because it cannot remove anything.
+    """
+    s = Sync()
+    entries = s.residue()
+    print(f"run {s.rid} · identity from {s.identity[1]}")
+    print(f"lease mode {s.lease_mode} · ttl {s.ttl}s · {len(entries)} lock file(s) in "
+          f"{STATE_DIR}/leases\n")
+    if not entries:
+        print("  nothing on disk — no lease has been taken in this checkout, or every one "
+              "was released")
+        return 0
+    for e in entries:
+        print(f"  {e['key']}")
+        print(f"    state : {e['state']}"
+              + ("" if e["state"] == LIVE else f" ({spent(e)})"))
+        print(f"    run   : {e['run'] or '—'} · repo {e['repo'] or '—'}"
+              f"{' · host ' + e['host'] if e['host'] else ''}")
+        print(f"    why   : {e['why']}")
+    reapable = [e for e in entries if e["state"] == REAPABLE]
+    other = [e for e in entries if e["state"] in (FOREIGN, AMBIGUOUS)]
+    print()
+    if reapable:
+        print(f"  {len(reapable)} reapable — this run's own, spent: agent_sync.py reap")
+    if other:
+        print(f"  {len(other)} foreign or ambiguous — reported, never cleared from here. "
+              "An expired\n  lock in another run's name is that run's to explain, and a "
+              "lock whose owner\n  cannot be established is nobody's to delete.")
+    if not reapable and not other:
+        print("  no residue — every lock on disk is a live lease")
+    return 0
+
+
+def cmd_reap(args: argparse.Namespace) -> int:
+    """Clear this run's spent locks, and verify the teardown by reading the state again."""
+    s = Sync()
+    result = s.reap(args.keys or None)
+    for e in result["reaped"]:
+        print(f"  reaped {e['key']} — {e['why']}, confirmed gone by re-reading "
+              f"{STATE_DIR}/leases")
+    for e in result["remaining"]:
+        detail = f" ({e['error']})" if e.get("error") else ""
+        print(f"  ✗ {e['key']} is STILL PRESENT after the delete{detail} — the teardown was "
+              "not\n    verified, whatever the call returned. Nothing was reported as "
+              "cleared.", file=sys.stderr)
+    for e in result["refused"]:
+        print(f"  · {e['key']} [{e['state']}] left alone — {e['why']}")
+    if not args.keys:
+        for e in result["left"]:
+            print(f"  · {e['key']} [{e['state']}] left alone — {e['why']}")
+    if not result["reaped"] and not result["remaining"] and not result["refused"]:
+        print("  nothing this run can prove it owns and has spent — nothing reaped")
+    return 1 if result["remaining"] or result["refused"] else 0
 
 
 def cmd_journal(args: argparse.Namespace) -> int:
@@ -3173,6 +3497,22 @@ def cmd_finish(args: argparse.Namespace) -> int:
     else:
         ok.append("no lease left held")
 
+    #    And the other half of that question, which for six versions nothing asked: what is
+    #    left on disk. `held()` answers `none` for a directory full of expired locks, so
+    #    "no lease left held" was printed beside a two-day-expired one. Proof of Done
+    #    records what remains — it does not license deleting all of it, so only what this
+    #    run can prove it owns is a problem to fix here.
+    stale = s.stale()
+    reapable = [e for e in stale if e["state"] == REAPABLE]
+    left_alone = [e for e in stale if e["state"] != REAPABLE]
+    if not stale:
+        ok.append("no expired lock left behind")
+    if reapable:
+        problems.append(
+            f"{len(reapable)} expired lock(s) this run owns are still on disk ("
+            + ", ".join(e["key"] for e in reapable)
+            + ") — clear them with `agent_sync.py reap`")
+
     # 3. the declared gates, on request. They are the project's own commands and can be slow, so
     #    running them is opt-in — but a `finish` that never ran them is a claim, not a check.
     if args.gates:
@@ -3193,6 +3533,11 @@ def cmd_finish(args: argparse.Namespace) -> int:
         print(f"  \u2713 {line}")
     for line in problems:
         print(f"  \u2717 {line}")
+    if left_alone:
+        print("\n  Left alone — residue this run cannot prove it owns:")
+        for e in left_alone:
+            print(f"    · {e['key']}  [{e['state']}] {e['why']}")
+        print("    Reported, not touched: another run's expired lock is that run's to explain.")
     print()
     if problems:
         print(f"{len(problems)} problem(s) — this work is not finished. The usual one is a "
@@ -3745,6 +4090,13 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("dep")
     sg.add_argument("state")
     sg.set_defaults(fn=cmd_signal)
+
+    sub.add_parser("residue", help="expired locks left on disk, classified by who can "
+                                    "prove they own them").set_defaults(fn=cmd_residue)
+    rp = sub.add_parser("reap", help="clear expired locks this run provably owns; foreign "
+                                     "and ambiguous ones are reported, never touched")
+    rp.add_argument("keys", nargs="*", help="which to clear (default: every reapable one)")
+    rp.set_defaults(fn=cmd_reap)
 
     g = sub.add_parser("guard", help="may this run write that path? exit 2 = no")
     g.add_argument("path")

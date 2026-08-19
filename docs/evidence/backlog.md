@@ -8,7 +8,15 @@ anything that can make the tool report something untrue outranks both.
 
 | ID | Priority | What | Why it is here | Source |
 |---|---|---|---|---|
-| — | — | *(nothing open)* | Every row opened by the two 2026-08-10 audits is closed below, each with what closed it | — |
+| AS-01a | **can report something untrue** | `residue` does not enumerate the git lease mode's refs | The enumerating read walks `.agent-sync/leases/*.lock`, which BOTH modes write — `_note_local` leaves a note whenever a ref is won here. A ref won on another machine has no local note, so `residue` in git mode can print "nothing on disk" while `refs/agent-sync/leases/<key>` sits expired on the remote. Reaping one needs the same `--force-with-lease` compare-and-swap `_git_release` uses | AS-01, 2026-08-19 |
+| AS-01b | **unverified** | The 17 expired locks in the family are reported and still there | This row's mechanism classifies all 17: `foreign` to any fresh session, `ambiguous` to a plain shell, `reapable` only by the session that took them — so no run today can clear one, by design. Whether they are reaped is the orchestrator's decision; 14 of the 17 live in repositories this row must not touch | AS-01, 2026-08-19 |
+| AS-03 | *deferred, not this repo's row* | A `local` lock carries no `host`, so residue cannot tell a lock written on another machine from one written here | Named here only so the gap is not read as an oversight in AS-01: adding `host` to the local payload is a change to the lease contract, which is AS-03's ground (the `local` backend double-winning across machines). Residue uses `host` where the git mode writes it | AS-01, 2026-08-19 |
+
+## Closed by AS-01 (2026-08-19) — a run reports what it leaves behind
+
+| ID | What closed it |
+|---|---|
+| AS-01 | **M-49 and M-50 of the Proof-of-Done manifesto.** `status` and `finish` enumerate expired locks as residue; `residue` prints them in full; `reap` clears only what this run can PROVE it owns and has spent, and reports foreign or ambiguously owned locks untouched. Teardown is verified by re-reading the lease directory and comparing `(run, ts)`, never by the delete's return value. Five checks and five self-test fixtures — 38 → 43 — in `test/validate.py`; doctrine in `references/lease-protocol.md`, and the snapshot generator emits it |
 
 ## Closed by the board-clearing run of 2026-08-10
 

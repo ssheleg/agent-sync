@@ -248,6 +248,8 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" <command>
 | `guard <path>` | May this run write that path? Exit 0 = yes, 2 = no |
 | `board` | Regenerate the read-only board and the mirror from git |
 | `whoami` | Print this run's id and its held leases |
+| `residue` | Expired locks still on disk, classified — this run's spent ones, and the foreign or ambiguously owned ones it reports and leaves alone |
+| `reap [KEY…]` | Clear only the locks this run can prove it owns and has spent, then re-read the directory to confirm the teardown |
 | `merge` | Land this branch on the integration branch: conflicts checked first, merge log written, lease released |
 | `merges` | What landed while you were on your branch |
 

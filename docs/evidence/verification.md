@@ -8,6 +8,37 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## AS-01 — a run reports what it leaves behind (in tree, unreleased)
+
+Closes **M-49** and **M-50** of the Proof-of-Done manifesto. The defect was not a missing
+function: the reaping code already existed in `release()`, and nothing could ever reach it
+for a key nobody names. Every reader of lease state folds the TTL into the read, so
+*expired* and *absent* were one answer.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| M-49a | `status` and `finish` enumerate expired locks as residue rather than reporting `none` | `check_status_reports_expired_locks_as_residue`, `check_finish_reports_what_the_run_leaves_behind` + self-tests `expired locks are not enumerated`, `finish says nothing about what the run leaves behind` | 2026-08-19 |
+| M-49b | Only state this run PROVABLY owns and has spent is reapable; foreign and ambiguously owned state is reported and left alone, including when named on the command line | `check_residue_ownership_must_be_provable` — 10 classifier verdicts plus 5 locks on disk (own, foreign, owner-less, unreadable, live) + self-tests `a foreign expired lock is called this run's`, `unprovable ownership defaults to reapable` | 2026-08-19 |
+| M-49c | The reason a lock was left alone is printed, never just the verdict | same check — every non-live verdict must carry a `why` | 2026-08-19 |
+| M-50 | Teardown is verified by re-reading the state, not by the delete's return value | `check_reap_verifies_teardown_by_re_reading` — `Path.unlink` replaced with a no-op, so the delete *succeeds* and the state does not change; `reap` must report `remaining`, not `reaped` + self-test `teardown trusts the delete instead of re-reading`. Also driven by hand against a `chmod 500` lease directory: exit 1, `MINE is STILL PRESENT after the delete` | 2026-08-19 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.13.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
+| Measured | The family's residue is counted, not estimated | the classifier run read-only over every lock in the nine checkouts of `sshlg-skills`: **24 locks, 7 live, 17 expired** — `foreign` to any fresh session, `ambiguous` to a plain shell, `reapable` only by the session that took them. **0 reapable by any run today** | 2026-08-19 |
+| Measured | The run that reported the residue deleted none of it | the same sweep after the commit: 17/17 still present | 2026-08-19 |
+
+**Decided, not changed.** `release <KEY>` still reaps an expired lock in another run's
+name and `reap` refuses to — the #4 incident (a lease at 604× its TTL that nothing could
+clear) is why the first exists, and a person naming one key is what makes it safe. A sweep
+has no such person. Both contracts are stated in `references/lease-protocol.md` so the two
+are not "aligned" by widening the sweep; the existing behaviour is covered by
+`test/claim_cell_test.py` (`an expired foreign lease can be reaped`).
+
+**Not verified by this row.** The git lease mode's refs are not enumerated — the read walks
+the lock directory, which both modes write, so a ref won on another machine (no local note)
+is invisible to `residue`. Board row AS-01a. A `local` lock carries no `host`, so residue
+cannot separate machines in that mode; that is the lease contract, deferred to AS-03 —
+named on the board so the gap is not read as an oversight here. The `--self-test` fixture set is a defect suite, not coverage: it proves each
+check fires, not that the classifier has no unreached verdict.
+
 ## v1.12.0 — the tarball stops carrying someone else's bytecode
 
 | REQ | What must hold | Verified by | Last run |

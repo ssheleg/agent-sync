@@ -9,6 +9,7 @@ when two agents disagree about who holds something.
 - [Acquiring — the third design, and the first that is true](#acquiring--the-third-design-and-the-first-that-is-true)
 - [Expiry and stealing](#expiry-and-stealing)
 - [Releasing](#releasing)
+- [Residue — what expiry leaves behind](#residue--what-expiry-leaves-behind)
 - [Id reservation](#id-reservation)
 - [The lease is not the claim](#the-lease-is-not-the-claim)
 
@@ -142,6 +143,71 @@ and when.
 `release` on every path, including failure. An abandoned lease is indistinguishable
 from active work until its TTL runs out, and during that window the task looks
 taken. Report the failure and release; do not hold the lease "in case".
+
+## Residue — what expiry leaves behind
+
+**Expiry ends a lease. It does not remove a file.** Every reader of lease state in this
+tool folds the TTL into the read — `held()`, `_lease_holder()` and `all_holdings()` each
+answer *none* for an expired lock and *none* for a lock that is not there. That is exactly
+right for exclusion, and it means an expired lock is not un-owned but **invisible**.
+
+Measured across the nine repositories of one skill family on 2026-08-19: **seventeen lock
+files, all seventeen expired**, the oldest by three days. `status` printed `leases held:
+none` / `other runs: none holding anything` in a checkout holding three of them, and
+`finish` printed `✓ no lease left held` beside a two-day-expired one. Nothing was wrong
+with any of those answers. Nothing enumerated.
+
+So `status` and `finish` report residue, `residue` prints it in full, and `reap` is the
+only thing that removes any of it. The split between the two kinds is the mechanism:
+
+| Verdict | What it means | What happens to it |
+|---|---|---|
+| `live` | still inside its TTL | held, not residue — untouched |
+| `reapable` | this run PROVABLY owns it and has spent it | `reap` clears it |
+| `foreign` | it demonstrably belongs to another run or another machine | reported, left alone |
+| `ambiguous` | ownership or expiry cannot be established at all | reported, left alone |
+
+**What makes ownership provable** — all four, or the verdict is not `reapable`:
+
+1. the lock is past its TTL (a live lease is held, not residue);
+2. it records a `run`, and that run is this one;
+3. **this run's identity is not the shared fallback.** `run_id()` keys its marker by
+   session; a shell with no session id is served one shared entry, and that identity is
+   shared with any other session in the same checkout. Under it a matching run id proves
+   nothing — so it does not license a delete, and every such lock is reported as
+   `ambiguous` instead;
+4. the lock's `repo` is this checkout and its `host` — written by the git mode, absent in
+   `local`, where the lease is machine-local by construction — is this machine.
+
+In doubt the answer is `ambiguous`, never `reapable`. A classifier that resolves doubt by
+deleting is worse than none, because it deletes under a claim of authority.
+
+**Teardown is verified by re-reading the state, never by the delete's return value.**
+`unlink` returns nothing and raises nothing on a filesystem where the entry survives the
+call — a read-only mount, an NFS write that never lands, another process recreating the
+name. `reap` therefore reads the lease directory again and compares `(run, ts)`: a lock
+still there under the same identity is a **failure**, however cleanly the delete went, and
+nothing is reported as cleared. A key that came back as another run's live lease *was*
+torn down, and calling that a failure would teach an operator to ignore the one message
+that matters.
+
+`reap` never touches `foreign` or `ambiguous` state, including when it is named on the
+command line: naming one is refused out loud with a non-zero exit, because an operator
+reads a silent zero as done.
+
+### Why `release <KEY>` may reap a foreign corpse and `reap` may not
+
+They look contradictory and they are not. `release` clears an expired lock in another
+run's name — that is the remedy for the #4 incident, a lease measured at **604×** its
+2700-second TTL that no command could clear, and it is tested
+(`test/claim_cell_test.py`). What makes it safe is the thing `reap` does not have: **a
+person named that one key.** The reap is announced in the output, because the operator
+asked to release *their* lease and is getting somebody else's corpse cleared as well.
+
+`reap` is a sweep nobody named key by key. A sweep that deletes what it cannot prove it
+owns is how one run destroys another's only record of work in progress — an agent that
+stopped renewing may still be running. So the sweep refuses, and the two verbs keep two
+contracts on purpose. Do not "align" them by widening `reap`.
 
 ## Id reservation
 

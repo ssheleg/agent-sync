@@ -2132,6 +2132,233 @@ def check_routed_triggers_still_advertised():
         notes.append(f"routed triggers — {(proc.stderr or 'the checker could not look').strip()}")
 
 
+# ---------------------------------------------------------------- residue (AS-01)
+#
+# A run produces more than a diff. What it leaves on disk is part of the result, and until
+# 1.13.0 nothing here could see it: every reader of lease state folds the TTL into the read,
+# so `held()`, `_lease_holder()` and `all_holdings()` each answer *none* for an expired lock
+# and *none* for a lock that is not there. Measured across the nine repositories of one
+# family on 2026-08-19: seventeen lock files, all seventeen expired, the oldest by three
+# days — and `status` printed `leases held: none` in a checkout holding three of them while
+# `finish` printed "✓ no lease left held" beside a two-day-expired one.
+
+
+def _plant_lock(project: str, key: str, **payload) -> Path:
+    """A lock file exactly as `acquire` writes one, with whatever fields a case needs."""
+    leases = Path(project) / ".agent-sync" / "leases"
+    leases.mkdir(parents=True, exist_ok=True)
+    p = leases / f"{key}.lock"
+    p.write_text(payload.pop("raw", None) or json.dumps(payload))
+    return p
+
+
+def _rid_of(project: str, run_id: str) -> str:
+    """Ask the tool who it is. Recomputing the rule here would make this fixture a second
+    home for it, and the two would drift the first time identity changes shape."""
+    out = _run_script(project, "whoami", run_id=run_id).stdout.split()
+    return out[1] if len(out) > 1 else ""
+
+
+def check_status_reports_expired_locks_as_residue() -> None:
+    """`status` must not report `none` over a directory of expired locks.
+
+    This is the defect as it shipped: the command every session runs read the lease
+    directory, applied the TTL, found nothing *held* and said so — which is true and reads
+    as "the directory is empty". Nothing else enumerated, so seventeen corpses across one
+    family were reported by no command at all.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — residue/status check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("residue/status: init failed")
+            return
+        rid = _rid_of(project, "resident")
+        old = "2026-01-01T00:00:00Z"
+        _plant_lock(project, "OWN-1", run=rid, ts=old, ttl=60)
+        _plant_lock(project, "OTHER-1", run="r-somebodyelse", ts=old, ttl=60)
+        out = _run_script(project, "status", run_id="resident").stdout
+        if "leases held    : none" not in out:
+            err("residue/status: the fixture holds no live lease, so `status` should still "
+                "report `leases held: none` — the assertion below proves nothing otherwise")
+        for key in ("OWN-1", "OTHER-1"):
+            if key not in out:
+                err(f"status: {key}.lock is expired and on disk and `status` never names it "
+                    "— an expired lease is residue the next agent has to reason about, and "
+                    "`leases held: none` reads as an empty directory")
+        if "expired locks  : none" in out:
+            err("status: reports `expired locks: none` with two expired locks in the "
+                "directory it just read")
+
+
+def check_residue_ownership_must_be_provable() -> None:
+    """Reapable means PROVABLY this run's and PROVABLY spent. Everything else is reported.
+
+    The manifesto requirement this closes (M-49) splits residue in two, and the split is the
+    whole mechanism: state a run can prove it owns and has spent may be cleared; foreign or
+    ambiguously owned state is reported and left alone. A classifier that resolves doubt by
+    deleting is worse than no classifier, because it deletes under a claim of authority.
+    """
+    mod = _load_script("agent_sync_residue")
+    now = 1_000_000.0            # 1970-01-12T13:46:40Z, so every date below is explicit
+
+    def verdict(raw=None, identity_is_strong=True, **over):
+        payload = {"run": "r-mine", "ts": "1970-01-01T00:10:00Z", "ttl": 60,
+                   "host": "thisbox"}
+        payload.update(over)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        return mod.classify_lock(
+            "K", raw if raw is not None else json.dumps(payload), rid="r-mine",
+            identity_is_strong=identity_is_strong, repo="here", host="thisbox",
+            default_ttl=2700, at=now)
+
+    cases = [
+        ("a live lease of this run", dict(ts="1970-01-12T13:46:40Z", ttl=2700), "live"),
+        ("this run's expired lock", dict(), "reapable"),
+        ("another run's expired lock", dict(run="r-theirs"), "foreign"),
+        ("an expired lock from another machine", dict(host="otherbox"), "foreign"),
+        ("this run's id under the shared identity", dict(identity_is_strong=False), "ambiguous"),
+        ("a matching run in another repository", dict(repo="elsewhere"), "ambiguous"),
+        ("an expired lock naming no run", dict(run=None), "ambiguous"),
+        ("a lock that is not JSON", dict(raw="{not json"), "ambiguous"),
+        ("a lock whose timestamp is not one", dict(ts="yesterday"), "ambiguous"),
+        ("a lock whose ttl is not a number", dict(ttl="soon"), "ambiguous"),
+    ]
+    for label, over, want in cases:
+        got = verdict(**over)
+        if got["state"] != want:
+            err(f"residue ownership: {label} classified `{got['state']}`, must be `{want}` "
+                f"— {got['why']}")
+        if want != "live" and not got["why"]:
+            err(f"residue ownership: {label} is reported with no reason, so an operator "
+                "cannot tell why it was left alone")
+
+    # And the same rule where it actually costs something: through the command, on disk.
+    if not shutil.which("git"):
+        notes.append("git not found — residue/reap disk check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("residue/reap: init failed")
+            return
+        rid = _rid_of(project, "resident")
+        old = "2026-01-01T00:00:00Z"
+        mine = _plant_lock(project, "MINE", run=rid, ts=old, ttl=60)
+        theirs = _plant_lock(project, "THEIRS", run="r-somebodyelse", ts=old, ttl=60)
+        nameless = _plant_lock(project, "NAMELESS", ts=old, ttl=60)
+        broken = _plant_lock(project, "BROKEN", raw="{ not json")
+        live = _plant_lock(project, "LIVE", run="r-somebodyelse",
+                           ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), ttl=2700)
+
+        r = _run_script(project, "reap", run_id="resident")
+        if r.returncode != 0:
+            err(f"reap: exited {r.returncode} clearing one lock it owns: {r.stdout}{r.stderr}")
+        if mine.exists():
+            err("reap: left this run's own spent lock in place — the reapable half of the "
+                "split does nothing")
+        for p, why in ((theirs, "another run's"), (nameless, "an owner-less"),
+                       (broken, "an unreadable"), (live, "a LIVE")):
+            if not p.exists():
+                err(f"reap: deleted {why} lock — foreign and ambiguously owned state is "
+                    "reported and left alone, and a live lease is not residue at all")
+        for key in ("THEIRS", "NAMELESS", "BROKEN"):
+            if key not in r.stdout:
+                err(f"reap: left {key} alone without reporting it — silence about residue "
+                    "is the defect this mechanism exists to close")
+
+        # Naming a lock this run cannot prove it owns must be refused out loud, not obeyed.
+        r2 = _run_script(project, "reap", "THEIRS", run_id="resident")
+        if r2.returncode == 0:
+            err("reap THEIRS: exited 0 on a lock it refused to touch — an operator reads "
+                "that as done")
+        if not theirs.exists():
+            err("reap THEIRS: deleted another run's lock when asked by name")
+
+
+def check_reap_verifies_teardown_by_re_reading() -> None:
+    """Teardown is verified by re-reading state, never by trusting the delete's return.
+
+    `unlink` returns nothing and raises nothing on a filesystem where the entry survives the
+    call — a read-only mount, an NFS write that never lands, another process recreating the
+    name. So the fixture makes the delete *succeed* and the state not change, which is the
+    exact shape no return-value check can see.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — reap verification check skipped")
+        return
+    mod = _load_script("agent_sync_teardown")
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("reap verification: init failed")
+            return
+        rid = _rid_of(project, "resident")
+        _plant_lock(project, "GHOST", run=rid, ts="2026-01-01T00:00:00Z", ttl=60)
+        original = mod.Path.unlink
+        try:
+            os.chdir(project)
+            os.environ["AGENT_SYNC_RUN_ID"] = "resident"
+            s = mod.Sync()
+            if [e["state"] for e in s.stale()] != ["reapable"]:
+                err("reap verification: the fixture's own lock is not reapable, so the "
+                    "teardown below proves nothing")
+                return
+            mod.Path.unlink = lambda self, *a, **k: None       # a delete that changes nothing
+            result = s.reap()
+            if result["reaped"]:
+                err("reap: reported "
+                    f"{[e['key'] for e in result['reaped']]} cleared while the lock is still "
+                    "on disk — the teardown was verified by the call's return value, which "
+                    "is the wish rather than the state")
+            if [e["key"] for e in result["remaining"]] != ["GHOST"]:
+                err("reap: a lock still present after the delete must come back as "
+                    f"remaining; got {result}")
+            mod.Path.unlink = original
+            r = s.reap()
+            if [e["key"] for e in r["reaped"]] != ["GHOST"] or r["remaining"]:
+                err(f"reap: a delete that does land must be confirmed by the re-read; got {r}")
+        finally:
+            mod.Path.unlink = original
+            os.environ.pop("AGENT_SYNC_RUN_ID", None)
+            os.chdir(cwd)
+
+
+def check_finish_reports_what_the_run_leaves_behind() -> None:
+    """`finish` printed "✓ no lease left held" beside a two-day-expired lock.
+
+    Proof of Done records what remains. It does not grant authority to delete all of it, so
+    what this run owns is a problem to fix and the rest is reported under its own heading.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — finish residue check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("finish residue: init failed")
+            return
+        clean = _run_script(project, "finish", run_id="resident").stdout
+        if "no expired lock left behind" not in clean:
+            err("finish: says nothing about residue on a project that has none — the "
+                "positive statement is what makes its absence readable")
+        rid = _rid_of(project, "resident")
+        old = "2026-01-01T00:00:00Z"
+        _plant_lock(project, "LEFT-MINE", run=rid, ts=old, ttl=60)
+        _plant_lock(project, "LEFT-THEIRS", run="r-somebodyelse", ts=old, ttl=60)
+        out = _run_script(project, "finish", run_id="resident").stdout
+        if "LEFT-MINE" not in out:
+            err("finish: this run's own expired lock is on disk and `finish` never names it "
+                "— it printed the same ✓ it prints for a clean tree")
+        if "LEFT-THEIRS" not in out:
+            err("finish: another run's expired lock is not reported — Proof of Done records "
+                "what remains, including what it must not touch")
+        if "no expired lock left behind" in out:
+            err("finish: claims nothing was left behind with two expired locks on disk")
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -2182,6 +2409,11 @@ def main() -> int:
 
     check_routed_triggers_still_advertised()
     check_the_tarball_carries_no_bytecode()
+
+    check_status_reports_expired_locks_as_residue()
+    check_residue_ownership_must_be_provable()
+    check_reap_verifies_teardown_by_re_reading()
+    check_finish_reports_what_the_run_leaves_behind()
 
     for n in notes:
         print(f"note: {n}")
@@ -2426,6 +2658,37 @@ def self_test() -> int:
             lambda s: s.replace(
                 '    ident = subprocess.run(["git", "var", "GIT_COMMITTER_IDENT"],',
                 '    ident = subprocess.run(["git", "var", "GIT_AUTHOR_DATE"],')),
+        # --- AS-01: residue. Expiry ends a lease and leaves the file; these four are
+        # the ways a report of what remains goes quiet or goes too far.
+        "expired locks are not enumerated": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('    if not stale:\n        print("  expired locks  : none")',
+                                '    if True:\n        print("  expired locks  : none")')),
+        "a foreign expired lock is called this run's": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('    if out["run"] != rid:\n        out["state"] = FOREIGN',
+                                '    if False:\n        out["state"] = FOREIGN')),
+        "unprovable ownership defaults to reapable": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('out: dict[str, Any] = {"key": key, "state": AMBIGUOUS,',
+                                'out: dict[str, Any] = {"key": key, "state": REAPABLE,')),
+        "finish says nothing about what the run leaves behind": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                '    stale = s.stale()\n'
+                '    reapable = [e for e in stale if e["state"] == REAPABLE]\n'
+                '    left_alone = [e for e in stale if e["state"] != REAPABLE]\n'
+                '    if not stale:\n'
+                '        ok.append(',
+                "    stale = []\n"
+                "    reapable = []\n"
+                "    left_alone = []\n"
+                "    if not stale:\n"
+                "        ok.append(")),
+        "teardown trusts the delete instead of re-reading": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('        after = {e["key"]: e for e in self.residue()}',
+                                "        after = {}")),
         "stray SKILL.md": (None, None),
     }
     # Each case runs as its own PROCESS, and they run concurrently.
