@@ -1,3 +1,44 @@
+## v1.14.0 — expiry ended a lease and left the file, and every reader folded that away
+
+**`status` reported `leases held: none` over three expired locks in the directory it had
+just read.** Not a bug in one function: *every* reader of lease state folded the TTL into
+the read. `held()` keeps only what is this run's **and** alive; `_lease_holder()` returns
+`None` for an expired lock; `all_holdings()` drops it. All three are correct for
+exclusion — an expired lease is not held — and all three therefore give one answer for
+*expired* and for *absent*. There was no fourth reader, so nothing could tell the two
+apart, and `finish` printed `✓ no lease left held` beside a two-day-old corpse.
+
+Measured across the family when the conformance audit went looking: **17 expired lock
+files across 9 checkouts, the oldest 3 days 11 hours.**
+
+### The mechanism
+
+`classify_lock()` — pure, all arguments in — reads every `.agent-sync/leases/*.lock` as
+`live` · `reapable` · `foreign` · `ambiguous`. `status` and `finish` report residue
+instead of silence. Two new verbs: `residue` (report only, safe in any checkout) and
+`reap`, which clears **only** provably-own spent state and refuses foreign or ambiguous
+state out loud, with exit 1, even when it is named on the command line.
+
+`reapable` requires four things together, and anything short of all four is reported and
+never deleted: the lease is spent with a parseable clock; it records a run; that run is
+this one; and the run id means something. That last clause carries the rule — a shell
+with no session id is served one **shared** identity, so a matching run id under it
+proves nothing and does not license a delete. In doubt: `ambiguous`.
+
+**Teardown is verified by re-reading the directory**, not by trusting the delete's return
+value. Driven by hand: with the lease directory made read-only, `reap` exits 1 with
+*"MINE is STILL PRESENT after the delete … the teardown was not verified, whatever the
+call returned"* — and the lock is still there, which is the point.
+
+### Standing instruction 9
+
+*A predicate cannot report the condition it folds into its answer.* That is the class,
+and it is now in `docs/evidence/retro.md` rather than in this entry alone.
+
+Self-test 38 → 43 fixtures, every one detected. Latency measured, not assumed: `status`
+0.39 s against 0.31 s before; `guard` unchanged at 0.15 s — residue is not on the guard
+path.
+
 ## v1.13.0 — the file carried two notions of *held* and they disagreed where it mattered
 
 **A lease from a run that died could not be cleared by any command.** Measured in the field:
