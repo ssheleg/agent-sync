@@ -8,7 +8,38 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
-## AS-01 — a run reports what it leaves behind (in tree, unreleased)
+## AS-04 — a claim tag stops outliving its lease (in tree at v1.14.0, release pending)
+
+Closes **[ssheleg/agent-sync#5](https://github.com/ssheleg/agent-sync/issues/5)**, open since
+2026-08-17. Not a missing function either: the reaping and restoring code already existed, and
+two early returns put it out of reach. `write_claim`'s `if saved is None: continue` made
+`release` a no-op that still printed `released <KEY>` and exited 0 — the state file is one
+run's memory of what it overwrote, and a tag outlives it routinely — while
+`claim_divergence`'s `if not held: return out` gated divergence reporting on holding a lease,
+so a tag with nothing behind it could be reported to nobody. Same shape as #4, one plane over:
+**expiry ends a lease, and every reader folded that away.**
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| AS-04a | A claim tag whose lease the TTL has ended is cleared by `release <KEY>`, and the run it named is printed | `check_a_claim_tag_cannot_outlive_every_command` + fixtures `an orphaned claim tag is cleared (#5)`, `an orphaned tag behind an expired lease is cleared (#5)` + self-test plant `an orphaned claim tag is unreachable` → **exit 1**, `release: left the orphaned claim tag in place ('open (claimed: r-ghost1234)') and exited 0` | 2026-08-20 |
+| AS-04b | A tag with a **live** lease behind it is never cleared by another run, whatever the state file says | same check (the `B-88` half) + fixture `a tag with a live lease is not cleared by another run (#5)` + plant `a claim whose lease is live is edited anyway` → **exit 1**. Two refusals stand in front of it: `release`'s ownership check, and `write_claim`'s own `live is not None and live != self.rid` for the case where the state file is gone | 2026-08-20 |
+| AS-04c | A tag with no lease behind it is REPORTED, not merely clearable — by `status`, `residue` and `reconcile` | same check (three commands asserted) + fixture `an orphaned tag is reported by status/residue/reconcile (#5)` + plant `orphan claim tags are reported to nobody` → **exit 1**, `status: a claim tag with no lease behind it is never named` | 2026-08-20 |
+| AS-04d | One notion of held, and only one reader of it | `_lease_holder` is the single reader; `_holder_of` memoises it per command, so a report over a tagged board costs one `ls-remote` per **tagged row** in git mode and never one per board row. Counted rather than asserted: `grep -n '_lease_holder' plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py` → **7** lines — one definition (`:1464`), exactly **two** callers (`release()` at `:1495`, `_holder_of()` at `:1678`), and four mentions in prose. This row first said *"4 call sites"*, which no command produces; the grep was run because the row claimed a number, and the number was wrong | 2026-08-20 |
+| AS-01a | `residue` no longer reads as a complete answer in git mode | `residue states what it cannot see in git mode (AS-01a)` — asserts `⚠ INCOMPLETE IN THIS MODE` and the `git ls-remote … 'refs/agent-sync/leases/*'` line. **The sweep itself is still open** (board row AS-01a); this row closes only the honesty half | 2026-08-20 |
+| AS-03 | A `local` lock records the machine that wrote it, and two machines are separated in that mode | `check_local_locks_record_their_host` (through the CLI) + fixtures `a local lock records its host (AS-03)`, `two machines are separated in local mode (AS-03)` + plant `a local lock records no host` → **exit 1** | 2026-08-20 |
+| AS-05 | The newest ledger section names what `git describe --tags` prints | `check_ledger_names_the_shipped_version` — `git describe --tags --abbrev=0` where there is a git directory, `package.json` where there is not (the self-test's copy), refusing when the two disagree; plus an "unreleased" claim about a version the CHANGELOG already carries. Plants `the ledger names a version that did not ship` and `the ledger calls a shipped artifact unreleased` → **exit 1** each | 2026-08-20 |
+| AS-06 | One divisor for the token budget, and the body under it | `test/validate.py` divides by **3.9**, matching `CHARS_PER_TOKEN` in make-skill's `audit_skill.py`. Body: **18265 chars / ~4683 tokens**, `0 GAP, 14 PASS` from `audit_skill.py --house`, inside the 5000 budget and the 4750 working limit. Plant `skill body over the token budget` → **exit 1**, `body is ~5360 tokens (20906 chars / 3.9)` | 2026-08-20 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.14.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (51 fixtures, 8 at a time)`, exit 0 — up from 43. `python3 test/claim_cell_test.py` → `PASS: … — 16 cases`, exit 0 — up from 9 | 2026-08-20 |
+| Reproduced | The defect was real at the tagged version, not only in a description | Driven by hand against a fixture board at v1.14.0 before the fix: `release B-77` printed `released B-77`, exit **0**, `git diff --stat` empty; `residue` → `nothing on disk`; `reconcile` → `no mechanical divergence found`; `status` → `leases held: none` / `expired locks: none` | 2026-08-20 |
+
+**Not verified by this row.** The git lease mode's refs are still not enumerated — the sweep is
+board row AS-01a, and only the statement of the limitation shipped here. `disputed` (a tag
+naming one run while the live lease belongs to another) is reported and never cleared; that is
+the contract, not a gap, and `a tag with a live lease is not cleared by another run` covers it.
+Locks written before this change carry no `host`, and `classify_lock` still treats an absent
+`host` as legal — so AS-03's separation applies only to locks taken after this change.
+
+## AS-01 — a run reports what it leaves behind (shipped in v1.14.0, 2026-08-19)
 
 Closes **M-49** and **M-50** of the Proof-of-Done manifesto. The defect was not a missing
 function: the reaping code already existed in `release()`, and nothing could ever reach it
@@ -21,7 +52,7 @@ for a key nobody names. Every reader of lease state folds the TTL into the read,
 | M-49b | Only state this run PROVABLY owns and has spent is reapable; foreign and ambiguously owned state is reported and left alone, including when named on the command line | `check_residue_ownership_must_be_provable` — 10 classifier verdicts plus 5 locks on disk (own, foreign, owner-less, unreadable, live) + self-tests `a foreign expired lock is called this run's`, `unprovable ownership defaults to reapable` | 2026-08-19 |
 | M-49c | The reason a lock was left alone is printed, never just the verdict | same check — every non-live verdict must carry a `why` | 2026-08-19 |
 | M-50 | Teardown is verified by re-reading the state, not by the delete's return value | `check_reap_verifies_teardown_by_re_reading` — `Path.unlink` replaced with a no-op, so the delete *succeeds* and the state does not change; `reap` must report `remaining`, not `reaped` + self-test `teardown trusts the delete instead of re-reading`. Also driven by hand against a `chmod 500` lease directory: exit 1, `MINE is STILL PRESENT after the delete` | 2026-08-19 |
-| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.13.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.14.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
 | Measured | The family's residue is counted, not estimated | the classifier run read-only over every lock in the nine checkouts of `sshlg-skills`: **24 locks, 7 live, 17 expired** — `foreign` to any fresh session, `ambiguous` to a plain shell, `reapable` only by the session that took them. **0 reapable by any run today** | 2026-08-19 |
 | Measured | The run that reported the residue deleted none of it | the same sweep after the commit: 17/17 still present | 2026-08-19 |
 

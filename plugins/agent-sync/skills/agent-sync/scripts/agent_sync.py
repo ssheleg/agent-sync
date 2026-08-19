@@ -847,6 +847,34 @@ REAPABLE = "reapable"
 FOREIGN = "foreign"
 AMBIGUOUS = "ambiguous"
 
+# The same three-way split for the OTHER plane: a claim tag written into a registry file.
+# `held` there means the lease the tag names is still inside its TTL; `orphan` means it is
+# not, and `disputed` means the lease is live under a different run than the tag names.
+TAG_HELD = "held"
+ORPHAN = "orphan"
+DISPUTED = "disputed"
+
+DEFAULT_CLAIM_TEMPLATE = "{prev} (claimed: {holder})"
+
+
+def claim_marker_re(template: str) -> "re.Pattern[str] | None":
+    """A regex for this template's claim marker, capturing the run it names.
+
+    `write_claim` builds the marker by emptying `{prev}` and substituting the run id. Read
+    back, the run id is the one part not known in advance: it is the capture and everything
+    around it is literal, so one function defines the marker in both directions instead of
+    two spellings that can disagree.
+
+    `None` for a template with no `{holder}`. Such a marker names no owner, and a tag whose
+    owner cannot be read must never be cleared on somebody's behalf — the same rule
+    `classify_lock` applies to a lock that records no run.
+    """
+    marker = template.replace("{prev}", "").strip()
+    if "{holder}" not in marker:
+        return None
+    head, _, tail = marker.partition("{holder}")
+    return re.compile(re.escape(head) + r"(?P<holder>[^|\s]+)" + re.escape(tail))
+
 
 def classify_lock(key: str, raw: str, *, rid: str, identity_is_strong: bool,
                   repo: str, host: str, default_ttl: int, at: float) -> dict[str, Any]:
@@ -872,8 +900,8 @@ def classify_lock(key: str, raw: str, *, rid: str, identity_is_strong: bool,
       session, and a shell with no session id is served one shared entry whose own
       docstring says the identity "is shared with any other session in this checkout".
       Under that key a matching run id proves nothing, so it does not license a delete.
-    - its `repo` is this checkout, and its `host` — written by the git lease mode, absent
-      in local mode, where the lease is machine-local by construction — is this machine.
+    - its `repo` is this checkout, and its `host` — written by both lease modes since
+      AS-03, absent only in locks taken before it — is this machine.
 
     Everything else is reported and left alone: `foreign` where it demonstrably belongs to
     somebody else, `ambiguous` where the question cannot be answered at all. In doubt the
@@ -1018,6 +1046,7 @@ class Sync:
         self.rid = run_id(self.root)
         self.ttl = int(self.cfg.get("leaseTtlSeconds") or DEFAULT_TTL)
         self._identity: tuple[str, str] | None = None
+        self._holders: dict[str, str | None] = {}
 
     @property
     def gated(self) -> bool:
@@ -1284,8 +1313,14 @@ class Sync:
             return won, holder
 
         lock = self._local_lock(key)
+        # `host` is written in BOTH lease modes (AS-03). It used to be the git mode's alone,
+        # on the reasoning that a `local` lease is machine-local by construction — but the
+        # *file* is not: a checkout on a synced or shared directory is read by two machines,
+        # and `classify_lock` consumes `host` to decide `foreign`. Without it the classifier
+        # had one fewer way to refuse, on 25 of the 25 locks this family had on disk
+        # (2026-08-20). Absent stays legal: locks written before this line exist.
         payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name()})
+                              "repo": repo_name(), "host": platform.node()})
 
         if lock.exists():
             try:
@@ -1592,6 +1627,87 @@ class Sync:
                 reaped.append(e)
         return {"reaped": reaped, "remaining": remaining, "refused": refused,
                 "left": [e for e in before if e["state"] in (FOREIGN, AMBIGUOUS)]}
+
+    def claim_tags_on_disk(self) -> list[dict[str, Any]]:
+        """Every claim tag written into a registry file, with the run each one names.
+
+        The enumerating read for the OTHER plane, and it did not exist. `held()`,
+        `_lease_holder()` and `residue()` all answer from the lease; nothing answered from
+        the board — so a tag whose lease had ended was reported by no command at all.
+        `release` printed success and changed nothing (`write_claim` had no saved cell to
+        undo), `residue` said "nothing on disk", `status` said "leases held: none", and
+        `reconcile` never mentioned it. Filed as ssheleg/agent-sync#5 and reproduced
+        verbatim at 1.14.0.
+        """
+        out: list[dict[str, Any]] = []
+        for pattern, spec in (self.cfg.get("claimTags") or {}).items():
+            if spec.get("mode") != "cell":
+                continue
+            rx = claim_marker_re(spec.get("held") or DEFAULT_CLAIM_TEMPLATE)
+            if rx is None:
+                continue
+            idx = int(spec.get("cell", -1))
+            for path in sorted(glob_files(self.root, pattern)):
+                if not path.is_file():
+                    continue
+                try:
+                    lines = path.read_text().splitlines()
+                except OSError:
+                    continue
+                rel = str(path.relative_to(self.root))
+                for n, line in enumerate(lines, 1):
+                    cells = self._row_cells(line)
+                    if not cells or not -len(cells) <= idx < len(cells):
+                        continue
+                    m = rx.search(cells[idx])
+                    if not m:
+                        continue
+                    out.append({"key": cells[0].strip(), "holder": m.group("holder"),
+                                "file": rel, "line": n, "cell": cells[idx].strip()})
+        return out
+
+    def _holder_of(self, key: str) -> str | None:
+        """`_lease_holder`, memoised for the length of one command.
+
+        One notion of held, and only one reader of it. Memoised because in git mode that
+        reader is an `ls-remote`: a report over a board with several tags would otherwise
+        pay a network round-trip per row. The bound is the number of TAGGED rows, not the
+        size of the board — an untagged row is never looked up.
+        """
+        if key not in self._holders:
+            self._holders[key] = self._lease_holder(key)
+        return self._holders[key]
+
+    def orphan_claims(self) -> list[dict[str, Any]]:
+        """Claim tags with no live lease behind them — one notion of held, both planes.
+
+        The TTL is the contract. A tag is a claim about a lease, so once `_lease_holder` —
+        the single reader every other command already trusts — answers `None`, the tag is
+        residue in the registry exactly as an expired lock is residue on disk, and is
+        reported the same way.
+
+        A tag naming a run that still holds the lease is not residue and never appears
+        here. A tag naming one run while the live lease belongs to another is `disputed`:
+        reported, never cleared, because clearing it would edit a registry under a run
+        that is still working.
+        """
+        out: list[dict[str, Any]] = []
+        for e in self.claim_tags_on_disk():
+            holder = self._holder_of(e["key"])
+            if holder == e["holder"]:
+                continue
+            e = dict(e)
+            if holder is None:
+                e["state"] = ORPHAN
+                e["why"] = (f"the tag names run {e['holder']}, and the {self.lease_mode} "
+                            f"lease plane holds no live lease for `{e['key']}` — the TTL "
+                            "has already ended it")
+            else:
+                e["state"] = DISPUTED
+                e["why"] = (f"the tag names run {e['holder']} while the live lease for "
+                            f"`{e['key']}` is held by {holder}")
+            out.append(e)
+        return out
 
     def held(self) -> list[str]:
         d = self.root / STATE_DIR / "leases"
@@ -2015,7 +2131,40 @@ class Sync:
                 state.setdefault(key, {})[str(rel)] = current
             else:
                 if saved is None:
-                    continue                      # nothing of ours to undo
+                    # NOT "nothing to undo" — that reading is ssheleg/agent-sync#5. The
+                    # state file is this run's memory of what it overwrote, and a tag
+                    # outlives it routinely: written by a run that died, by a session on
+                    # another machine, or with `.agent-sync/` wiped between the acquire and
+                    # the release. `release` then printed success, exited 0, and left
+                    # `(claimed: r-…)` on the board with nothing behind it — a claim no
+                    # command could reach.
+                    #
+                    # The TTL decides, exactly as it decides for a lock file: the lease
+                    # plane is asked who holds the key, and only a tag with no live lease
+                    # behind it is cleared. A live lease is somebody working, and its tag
+                    # is left alone whoever runs this.
+                    template = spec.get("held") or DEFAULT_CLAIM_TEMPLATE
+                    rx = claim_marker_re(template)
+                    m = rx.search(current) if rx else None
+                    if m is None:
+                        continue                  # no tag here either, so nothing to undo
+                    whose = m.group("holder")
+                    live = self._holder_of(key)
+                    if live is not None and live != self.rid:
+                        notes.append(
+                            f"{rel}: `{key}` carries a claim tag naming {whose}, and the "
+                            f"lease is live under {live} — left alone")
+                        continue
+                    stripped = (current[:m.start()] + current[m.end():]).strip()
+                    cells[idx] = f" {stripped} " if stripped else " "
+                    notes.append(
+                        f"{rel}: cleared an orphaned claim tag on `{key}` — it named run "
+                        f"{whose}, and no live lease stands behind it (ssheleg/agent-sync#5)")
+                    lines[i] = row_prefix + "|" + "|".join(cells) + row_suffix
+                    tmp = path.with_suffix(path.suffix + ".agent-sync.tmp")
+                    tmp.write_text("".join(lines))
+                    tmp.replace(path)
+                    continue
                 # Restoring VERBATIM loses any edit made while the claim was held, and in
                 # this family the claim cell IS the status cell — so `close then release`
                 # silently reopened a row closed with evidence minutes earlier (B-35,
@@ -2057,14 +2206,18 @@ class Sync:
         that rewrites a shared registry file on its own is the exact mechanism that
         clobbers another agent's work, and it would do it from a hook, unattended.
         So this reports, and the agent writes.
+
+        Both directions, since AS-04. It used to return on `if not held` — so divergence
+        was reported only to a run holding a lease, and the one shape that needs reporting
+        most, a tag with NO lease behind it, was structurally invisible: nobody holds it,
+        so nobody could be told (ssheleg/agent-sync#5). The lease side is still keyed by
+        what this run holds; the registry side is now swept whether it holds anything or not.
         """
         out: list[str] = []
         tags = self.cfg.get("claimTags") or {}
         if not tags:
             return out
         held = set(self.held())
-        if not held:
-            return out
         for pattern, spec in tags.items():
             for path in sorted(self.root.glob(pattern)):
                 if not path.is_file():
@@ -2092,6 +2245,15 @@ class Sync:
                         out.append(f"{rel}: cannot verify the claim tag for `{key}` — "
                                    f"`{spec['open']}` appears in the file but not on that "
                                    "id's line. Fix claimTags, or write the tag by hand")
+
+        # The other direction: a tag whose lease the TTL has already ended, or one naming a
+        # run that is not the run holding the key. Reported to every session, not only to a
+        # session that happens to hold a lease.
+        for e in self.orphan_claims():
+            remedy = ("`release` it" if e["state"] == ORPHAN
+                      else "ask the holder, and do not edit the row")
+            out.append(f"{e['file']}:{e['line']}: `{e['key']}` [{e['state']}] — "
+                       f"{e['why']}. NEXT: {remedy}")
         return out
 
     # -- as-built record and reconciliation ---------------------------------
@@ -2230,6 +2392,15 @@ class Sync:
             notes_backlog.append(
                 "no id registers declared here, so register checks are not evaluated in "
                 "this repository — run reconcile in the umbrella for those")
+
+        # 4. A claim tag on the board whose lease the TTL has already ended. Mechanical,
+        #    two-plane divergence — the definition of what this command reports — and it
+        #    was the one kind `reconcile` never mentioned (ssheleg/agent-sync#5).
+        for e in self.orphan_claims():
+            findings.append({
+                "kind": f"claim tag with no live lease ({e['state']})",
+                "detail": f"{e['file']}:{e['line']} `{e['key']}` names {e['holder']}",
+                "means": e["why"]})
 
         self.backlog = notes_backlog
         return findings
@@ -2775,6 +2946,26 @@ def cmd_status(_args: argparse.Namespace) -> int:
         if left_alone:
             print("    The rest are foreign or ambiguously owned — reported, not touched.")
 
+    # The registry plane's residue, on the same footing as the lease plane's. A claim tag
+    # is a claim about a lease, and until this line the TTL could end the lease while the
+    # tag stayed on the board reading live — with `leases held: none` printed above it.
+    try:
+        orphans = s.orphan_claims()
+    except Fail:
+        orphans = []
+    if not (s.cfg.get("claimTags") or {}):
+        pass
+    elif not orphans:
+        print("  orphan claims  : none")
+    else:
+        print(f"  orphan claims  : {len(orphans)} claim tag(s) with no live lease behind "
+              "them")
+        for e in orphans[:6]:
+            print(f"    · {e['file']}:{e['line']}  {e['key']}  [{e['state']}] {e['why']}")
+        if len(orphans) > 6:
+            print(f"    · … and {len(orphans) - 6} more")
+        print("    Clear one:  agent_sync.py release <KEY>")
+
     # Who else is in here, and what landed while this run was away. Without this a
     # lease only tells an agent it is blocked, never who by or on what.
     plane_broken = False
@@ -2820,7 +3011,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
     claim_issues = s.claim_divergence()
     if claim_issues:
-        print("\n  Claim tags not written through:")
+        print("\n  Claim tags out of step with the lease plane:")
         for c in claim_issues:
             print(f"    ! {c}")
 
@@ -2952,9 +3143,8 @@ def cmd_residue(_args: argparse.Namespace) -> int:
     print(f"lease mode {s.lease_mode} · ttl {s.ttl}s · {len(entries)} lock file(s) in "
           f"{STATE_DIR}/leases\n")
     if not entries:
-        print("  nothing on disk — no lease has been taken in this checkout, or every one "
-              "was released")
-        return 0
+        print("  nothing in the lock directory — no lease has been taken in this checkout, "
+              "or every\n  one was released")
     for e in entries:
         print(f"  {e['key']}")
         print(f"    state : {e['state']}"
@@ -2964,15 +3154,49 @@ def cmd_residue(_args: argparse.Namespace) -> int:
         print(f"    why   : {e['why']}")
     reapable = [e for e in entries if e["state"] == REAPABLE]
     other = [e for e in entries if e["state"] in (FOREIGN, AMBIGUOUS)]
-    print()
-    if reapable:
-        print(f"  {len(reapable)} reapable — this run's own, spent: agent_sync.py reap")
-    if other:
-        print(f"  {len(other)} foreign or ambiguous — reported, never cleared from here. "
-              "An expired\n  lock in another run's name is that run's to explain, and a "
-              "lock whose owner\n  cannot be established is nobody's to delete.")
-    if not reapable and not other:
-        print("  no residue — every lock on disk is a live lease")
+    if entries:
+        print()
+        if reapable:
+            print(f"  {len(reapable)} reapable — this run's own, spent: agent_sync.py reap")
+        if other:
+            print(f"  {len(other)} foreign or ambiguous — reported, never cleared from here. "
+                  "An expired\n  lock in another run's name is that run's to explain, and a "
+                  "lock whose owner\n  cannot be established is nobody's to delete.")
+        if not reapable and not other:
+            print("  no residue — every lock on disk is a live lease")
+
+    # The second plane. A claim tag is residue too, and reporting only the lock directory
+    # was the whole of ssheleg/agent-sync#5: `residue` printed "nothing on disk" over a
+    # board row reading `(claimed: r-…)` that no command could reach.
+    if s.cfg.get("claimTags"):
+        orphans = s.orphan_claims()
+        tags = len(s.claim_tags_on_disk())
+        print(f"\n  claim tags: {tags} on disk, {len(orphans)} with no live lease behind them")
+        for e in orphans:
+            print(f"    · {e['file']}:{e['line']}  {e['key']}  [{e['state']}]")
+            print(f"      why   : {e['why']}")
+            if e["state"] == ORPHAN:
+                print(f"      clear : agent_sync.py release {e['key']}")
+            else:
+                print("      leave : the lease is live under another run — ask the holder")
+        if tags and not orphans:
+            print("    every tag names the run that still holds its key")
+    else:
+        print("\n  claim tags: not configured here, so none are swept "
+              "(`claimTags` in the config)")
+
+    # AS-01a. Said where the report prints, not only on a board: a check that cannot look
+    # must not read as one that looked.
+    if s.lease_mode == "git":
+        print("\n  ⚠ INCOMPLETE IN THIS MODE. The read above walks "
+              f"{STATE_DIR}/leases only, and in\n"
+              "  git mode the authority is `refs/agent-sync/leases/*` on "
+              f"{s.cfg.get('leaseRemote') or 'origin'}.\n"
+              "  A ref won on ANOTHER machine leaves no local note here, so it is absent "
+              "from this\n  report — absent, not proven gone. Sweeping the refs is board row "
+              "AS-01a; until it\n  lands, enumerate them by hand:\n"
+              f"    git ls-remote {s.cfg.get('leaseRemote') or 'origin'} "
+              "'refs/agent-sync/leases/*'")
     return 0
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -137,8 +138,14 @@ def check_skill(skill_dir: Path) -> str | None:
     lines = len(body.strip().splitlines())
     if lines >= 500:
         err(f"{rel(md)}: body is {lines} lines, budget is < 500")
-    if len(body) // 4 > 5000:
-        err(f"{rel(md)}: body is ~{len(body)//4} tokens, budget is < 5000")
+    # 3.9 chars/token, not 4, and the divisor is not a preference. make-skill's shipped
+    # auditor — the family's authority on skill budgets — measures 3.9 (`CHARS_PER_TOKEN`
+    # in `scripts/audit_skill.py`, tokenised against real bundles at 3.78-4.47). This file
+    # divided by 4 and passed this body at 4957 tokens while that auditor refused it at
+    # 5084: two verdicts on one budget, and the permissive one was the local one.
+    est = int(len(body) / 3.9)
+    if est > 5000:
+        err(f"{rel(md)}: body is ~{est} tokens ({len(body)} chars / 3.9), budget is < 5000")
 
     # references / scripts: one level deep, each with a stated load trigger
     for sub in ("references", "scripts", "assets"):
@@ -2359,6 +2366,175 @@ def check_finish_reports_what_the_run_leaves_behind() -> None:
         if "no expired lock left behind" in out:
             err("finish: claims nothing was left behind with two expired locks on disk")
 
+
+def check_a_claim_tag_cannot_outlive_every_command() -> None:
+    """ssheleg/agent-sync#5. A claim tag with no lease behind it was unreachable.
+
+    Two lines made it so, and each removed one half of the answer: `write_claim`'s
+    `if saved is None: continue` turned `release` into a no-op that still printed
+    `released <KEY>` and exited 0, and `claim_divergence`'s `if not held: return out`
+    gated divergence reporting on holding a lease — so the one shape that needs
+    reporting most, a tag nobody holds, could be reported to nobody.
+
+    Both directions are asserted, because the fix is worthless if it clears a tag whose
+    lease is live: that is the collision a lease exists to prevent, performed by the
+    tool that exists to prevent it.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — orphan claim tag check skipped")
+        return
+    head = "| id | What | Status |\n|---|---|---|\n"
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("orphan claim: init failed")
+            return
+        board = Path(project) / "docs" / "board.md"
+        board.parent.mkdir(parents=True, exist_ok=True)
+        board.write_text(head
+                         + "| B-77 | orphaned | open (claimed: r-ghost1234) |\n"
+                         + "| B-88 | live | open (claimed: r-alive) |\n")
+        _write_cfg(project, guardedFiles=["docs/board.md"],
+                   claimTags={"docs/board.md": {"mode": "cell", "cell": -1,
+                                                "held": "{prev} (claimed: {holder})"}})
+        _plant_lock(project, "B-88", run="r-alive", ttl=2700,
+                    ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+        # Reported at all — by every command that reports state, not only to a holder.
+        for cmd in ("status", "residue", "reconcile"):
+            out = (lambda r: r.stdout + r.stderr)(_run_script(project, cmd))
+            if "B-77" not in out:
+                err(f"{cmd}: a claim tag with no lease behind it is never named — the tag "
+                    "outlives the lease and no command reaches it (ssheleg#5)")
+            elif "orphan" not in out.lower():
+                err(f"{cmd}: names the stale tag without saying what it is")
+
+        # Cleared by `release`, and the report says whose it was.
+        r = _run_script(project, "release", "B-77")
+        cell = _cell_of(board, "B-77")
+        if "claimed:" in cell:
+            err(f"release: left the orphaned claim tag in place ({cell!r}) and exited "
+                f"{r.returncode} — `release` printed success and changed nothing")
+        if "r-ghost1234" not in r.stdout:
+            err("release: cleared the orphaned tag without naming the run it named — an "
+                "operator cannot tell whose claim was just removed")
+
+        # And the direction that must not move: a live lease is somebody working.
+        r2 = _run_script(project, "release", "B-88")
+        if r2.returncode == 0:
+            err("release B-88: exited 0 on a lease held by another run")
+        if _cell_of(board, "B-88") != "open (claimed: r-alive)":
+            err(f"release B-88: edited a claim whose lease is live — got "
+                f"{_cell_of(board, 'B-88')!r}")
+
+
+def _cell_of(board: Path, key: str) -> str:
+    for line in board.read_text().splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and cells[0] == key:
+            return cells[-1]
+    return ""
+
+
+def check_local_locks_record_their_host() -> None:
+    """AS-03. `classify_lock` consumes `host`; only the git mode used to write it.
+
+    So in `local` mode the classifier had one fewer way to refuse, on every lock this
+    family had on disk. The `local` lease is machine-local by construction — the FILE is
+    not: a checkout on a synced directory is read by two machines, and without `host` a
+    lock written on the other one matched on run and repo and became this run's to delete.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — local host check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("local host: init failed")
+            return
+        if _run_script(project, "acquire", "K-1").returncode != 0:
+            err("local host: acquire failed")
+            return
+        lock = json.loads((Path(project) / ".agent-sync" / "leases" / "K-1.lock").read_text())
+        if not lock.get("host"):
+            err("a lock taken in `local` mode records no host, so `classify_lock` cannot "
+                "tell a lock written on another machine from one written here (AS-03)")
+        elif lock["host"] != platform.node():
+            err(f"the lock names host {lock['host']!r}, not this machine")
+
+
+def check_ledger_names_the_shipped_version() -> None:
+    """The newest ledger section must be about the tree it is committed into.
+
+    It was not. `docs/evidence/verification.md` headed its newest section "(in tree,
+    unreleased)" and quoted `PASS: agent-sync v1.13.0` while v1.14.0 was tagged, in
+    `package.json` and in the CHANGELOG — the ledger is the document read as the record of
+    what is true, and its newest section was a version behind the release it described.
+
+    Three mechanical rules, and none of them forbids the honest pre-release wording — a
+    section written before the tag says "in tree at vX, release pending", names vX, and
+    passes:
+
+    1. a quoted `PASS: agent-sync vX` is a quoted **command output**, so X must be the
+       version that command prints today. This is the restated-number defect exactly;
+    2. the newest section must NAME the version at HEAD, whatever it says about it. That
+       is the half a stale section fails: it named v1.13.0 and nothing else;
+    3. a section claiming `shipped in vX` must have a `## vX` heading in the CHANGELOG —
+       no ledger may announce a release that did not happen.
+
+    `git describe --tags` is the authority where there is a git directory; the self-test
+    copies the tree without one, so `package.json` — tied to every other manifest by
+    `check_version_sync` — is the fallback, and the two are compared when both read.
+    """
+    pkg = json.loads((ROOT / "package.json").read_text())["version"]
+    described = subprocess.run(["git", "describe", "--tags", "--abbrev=0"], cwd=ROOT,
+                               capture_output=True, text=True)
+    tag = described.stdout.strip().lstrip("v") if described.returncode == 0 else ""
+    if tag and tag != pkg:
+        err(f"`git describe --tags` prints v{tag} while package.json says {pkg} — the "
+            "release and the manifests disagree, so nothing below can be checked against "
+            "either")
+        return
+    shipped = tag or pkg
+
+    ledger = ROOT / "docs" / "evidence" / "verification.md"
+    if not ledger.exists():
+        err("docs/evidence/verification.md is missing — the ledger is the record of what "
+            "is verified, and its absence cannot be checked around")
+        return
+    text = ledger.read_text()
+
+    # 1. A quoted command output is not prose.
+    for quoted in sorted(set(re.findall(r"PASS: agent-sync v(\d+\.\d+\.\d+)", text))):
+        if quoted != shipped:
+            err(f"verification.md quotes `PASS: agent-sync v{quoted}` while the suite "
+                f"prints v{shipped} — a restated command output, and the one thing a "
+                "ledger may never carry")
+
+    sections = re.split(r"(?m)^## ", text)[1:]
+    if not sections:
+        err("verification.md carries no `## ` section, so it states nothing about any "
+            "shipped requirement")
+        return
+    newest = sections[0]
+    heading = newest.splitlines()[0]
+
+    # 2. Say which tree this is about.
+    if shipped not in newest:
+        err(f"verification.md's newest section ({heading!r}) never names v{shipped}, the "
+            "version at HEAD — a ledger section that does not say which tree it describes "
+            "is read as describing this one")
+
+    # 3. No announced release that did not happen — anywhere in the file. Scoping this to
+    #    the newest section would leave every older one free to claim a version that was
+    #    never cut, and an older row is read as settled rather than as unchecked.
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    for claimed in sorted(set(re.findall(r"shipped in v(\d+\.\d+\.\d+)", text))):
+        if not re.search(rf"(?m)^##+\s+\[?v?{re.escape(claimed)}\b", changelog):
+            err(f"verification.md says work shipped in v{claimed} and the CHANGELOG has no "
+                "such release — the ledger announces a version that does not exist")
+
+
 def main() -> int:
     check_manifests()
     check_no_stray_skills()
@@ -2414,6 +2590,10 @@ def main() -> int:
     check_residue_ownership_must_be_provable()
     check_reap_verifies_teardown_by_re_reading()
     check_finish_reports_what_the_run_leaves_behind()
+
+    check_a_claim_tag_cannot_outlive_every_command()
+    check_local_locks_record_their_host()
+    check_ledger_names_the_shipped_version()
 
     for n in notes:
         print(f"note: {n}")
@@ -2608,13 +2788,14 @@ def self_test() -> int:
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
             lambda t: t.replace("        if not probe.is_lease_authority:",
                                 "        if False:")),
+        # Anchored on the two VALUES the check looks for, not on the sentence around them.
+        # It used to quote three lines of prose verbatim and stopped planting the first time
+        # the paragraph was reflowed — a plant that silently no-ops still reports `detected`,
+        # for a check that never ran. Caught 2026-08-20 by the self-test, not by reading.
         "the script path is prose only": (
             "plugins/agent-sync/skills/agent-sync/SKILL.md",
-            lambda t: t.replace(
-                "`$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync`\n"
-                "under the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once\n"
-                "per session and reuse it — do not guess a path.",
-                "`$SKILL_DIR` is this skill's own directory.")),
+            lambda t: re.sub(r"\$\{CLAUDE_PLUGIN_ROOT\}\S*", "the plugin directory",
+                             t).replace("~/.agents/skills/agent-sync", "the skill hub")),
         # --- the scenarios that were only ever driven by hand ---
         # A live holder read as expired. BOTH guards have to go: `acquire` checks the
         # expiry, and `_steal_expired` re-checks it inside the critical section, so
@@ -2689,6 +2870,60 @@ def self_test() -> int:
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
             lambda t: t.replace('        after = {e["key"]: e for e in self.residue()}',
                                 "        after = {}")),
+        # --- ssheleg#5: a claim tag that outlived its lease. Each plant removes one of
+        # the paths that now reach it; the shipped state had all three missing at once.
+        "an orphaned claim tag is unreachable": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                "                if saved is None:\n"
+                '                    # NOT "nothing to undo"',
+                "                if saved is None:\n"
+                "                    continue\n"
+                '                    # NOT "nothing to undo"')),
+        "orphan claim tags are reported to nobody": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                "        out: list[dict[str, Any]] = []\n"
+                "        for e in self.claim_tags_on_disk():",
+                "        out: list[dict[str, Any]] = []\n"
+                "        return out\n"
+                "        for e in self.claim_tags_on_disk():")),
+        "a claim whose lease is live is edited anyway": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                "        holder = self._lease_holder(key)\n"
+                "        if holder is not None and holder != self.rid:",
+                "        holder = self._lease_holder(key)\n"
+                "        if False:")),
+        # AS-03: the local payload back to carrying no host, so the classifier loses the
+        # one field that separates two machines in that mode.
+        "a local lock records no host": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace(
+                '        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,\n'
+                '                              "repo": repo_name(), "host": platform.node()})\n\n'
+                "        if lock.exists():",
+                '        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,\n'
+                '                              "repo": repo_name()})\n\n'
+                "        if lock.exists():")),
+        # The ledger back to naming a version that is not the one that shipped — the exact
+        # state found at 1.14.0, where the newest section cited v1.13.0 under a v1.14.0 tag.
+        "the ledger names a version that did not ship": (
+            "docs/evidence/verification.md",
+            lambda t: t.replace("PASS: agent-sync v", "PASS: agent-sync v0.0.0 not-v", 1)),
+        "the newest ledger section names no version": (
+            "docs/evidence/verification.md",
+            lambda t: t.replace("\n## ", "\n## A section that names no version\n\n"
+                                          "nothing verified here.\n\n## ", 1)),
+        "the ledger announces a release that did not happen": (
+            "docs/evidence/verification.md",
+            lambda t: re.sub(r"shipped in v\d+\.\d+\.\d+", "shipped in v99.0.0", t,
+                             count=1)),
+        # The body over its token budget, measured with the family auditor's divisor. A
+        # plant on the divisor itself cannot be caught: loosening it makes the run pass.
+        "skill body over the token budget": (
+            "plugins/agent-sync/skills/agent-sync/SKILL.md",
+            lambda t: t + ("\n" + "padding that costs tokens and buys nothing. " * 60)),
         "stray SKILL.md": (None, None),
     }
     # Each case runs as its own PROCESS, and they run concurrently.

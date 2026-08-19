@@ -24,7 +24,6 @@ keep that true while several agents write at once.
 **1. The knowledge base never decides a lease.** It cannot: twelve concurrent appends to
 one Outline document returned twelve successes and left **three** lines. Exclusion comes
 from something with real compare-and-swap. The plane carries the record and nothing else.
-Full measurements in `references/lease-protocol.md`.
 
 **2. Know which lease you have, and say so.** `leaseBackend: "local"` is an atomic file
 create — exclusive between processes on one filesystem, **advisory across machines**.
@@ -38,14 +37,12 @@ round-trip. **Read `references/roadmap.md`** before configuring `claimTags` or c
 task; closing is a statement about the work and stays yours.
 
 **Work on a branch; the integration branch is somebody else's stable base.** `acquire`
-writes the claim through **only** there; on any other branch the holder stays in the
-coordination plane, where `status` shows it to every agent without anyone fetching your
-branch. Committed to a branch, a claim is invisible until the merge and turns the shared
-roadmap into a file two branches both edit. Land work with `merge`: conflicts computed by
-`git merge-tree` **before anything is touched**, named and refused if any, the merge
-recorded in `docs/MERGES.md` (recent days in full, older compacted on write), the `--key`
-lease released. `merges` tells the next agent what landed while it was away. **Read
-`references/branching.md`** before merging.
+writes the claim through **only** there — on any other branch the holder stays in the
+coordination plane, where `status` shows it to every agent. Committed to a branch, a claim
+is invisible until the merge and turns the shared roadmap into a file two branches both
+edit. Land work with `merge`: conflicts computed **before** anything is touched, the merge
+recorded in `docs/MERGES.md`, the `--key` lease released; `merges` says what landed while
+you were away. **Read `references/branching.md`** before merging.
 
 **3. Hooks exist only in Claude Code.** Elsewhere nothing blocks a guarded edit: run
 `guard` yourself and record the run as `ungated`. Do not describe a project as protected
@@ -55,8 +52,7 @@ when it is not.
 what you wrote — Outline turns a `- ` bullet into `* `. Emit `- `, accept `-`/`*`/`+`,
 count anything entry-shaped that fails, and **fail loudly** past 2% unparseable. Reporting
 `lost` when the truth is *unreadable* names a holder who does not exist. Watch for a
-silent pre-filter: a `continue` before the regex hides bad lines from the counter built to
-expose them.
+silent pre-filter: a `continue` before the regex hides bad lines from the counter.
 
 ## Bringing this into ANY project — the whole chain
 
@@ -70,19 +66,15 @@ setup     → generate the snapshot that describes this project's wiring
 check     → validate the whole thing; non-zero if it is not healthy
 ```
 
-**`check` is what makes the skill self-sufficient.** It refuses to call a setup healthy on
-a rule that protects nothing (a register, guard glob, claim pattern, gate or mirror source
+**`check` is what makes the skill self-sufficient.** It refuses to call a setup healthy on a
+rule that protects nothing (a register, guard glob, claim pattern, gate or mirror source
 pointing at what is not there), on missing credentials, on an env file **tracked by git** —
-the one unrecoverable mistake here — on a stale or unlinked snapshot, and on a register
-with no baseline. It names each one; every one failed for real during this tool's own
-adoption.
+the one unrecoverable mistake here — on a stale snapshot, or on a register with no baseline.
+It names each one; every one failed for real during this tool's own adoption. Run it after
+adopting, after changing the config, and in CI.
 
-Run `check` after adopting, after changing the config, and in CI.
-
-**`scaffold` never overwrites.** It seeds a decision register with an allocation line and
-an `AGENTS.md` that points at the snapshot, and leaves every existing file untouched — a
-tool that rewrites a project's own conventions on adoption is worse than one that does
-nothing.
+**`scaffold` never overwrites.** It seeds a decision register and an `AGENTS.md` pointing at
+the snapshot, and leaves every existing file untouched.
 
 ## Existing project: start with `adopt`
 
@@ -95,15 +87,14 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" adopt
 ```
 
 Confirm the registers and guarded files with the operator first: a register pointed at the
-wrong file makes every later check confidently wrong, and a guarded list that misses a
-shared file leaves the one place collisions happen unprotected. In a submodule it declares
-no registers: decisions belong to the parent repository. Then take the chain above from
-`init`.
+wrong file makes every later check confidently wrong, and a guarded list that misses a shared
+file leaves the one place collisions happen unprotected. In a submodule it declares no
+registers — decisions belong to the parent. Then take the chain above from `init`.
 
 ## First command in a project: `init`
 
-**Never run anything else against an uninitialised project.** `init` is where the
-storage question gets asked and answered, once, and written down.
+**Never run anything else against an uninitialised project.** `init` is where the storage
+question gets asked and answered, once, and written down.
 
 **Ask the operator these two things in chat — do not guess, do not pick a default:**
 
@@ -127,15 +118,11 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend outline --url https://
 python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend fs
 ```
 
-`init` writes `.claude/agent-sync.json` (shape, committed), writes
-`.env.agent-sync` with the keys and an **empty** token line (identity, mode 600),
-adds `.env.agent-sync` and `.agent-sync/` to `.gitignore`, and then prints exactly
-what the operator must do themselves — create the token in their own instance and
-paste it into that one line. It never overwrites an existing config or env file
-without `--force`.
-
-Relay those closing instructions to the operator verbatim. Getting the token into
-the file is their step, and the design depends on it staying theirs.
+`init` writes `.claude/agent-sync.json` (shape, committed) and `.env.agent-sync` with an
+**empty** token line (identity, mode 600), gitignores both, and prints the one step that is
+the operator's — creating the token and pasting it into that line. Never overwrites either
+file without `--force`. **Relay those closing instructions verbatim**; the design depends on
+the token staying theirs.
 
 ## Then, before every session
 
@@ -144,25 +131,23 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" status
 ```
 
 Idempotent. Inspects, repairs, reports, names exactly ONE next action — and carries
-`check`'s verdict, so the command every session runs and the one that validates the
-setup cannot give two answers about one project.
+`check`'s verdict, so the command every session runs and the one that validates the setup
+cannot give two answers about one project.
 
 **Read the two awareness sections it prints — they are the point, not decoration.**
 
-- **Other runs working this project right now.** Who holds what, this minute. Do not
-  take those on, and do not "just look at" the files they cover. A lease you cannot
-  see makes you blocked; a lease you can see makes you coordinated.
-- **New since you last looked.** Cross-repo dependency moves that landed while you
-  were away. A dependency that moved may unblock what you planned — or invalidate it.
-  This list is watermarked per run, so it stays quiet until something actually
-  changes; when it speaks, it matters.
+- **Other runs working this project right now.** Who holds what, this minute. Do not take
+  those on, and do not "just look at" the files they cover.
+- **New since you last looked.** Cross-repo dependency moves that landed while you were
+  away — watermarked per run, so it stays quiet until something changes. A dependency that
+  moved may unblock what you planned, or invalidate it.
 
 An agent that skips this block will re-derive work someone else is doing and act on a
 dependency state that changed an hour ago.
 
-What else `status` decides: no credentials → degraded mode, reported, and it continues (a
-smaller mode, not an error); `task-pipeline` absent → it prints the install line and stops.
-Do not improvise a substitute flow — without those stages there is nothing to bind to.
+What else `status` decides: no credentials → degraded mode, reported, and it continues;
+`task-pipeline` absent → it prints the install line and stops. Do not improvise a substitute
+flow — without those stages there is nothing to bind to.
 
 ```bash
 npx sshlg-skills install
@@ -187,37 +172,32 @@ npx sshlg-skills install
 | `guard <path>` | Answer whether this run may write that path. Exit 0 = yes, 2 = no |
 | `board` | Regenerate the shared board and this repo's page. `--mirror` also renders the configured git docs into the plane |
 | `whoami` | Print this run's id and its held leases |
-| `residue` | Expired locks still on disk: this run's spent ones, and the foreign or ambiguous ones it reports and never touches |
+| `residue` | What a run left behind in BOTH planes: expired locks on disk, and claim tags with no live lease behind them |
 | `reap [KEY…]` | Clear only what this run **proves** it owns and has spent, then re-read the directory to confirm it went |
 | `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
 | `adopt` | Inspect an existing project and **propose** a config — writes nothing |
-| `merge` | Land this branch: local target fast-forwarded, conflicts checked **before** anything is touched, merge log written, the `--key` lease released. `--summary`, `--dry-run`, `--push` |
+| `merge` | Land this branch: target fast-forwarded, conflicts checked **before** anything is touched, merge log written, the `--key` lease released. `--summary`, `--dry-run`, `--push` |
 | `merges` | What landed while you were on your branch. `--all` includes the compacted tail |
 | `check` | Validate the whole setup end to end. Non-zero when it is not healthy |
-| `scaffold [--full]` | Create only what is missing, never a line over anything that exists. `--full` also seeds the question register, the index, the dependency board, the data model with its entity register, and the docs gate |
-| `finish [--gates]` | Is the **work** finished — every repository clean, pushed and pointed at, no lease left held. `check` answers whether the project is wired correctly; this answers whether you are done |
+| `scaffold [--full]` | Create only what is missing, never a line over what exists. `--full` also seeds the question register, index, dependency board, data model and docs gate |
+| `finish [--gates]` | Is the **work** finished — every repository clean, pushed and pointed at, nothing left held. `check` answers whether the project is wired right; this, whether you are done |
 
-`$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync`
-under the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once
-per session and reuse it — do not guess a path. Every command reads
-`.claude/agent-sync.json` from the project root and needs no arguments beyond those
-listed.
+`$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` under
+the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once per session
+and reuse it — do not guess. Every command reads `.claude/agent-sync.json` from the project
+root and needs no arguments beyond those listed.
 
 ## One identity per session, and how it is decided
 
-A lease is only a lease if two agents get two identities. Ordering matters here and both ends have
-bitten: deriving the id from `CLAUDE_SESSION_ID` alone gave **one session two identities** — it
-acquired as one and was denied by its own guard as the other — and keeping one id per checkout gave
-**two sessions one identity**, which is worse. The second is silent: both sessions acquire, both are
-guarded, and `release` takes a lease the caller never had.
+A lease is only a lease if two agents get two identities, and both ends have bitten:
+`CLAUDE_SESSION_ID` alone gave **one session two identities** — it acquired as one and was denied by
+its own guard as the other — and one id per checkout gave **two sessions one identity**, silently,
+so `release` took a lease the caller never had.
 
 The order is: `AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` · **the session that started this shell** ·
-shared.
-
-The third matters because a plain shell command has no session id and a hook does. So
-`SessionStart` stamps `.agent-sync/sessions/<CLI pid>` with the session it knows, and a later
-command finds itself by walking its own process ancestry to a stamped pid. Why that and not
-command-line parsing: `references/earned-rules.md`.
+shared. The third exists because a plain shell command has no session id and a hook does, so
+`SessionStart` stamps `.agent-sync/sessions/<CLI pid>` and a later command walks its own process
+ancestry to it. Why that and not command-line parsing: `references/earned-rules.md`.
 
 When none of the four can be established the run says so — *"this identity is shared with any other
 session in this checkout"* — rather than presenting a shared entry as separation.
@@ -235,6 +215,11 @@ TTL expires, and the next agent cannot tell "in progress" from "crashed an hour 
 claim is the tag in git, written through by `acquire` and cleared by `release`. One fact,
 one home — do not invent a third place that records ownership.
 
+**One notion of held, consulted by both planes.** The TTL ends the lease, so a tag naming a
+run whose lease has ended is residue: reported by `status`, `residue` and `reconcile`, and
+cleared by `release <KEY>`, which says whose it was. A tag whose lease is still live is
+never touched by another run.
+
 **Read `references/lease-protocol.md`** before changing acquisition, expiry, stealing or
 id allocation.
 
@@ -246,65 +231,59 @@ The config lists registry files several agents write. Before editing one:
 python3 "$SKILL_DIR/scripts/agent_sync.py" guard docs/DECISIONS.md
 ```
 
-**Exit 2 is about *this run*: it holds no lease** — not that somebody else holds that
-file. One lease covers every guarded file; hold one or write none. A denial names the
-other run **and its key**, because "r-x holds a lease" beside a path gets repeated as
-"r-x holds this file". Do not edit anyway, and do not "just fix one line" — a clobbered
-decision looks exactly like a decision.
+**Exit 2 is about *this run*: it holds no lease** — not that somebody else holds that file.
+One lease covers every guarded file; hold one or write none. A denial names the other run
+**and its key**, because "r-x holds a lease" beside a path gets repeated as "r-x holds this
+file". Do not edit anyway, and do not "just fix one line" — a clobbered decision looks exactly
+like a decision.
 
 Claude Code's `PreToolUse` hook runs this for you. Elsewhere nothing does.
 
 ## Reserving an id
 
-Reading a "Next free ID" line is not reserving it — two agents read the same number and
-both use it.
+Reading a "Next free ID" line is not reserving it — two agents read the same number and both
+use it.
 
 ```bash
 python3 "$SKILL_DIR/scripts/agent_sync.py" reserve DEC   # → DEC-0216
 ```
 
-Allocation is positional over the **merged** log — every shard, never just this run's —
-so every agent computes the same answer. Reserved and not written to git? `release-id`
-it, or the number is a hole the board reports as a leak.
+Allocation is positional over the **merged** log — every shard, never just this run's — so
+every agent computes the same answer. Reserved and not written to git? `release-id` it, or the
+number is a hole the board reports as a leak.
 
 ## Nothing in a log is ever edited or deleted
 
-Logs are **replayed in order**, so an edit silently rewrites a conclusion other agents
-already acted on. Correct by **appending**: release a lease, `release-id` an unused id,
-supersede a wrong as-built entry with a later one. Generated pages are the only
-exception, and one that lost its `agent-sync:generated` marker is **refused**, not
-overwritten. Lifetimes: `references/two-sources.md`.
+Logs are **replayed in order**, so an edit silently rewrites a conclusion other agents already
+acted on. Correct by **appending**: release a lease, `release-id` an unused id, supersede a
+wrong as-built entry with a later one. Generated pages are the only exception. Lifetimes and
+the generated-object contract: `references/two-sources.md`.
 
 ## Two documentation sources, and the duty to reconcile them
 
-Git docs answer **how it should be**; the as-built record answers **how it actually
-is**. Neither outranks the other, because they answer different questions — and
-**the gap between them is the finding**, not a defect.
+Git docs answer **how it should be**; the as-built record answers **how it actually is**.
+Neither outranks the other, and **the gap between them is the finding**, not a defect.
 
 The duty runs at both ends of a task: `reconcile` and resolve every divergence before
-starting, then `record` and `reconcile` again after finishing. Building on an
-unresolved divergence is writing code against a system that does not exist.
+starting, then `record` and `reconcile` again after finishing. Building on an unresolved
+divergence is writing code against a system that does not exist.
 
-**The trap: `reconcile` is mechanical and refuses to judge** whether the built thing
-matches the document — it compares ids, commits and presence. That reading is yours,
-and treating its green as agreement is how a divergence survives both ends.
+**The trap: `reconcile` is mechanical and refuses to judge** whether the built thing matches
+the document — it compares ids, commits, presence and claim tags. That reading is yours, and
+treating its green as agreement is how a divergence survives both ends.
 
-Every project also carries a **generated snapshot** of its own wiring (`setup`) — commit
-it and link it from the agent instructions, so agents read the pipeline instead of
-inferring it.
+Every project also carries a **generated snapshot** of its own wiring (`setup`) — commit it
+and link it from the agent instructions, so agents read the pipeline instead of inferring it.
 
-**Read `references/two-sources.md`** before the first reconcile, and whenever deciding
-which side a document belongs on: it carries what each side is for, what `reconcile`
-decides, why the check is a ratchet, where a document belongs, and why nothing is
-deleted.
+**Read `references/two-sources.md`** before the first reconcile, and whenever deciding which
+side a document belongs on.
 
 ## Binding to task-pipeline
 
-This skill supplies stages; the names are `task-pipeline`'s own.
-
-Five of the eleven stages carry an ordering rule: **0** `acquire` before the brief is
-committed; **1** `reconcile` before writing code; **3** `reserve` every id before it
-reaches git; **9** the main write point; **10** `merge` or `release` every lease.
+This skill supplies stages; the names are `task-pipeline`'s own. Five of the eleven stages
+carry an ordering rule: **0** `acquire` before the brief is committed; **1** `reconcile` before
+writing code; **3** `reserve` every id before it reaches git; **9** the main write point;
+**10** `merge` or `release` every lease.
 
 **Read `references/pipeline-binding.md`** when wiring `pipeline.json` — it holds the
 per-stage reasoning, the `skills[]` entries, what must be guarded, and the gate
@@ -326,41 +305,17 @@ the collection id to paste beside it. Found here, or in a superproject, or where
 set -a && . ./.env.agent-sync && set +a
 ```
 
-Never write a host name or token into the config, a test, an example or a commit. Do not
-handle a token value, echo it, or pass it in `argv`. If the operator offers one in chat,
-tell them to put it in that file instead.
+Never write a host name or token into the config, a test, an example or a commit; never
+handle, echo or `argv`-pass a token value. Offered one in chat, point at that file instead.
 
 **A submodule's config declares only its own registers.** Cross-repository facts belong to
 the parent; a service repo listing the parent's decision register is a config defect.
 
-## Backends
-
-| Backend | Read when |
-|---|---|
-| `outline` | `references/backend-outline.md` — before any Outline call |
-| `fs` | `references/backend-fs.md` — local files, no shared awareness |
-
-**Read `references/adapter-contract.md` before adding a backend** — six primitives, the
-capability flags, and a degradation path that must be honest.
-
-## Generated objects
-
-The board and the mirror are machine-written. Their first line is
-
-```
-<!-- agent-sync:generated source=<repo>@<sha> at=<iso8601> — edit in git, not here -->
-```
-
-A write to an object missing that marker is refused, not forced. If a human took over a
-generated page, report it and stop.
-
-The mirror is a **rendering** of git, stamped with the source commit. It has no
-authority. When its stamp and `HEAD` disagree, the board gate fails — that is
-drift, not a formatting problem.
-
 ## Non-negotiables
 
 - Append, read back, then act. Never rewrite a coordination document.
+- A generated object without its `agent-sync:generated` marker is **refused**, not
+  overwritten — a human took it over. Contract: `references/two-sources.md`.
 - `release` what you `acquire`, on every path including failure.
 - A run reports what it leaves behind: expiry ends a lease, not the file — `residue`.
 - Credentials never reach `argv`, a log line, or the repository.
@@ -375,16 +330,15 @@ Each file is loaded on its own trigger, not by default.
 
 | File | Read it when |
 |---|---|
-| `references/adapter-contract.md` | adding or auditing a knowledge backend |
+| `references/adapter-contract.md` | adding or auditing a knowledge backend — six primitives, the capability flags, an honest degradation path |
 | `references/lease-protocol.md` | changing acquisition, expiry, stealing or id allocation |
 | `references/backend-outline.md` | making any Outline API call, or debugging one |
 | `references/backend-fs.md` | running without a cloud backend, or explaining degraded mode |
 | `references/pipeline-binding.md` | wiring `pipeline.json`, or adding a stage hook |
 | `references/hooks.md` | installing, debugging or removing the Claude Code hooks |
-| `references/two-sources.md` | before the first reconcile, or when deciding where a document belongs |
+| `references/two-sources.md` | before the first reconcile, deciding where a document belongs, or writing a generated object |
 | `references/roadmap.md` | configuring `claimTags`, taking or closing a task, or re-planning a board |
 | `references/branching.md` | starting work that will produce commits, merging a branch, or asking what landed while you were away |
 | `references/earned-rules.md` | asking why identity resolves the way it does, or why `finish` exists |
 
-If this copy arrived without `references/`, fetch them from
-`https://raw.githubusercontent.com/ssheleg/agent-sync/main/plugins/agent-sync/skills/agent-sync/references/<file>`.
+Missing `references/`? Fetch from `https://raw.githubusercontent.com/ssheleg/agent-sync/main/plugins/agent-sync/skills/agent-sync/references/<file>`.

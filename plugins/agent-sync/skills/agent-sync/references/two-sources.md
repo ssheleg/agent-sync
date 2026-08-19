@@ -130,6 +130,16 @@ Generated pages are the exception, and a narrow one: they are rewritten wholesal
 page whose first line has lost its `agent-sync:generated` marker is **refused** rather
 than overwritten, because a human took it over.
 
+**The marker itself.** The board and the mirror are machine-written, and their first line is
+
+```
+<!-- agent-sync:generated source=<repo>@<sha> at=<iso8601> — edit in git, not here -->
+```
+
+A write to an object missing it is refused, not forced; report the takeover and stop. The
+mirror is a **rendering** of git stamped with the source commit, and has no authority — when
+its stamp and `HEAD` disagree the board gate fails, and that is drift, not formatting.
+
 **Growth.** These logs are small — one line per event — so rotation is not urgent. When a
 log does need trimming, archive the whole document and start a fresh one with a `base`
 line carrying the current allocation state. Never delete lines from a live log to shrink
