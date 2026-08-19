@@ -7,6 +7,7 @@
 | 2026-08-10 | `1f1f7b9` | Audit of 1.5.2, then 1.5.3 → 1.6.0 → 1.7.0, released and published |
 | 2026-08-10 | `7457c52` | Second audit along the agent-usage axis → 1.7.1 |
 | 2026-08-10 | `18b29b8` | Board cleared → 1.8.0 |
+| 2026-08-19 | `36a3b38` | AS-01: a run reports what it leaves behind — manifesto M-49, M-50 |
 
 ## Standing instructions
 
@@ -15,8 +16,9 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
 
 1. **A check that has never been watched fail is not evidence.** Every check in `test/validate.py`
    has a self-test fixture that plants its defect back. Adding a check without one is adding a
-   green light with no bulb. *(Became partly mechanical this run — the self-test enumerates 28
-   fixtures — but "add the fixture with the check" is still a habit, not a gate.)*
+   green light with no bulb. *(Became partly mechanical in 1.5.3 — the self-test enumerates 43
+   fixtures as of 2026-08-19, counted by running it — but "add the fixture with the check" is
+   still a habit, not a gate.)*
 2. **Test the composition, not only the unit.** Every defect the 2026-08-10 audit found lived in
    the gap between two things already tested separately: the allocator was correct and `reserve`
    never asked it about the whole log; `lease_guarantee` was quoted by every surface while `renew`
@@ -39,8 +41,47 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
    `*_SEED` templates write documents into other people's projects, and those are what agents read
    first. Four releases changed the branch doctrine and none of them touched the templates. When a
    rule changes, grep the generators before closing the task.
+9. **A predicate cannot report the condition it folds into its answer.** `held()`,
+   `_lease_holder()` and `all_holdings()` each apply the TTL inside the read, so *expired* and
+   *absent* were one answer and seventeen expired locks were reported by no command at all. When
+   a reader collapses two states into one, ask which command is supposed to tell them apart —
+   and then whether any command can.
 
 ## Entries
+
+### 2026-08-19 (AS-01) — the logic existed, and nothing could reach it
+
+**Symptom.** Seventeen lock files across the nine repositories of this family, every one expired,
+the oldest by three days. `status` printed `leases held: none` in a checkout holding three of them;
+`finish` printed `✓ no lease left held` beside a two-day-expired one. Both statements were true.
+
+**Surfaced at.** A cross-repository audit against the Proof-of-Done manifesto (M-49, M-50) —
+nothing in this repository was looking.
+
+**Owned by.** The readers, not the reaper. The audit's first reading was "the reaping logic exists
+and nothing calls it". `release()` calls it — for the one key an operator names, and an operator
+whose session is gone names nothing. What did not exist was an **enumerating** read.
+
+**Root cause.** Three readers, one shape: each folds the TTL into the read and answers `None`.
+That is right for exclusion — an expired lease is not held — and it makes *expired* and *absent*
+the same answer, so no command could tell a clean directory from one full of corpses. The defect
+was in none of the three; it was in the absence of a fourth.
+
+**Fix, by grade.** Mechanical: `classify_lock()` — pure, four verdicts, ten fixtures — plus
+`residue` and `reap`, and a residue block in `status` and `finish`; five checks with five planted
+defects (38 → 43 fixtures). Teardown is verified by re-reading the directory and comparing
+`(run, ts)`, because `unlink` returns nothing and raises nothing where the entry survives the call.
+Doctrinal: the reapable / foreign / ambiguous split, and the clause that carries it — **a matching
+run id is not proof while this run's identity is the shared fallback**, because `run_id()` hands
+that entry to every session in the checkout. Measured on the real data: all seventeen locks bear a
+run id equal to their checkout's recorded id, and all seventeen are reported rather than cleared.
+
+**The check that catches it next time.** `check_status_reports_expired_locks_as_residue`,
+`check_residue_ownership_must_be_provable`, `check_reap_verifies_teardown_by_re_reading`,
+`check_finish_reports_what_the_run_leaves_behind` — and standing instruction 9.
+
+**What it cost to find.** Nothing a session ending in `finish` would not have shown, if `finish`
+had been able to see it.
 
 ### 2026-08-10 (board clearing) — standing instruction 4 fired, twice, in one day
 
