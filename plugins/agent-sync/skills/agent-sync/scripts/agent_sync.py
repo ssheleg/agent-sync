@@ -1544,6 +1544,102 @@ class Sync:
         """
         return bool(self.identity[0])
 
+    # -- the git plane's own enumerating read (AS-01a) -------------------------
+
+    def _git_lease_refs(self) -> tuple[list[tuple[str, str]], str | None]:
+        """Every lease ref on the remote as (sha, key), or the reason it could not look.
+
+        The authority in git mode is `refs/agent-sync/leases/*` on the remote, and a ref
+        won on another machine leaves NO local note — `_note_local` only fires for the run
+        that won it here. So the local directory walk cannot see it, and for a while
+        `residue` could print `nothing on disk` over an expired lease sitting on the
+        remote. That is the one shape a residue report must never take.
+
+        The failure is returned rather than raised, because the caller has to be able to
+        say `could not look` instead of `nothing there`.
+        """
+        remote = self._git_remote()
+        r = subprocess.run(["git", "ls-remote", remote, "refs/agent-sync/leases/*"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            why = (r.stderr or r.stdout or "").strip().splitlines()
+            return [], (why[-1] if why else f"`git ls-remote {remote}` failed")
+        out = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) != 2 or not parts[1].startswith("refs/agent-sync/leases/"):
+                continue
+            out.append((parts[0], parts[1].rsplit("/", 1)[-1]))
+        return out, None
+
+    def _git_lease_payload(self, sha: str) -> str:
+        """The lease object's body — the same JSON the local note carries.
+
+        One shape for both planes, so `classify_lock` is the only classifier in this file.
+        A second one would be a second definition of *whose lease this is*, which is the
+        question the whole tool exists to answer once.
+        """
+        body = git("log", "-1", "--format=%B", sha)
+        if body:
+            return body.strip()
+        # The object may not be local yet: the ref lives on the remote.
+        subprocess.run(["git", "fetch", "-q", self._git_remote(), sha],
+                       capture_output=True, text=True)
+        return (git("log", "-1", "--format=%B", sha) or "").strip()
+
+    def git_residue(self) -> tuple[list[dict[str, Any]], str | None]:
+        """The git plane, classified by the same rules as the local one."""
+        refs, why = self._git_lease_refs()
+        if why is not None:
+            return [], why
+        now, host, repo = time.time(), platform.node(), repo_name()
+        out: list[dict[str, Any]] = []
+        for sha, key in sorted(refs, key=lambda x: x[1]):
+            raw = self._git_lease_payload(sha)
+            if raw:
+                entry = classify_lock(key, raw, rid=self.rid,
+                                      identity_is_strong=self.identity_is_strong,
+                                      repo=repo, host=host, default_ttl=self.ttl, at=now)
+            else:
+                entry = {"key": key, "state": AMBIGUOUS, "run": None, "repo": None,
+                         "host": None, "ts": "", "expired_for": None,
+                         "why": "the lease object carries no readable payload"}
+            entry["plane"] = "git"
+            entry["ref"] = self._ref(key)
+            entry["sha"] = sha
+            entry["path"] = None
+            out.append(entry)
+        return out, None
+
+    def git_reap(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Delete a reapable lease ref, and prove it went by looking again.
+
+        Same compare-and-swap `_git_release` uses: `--force-with-lease=<ref>:<sha>` refuses
+        if somebody won the key between the read and the delete, which is the whole reason
+        the sha travels with the entry. And the verdict comes from a second `ls-remote`,
+        not from the push's exit code — a teardown that reports success out of its own
+        return value is reporting the wish rather than the state.
+        """
+        done: list[dict[str, Any]] = []
+        for e in entries:
+            r = subprocess.run(["git", "push", self._git_remote(),
+                                f"--force-with-lease={e['ref']}:{e['sha']}",
+                                f":{e['ref']}"], capture_output=True, text=True)
+            after, why = self._git_lease_refs()
+            still = {k for _s, k in after}
+            if why is not None:
+                e["gone"] = None
+                e["why_gone"] = f"could not re-read the remote to prove it went ({why})"
+            elif e["key"] in still:
+                e["gone"] = False
+                e["why_gone"] = ((r.stderr or "").strip().splitlines() or
+                                 ["the ref is still on the remote"])[-1]
+            else:
+                e["gone"] = True
+                e["why_gone"] = ""
+            done.append(e)
+        return done
+
     def residue(self) -> list[dict[str, Any]]:
         """Every lock file in this checkout, classified — the live ones included.
 
@@ -3185,18 +3281,40 @@ def cmd_residue(_args: argparse.Namespace) -> int:
         print("\n  claim tags: not configured here, so none are swept "
               "(`claimTags` in the config)")
 
-    # AS-01a. Said where the report prints, not only on a board: a check that cannot look
-    # must not read as one that looked.
+    # AS-01a. The sweep, and the disclosure is now about what it COULD NOT reach rather
+    # than about a plane nobody read. A check that cannot look must not read as one that
+    # looked — and a check that CAN look must not keep printing that it cannot.
     if s.lease_mode == "git":
-        print("\n  ⚠ INCOMPLETE IN THIS MODE. The read above walks "
-              f"{STATE_DIR}/leases only, and in\n"
-              "  git mode the authority is `refs/agent-sync/leases/*` on "
-              f"{s.cfg.get('leaseRemote') or 'origin'}.\n"
-              "  A ref won on ANOTHER machine leaves no local note here, so it is absent "
-              "from this\n  report — absent, not proven gone. Sweeping the refs is board row "
-              "AS-01a; until it\n  lands, enumerate them by hand:\n"
-              f"    git ls-remote {s.cfg.get('leaseRemote') or 'origin'} "
-              "'refs/agent-sync/leases/*'")
+        remote = s.cfg.get("leaseRemote") or "origin"
+        refs, why = s.git_residue()
+        print(f"\n  git plane · {remote} · refs/agent-sync/leases/*")
+        if why is not None:
+            print(f"    ⚠ COULD NOT LOOK — {why}")
+            print("    So this is not an empty sweep: the refs may be there and unread. "
+                  "Fix the remote, or")
+            print(f"    enumerate by hand: git ls-remote {remote} "
+                  "'refs/agent-sync/leases/*'")
+        elif not refs:
+            print("    no lease refs on the remote — swept and empty, not unread")
+        else:
+            local_keys = {e["key"] for e in entries}
+            reapable = [e for e in refs if e["state"] == REAPABLE]
+            for e in refs:
+                also = " · also noted locally" if e["key"] in local_keys else ""
+                print(f"    · {e['key']}  [{e['state']}]{also}")
+                print(f"      ref   : {e['ref']} @ {e['sha'][:10]}")
+                if e.get("run"):
+                    print(f"      run   : {e['run']}"
+                          + (f" · host {e['host']}" if e.get("host") else ""))
+                # `spent()` says this once for both planes: a second phrasing here is a
+                # second definition of what residue means.
+                print(f"      state : {spent(e)}")
+                if e.get("why"):
+                    print(f"      why   : {e['why']}")
+                if e["state"] == REAPABLE:
+                    print(f"      clear : agent_sync.py reap {e['key']}")
+            print(f"    {len(refs)} ref(s) on the remote, {len(reapable)} this run can prove "
+                  "it owns and has spent")
     return 0
 
 
@@ -3217,9 +3335,41 @@ def cmd_reap(args: argparse.Namespace) -> int:
     if not args.keys:
         for e in result["left"]:
             print(f"  · {e['key']} [{e['state']}] left alone — {e['why']}")
-    if not result["reaped"] and not result["remaining"] and not result["refused"]:
+    # AS-01a. The git plane is a second place residue lives, and until this it was a
+    # second place nothing could clear: `reap` walked the lock directory only, so an
+    # expired ref this run had won stayed on the remote with no command able to reach it.
+    git_bad = 0
+    if s.lease_mode == "git":
+        refs, why = s.git_residue()
+        remote = s.cfg.get("leaseRemote") or "origin"
+        if why is not None:
+            print(f"  ⚠ the git plane could not be read ({why}) — its refs are "
+                  "neither reaped nor reported clean.", file=sys.stderr)
+            print(f"    Enumerate by hand: git ls-remote {remote} "
+                  "'refs/agent-sync/leases/*'", file=sys.stderr)
+            git_bad = 1
+        else:
+            named = set(args.keys or [])
+            want = [e for e in refs if e["state"] == REAPABLE and (not named or e["key"] in named)]
+            for e in s.git_reap(want):
+                if e["gone"]:
+                    print(f"  reaped {e['key']} on {remote} — {e['why']}, confirmed gone by "
+                          "re-reading the remote")
+                else:
+                    print(f"  ✗ {e['key']} is STILL on {remote} after the delete "
+                          f"({e['why_gone']}) — the compare-and-swap refused, which means "
+                          "somebody won it between the read and the delete",
+                          file=sys.stderr)
+                    git_bad = 1
+            for e in refs:
+                if e["state"] != REAPABLE and (not named or e["key"] in named):
+                    print(f"  · {e['key']} [{e['state']}] on {remote} left alone — {e['why']}")
+            if not refs:
+                print(f"  no lease refs on {remote} — swept and empty, not unread")
+    if not result["reaped"] and not result["remaining"] and not result["refused"] \
+            and s.lease_mode != "git":
         print("  nothing this run can prove it owns and has spent — nothing reaped")
-    return 1 if result["remaining"] or result["refused"] else 0
+    return 1 if (result["remaining"] or result["refused"] or git_bad) else 0
 
 
 def cmd_journal(args: argparse.Namespace) -> int:

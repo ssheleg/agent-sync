@@ -112,6 +112,21 @@ renewed in between.
 
 The tool reports which guarantee is in force; it never implies the stronger one.
 
+**Residue in this mode is on the remote, and the enumerating read goes there.** The local
+directory holds a *note* — `_note_local` writes one only for the run that won the key on
+this machine — so a ref won elsewhere leaves nothing to walk, and for a while `residue`
+could print `nothing on disk` over an expired lease sitting on the remote. That is the one
+shape a residue report must never take. `residue` and `reap` now sweep
+`refs/agent-sync/leases/*` on the configured remote and classify each ref with **the same
+classifier the local plane uses**, because whose lease this is must have one definition.
+`reap` deletes with the same `--force-with-lease=<ref>:<sha>` compare-and-swap `release`
+uses, and proves the ref went by re-reading `ls-remote` — a push's exit code is the wish,
+the second read is the state.
+
+**A remote that cannot be reached is `COULD NOT LOOK`, never an empty sweep.** The two read
+identically to an operator and mean opposite things, so they are printed differently and
+`reap` exits non-zero on the first.
+
 ## Expiry and stealing
 
 A lock is expired when `now > ts + ttl` for the timestamp inside it.

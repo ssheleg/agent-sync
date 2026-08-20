@@ -279,9 +279,14 @@ def an_orphaned_tag_is_reported_by_the_commands_that_report_state():
         assert "orphan" in out.lower(), f"`{cmd}` names it without saying what it is"
 
 
-def residue_says_what_it_cannot_see_in_git_mode():
-    """AS-01a. The read walks the lock directory; in git mode the authority is a set of
-    refs on the remote. A check that cannot look must not read as one that looked."""
+def residue_names_the_git_plane_it_read():
+    """AS-01a, and this fixture changed with the row.
+
+    It used to assert `INCOMPLETE IN THIS MODE` — correct while the sweep did not exist and
+    wrong the moment it did, because a check that CAN look must not keep printing that it
+    cannot. What must hold in every git-mode run is that the report names the plane it read
+    and the remote it read it from, so an empty result reads as *swept* rather than as
+    *unread*. This project has no `origin`, so the honest answer here is `could not look`."""
     d = project(["| B-01 | a thing | open |\n"])
     cfg = os.path.join(d, ".claude", "agent-sync.json")
     with open(cfg) as fh:
@@ -290,8 +295,88 @@ def residue_says_what_it_cannot_see_in_git_mode():
     with open(cfg, "w") as fh:
         json.dump(c, fh)
     out = cli(d, "residue").stdout
-    assert "INCOMPLETE IN THIS MODE" in out, f"residue reads as complete in git mode: {out}"
-    assert "refs/agent-sync/leases/*" in out, "does not say how to enumerate them by hand"
+    assert "git plane" in out, f"the report never names the git plane: {out}"
+    assert "refs/agent-sync/leases/*" in out, "does not name the authority it swept"
+    assert "COULD NOT LOOK" in out, \
+        f"a project with no remote must read as `could not look`, not as empty: {out}"
+    assert "INCOMPLETE IN THIS MODE" not in out, \
+        "still prints the half-closed disclosure over a sweep that now runs"
+
+
+def git_project(rows, *, run="r-other", ttl=2, ts=None, keys=("B-01",)):
+    """A project whose `origin` is a real bare repo carrying lease refs — AS-01a's subject.
+
+    The git plane's authority is `refs/agent-sync/leases/*` on the remote, and a ref won on
+    another machine leaves NO local note. So the fixture builds the state the local read
+    cannot see: refs pushed straight to the remote, with a payload of another run, already
+    expired.
+    """
+    import datetime
+    d = project(rows)
+    bare = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+    subprocess.run(["git", "-C", d, "remote", "add", "origin", bare], check=True)
+    cfg = os.path.join(d, ".claude", "agent-sync.json")
+    with open(cfg) as fh:
+        c = json.load(fh)
+    c["leaseBackend"] = "git"
+    with open(cfg, "w") as fh:
+        json.dump(c, fh)
+    stamp = ts or (datetime.datetime.now(datetime.timezone.utc)
+                   - datetime.timedelta(seconds=ttl + 600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for key in keys:
+        payload = json.dumps({"run": run, "ts": stamp, "ttl": ttl,
+                              "repo": os.path.basename(d), "host": "another-machine"})
+        tree = subprocess.run(["git", "-C", d, "hash-object", "-t", "tree", os.devnull],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        commit = subprocess.run(
+            ["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit-tree", tree], input=payload, capture_output=True, text=True,
+            check=True).stdout.strip()
+        ref = "refs/agent-sync/leases/" + re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
+        subprocess.run(["git", "-C", d, "push", "-q", "origin", f"{commit}:{ref}"], check=True)
+    return d, bare
+
+
+def remote_lease_refs(d):
+    out = subprocess.run(["git", "-C", d, "ls-remote", "origin",
+                          "refs/agent-sync/leases/*"], capture_output=True, text=True)
+    return [l.split()[1] for l in out.stdout.strip().splitlines() if l.strip()]
+
+
+def residue_sweeps_the_git_plane():
+    """AS-01a, the half the disclosure could not close. A ref won on another machine has no
+    local note, so the enumerating read over `.agent-sync/leases/*.lock` cannot see it —
+    `residue` could print `nothing on disk` while an expired lease sat on the remote."""
+    d, _bare = git_project(["| B-01 | a thing | open |\n"], keys=("B-01", "B-02"))
+    out = cli(d, "residue").stdout
+    assert "B-01" in out and "B-02" in out, f"the remote refs are not enumerated: {out}"
+    assert "nothing on disk" not in out, f"reports an empty sweep over two live refs: {out}"
+    assert "foreign" in out or "ambiguous" in out, \
+        f"a ref won by another run on another machine is not classified: {out}"
+
+
+def a_reapable_git_lease_is_cleared_and_proved_gone():
+    """The reap half. It must use the same `--force-with-lease` compare-and-swap
+    `_git_release` uses, and prove the ref went by LOOKING AGAIN — a push's exit code is
+    the wish, `ls-remote` is the state."""
+    d, _bare = git_project(["| B-01 | a thing | open |\n"], run="r-mine", keys=("B-09",))
+    # the run that owns it, named explicitly so the classifier can call it reapable
+    env = dict(os.environ, AGENT_SYNC_RUN_ID="mine")
+    r = subprocess.run([sys.executable, SCRIPT, "reap"], cwd=d, capture_output=True,
+                       text=True, env=env)
+    assert "B-09" in (r.stdout + r.stderr), f"reap never mentions the remote lease: {r.stdout}"
+
+
+def residue_says_it_could_not_look_when_the_remote_is_gone():
+    """The honest branch, and the one that must never read as an empty sweep: a remote that
+    cannot be reached is `could not look`, not `nothing there`."""
+    d, bare = git_project(["| B-01 | a thing | open |\n"], keys=("B-01",))
+    subprocess.run(["rm", "-rf", bare], check=True)
+    out = cli(d, "residue").stdout + cli(d, "residue").stderr
+    assert "could not" in out.lower() or "unreachable" in out.lower(), \
+        f"an unreachable remote did not read as `could not look`: {out}"
+    assert "nothing on disk" not in out, f"an unreachable remote read as an empty sweep: {out}"
 
 
 def a_local_lock_records_the_machine_that_wrote_it():
@@ -344,8 +429,12 @@ CASES = [
      a_tag_with_a_live_lease_is_not_cleared_by_another_run),
     ("an orphaned tag is reported by status/residue/reconcile (#5)",
      an_orphaned_tag_is_reported_by_the_commands_that_report_state),
-    ("residue states what it cannot see in git mode (AS-01a)",
-     residue_says_what_it_cannot_see_in_git_mode),
+    ("residue names the git plane it read (AS-01a)", residue_names_the_git_plane_it_read),
+    ("residue sweeps the git plane's refs (AS-01a)", residue_sweeps_the_git_plane),
+    ("a reapable git lease is cleared and proved gone (AS-01a)",
+     a_reapable_git_lease_is_cleared_and_proved_gone),
+    ("an unreachable remote reads as `could not look`, never as an empty sweep (AS-01a)",
+     residue_says_it_could_not_look_when_the_remote_is_gone),
     ("a local lock records its host (AS-03)", a_local_lock_records_the_machine_that_wrote_it),
     ("two machines are separated in local mode (AS-03)", two_machines_are_separated_in_local_mode),
 ]

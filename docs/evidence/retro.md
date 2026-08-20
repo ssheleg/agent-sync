@@ -8,6 +8,7 @@
 | 2026-08-10 | `7457c52` | Second audit along the agent-usage axis → 1.7.1 |
 | 2026-08-10 | `18b29b8` | Board cleared → 1.8.0 |
 | 2026-08-19 | `36a3b38` | AS-01: a run reports what it leaves behind — manifesto M-49, M-50 |
+| 2026-08-20 | `77deede` | AS-01a: the git plane is swept, not only disclosed |
 
 ## Standing instructions
 
@@ -47,7 +48,45 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
    a reader collapses two states into one, ask which command is supposed to tell them apart —
    and then whether any command can.
 
+10. **A fixture asserting a LIMITATION dies with the limitation.** Before implementing a
+   change that removes a documented gap, grep the test corpus for the gap's own wording —
+   `INCOMPLETE IN THIS MODE`, `not yet`, `still open` — because that string is the index of
+   every check that will go red. Three repositories hit this in one day (2026-08-20:
+   `sshlg-skills` ownership, `sheleg-design` release plants, `agent-sync` AS-01a), each
+   time discovering it from a red suite rather than from the plan.
+   *Retires when a check enforces it, or when three consecutive runs remove a limitation
+   with no fixture found by the grep.*
+
+
 ## Entries
+
+### 2026-08-20 (AS-01a) — the fixture asserted the half-closed state, for the third time in one day
+
+**Symptom.** Closing the sweep made a passing fixture fail:
+`residue states what it cannot see in git mode (AS-01a)` asserted the string
+`⚠ INCOMPLETE IN THIS MODE`, which is exactly what the fix removes. The check was right when
+it was written — the sweep did not exist — and became a check that a working feature is
+still missing.
+
+**Where it surfaced.** Stage 5, on the first run of the suite after the implementation.
+**Where it belongs.** Stage 2: a change that closes a disclosure owns the fixtures asserting
+that disclosure, and nothing in the decomposition asked which ones those were.
+
+**Root cause.** A fixture may assert either a CONTRACT or a STATE. `INCOMPLETE IN THIS MODE`
+is a state — the state of a half-closed row — and a fixture that pins one turns the row's
+own progress into a red suite. The contract underneath it survives the fix and is what the
+rewritten fixture asserts: *the report names the plane it read, so an empty result reads as
+swept rather than as unread.*
+
+**Why it is an entry and not a shrug: this is the third occurrence today.** The umbrella's
+`a commit that stages nothing HERE is not this project's commit` encoded the bypass it was
+supposed to prevent; `sheleg-design`'s two release plants moved an `## Unreleased` section a
+release had legitimately absorbed; and this one. Three repositories, one shape.
+
+**The fix, by grade.** Mechanical where it can be: before implementing a change that removes
+a documented limitation, grep the test corpus for the limitation's own wording — the string
+is the index. Recorded as standing instruction 9 rather than as a paragraph, because a
+paragraph is what the two earlier occurrences already had.
 
 ### 2026-08-19 (AS-01) — the logic existed, and nothing could reach it
 
