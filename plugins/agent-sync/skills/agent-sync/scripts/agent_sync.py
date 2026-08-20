@@ -3321,6 +3321,8 @@ def cmd_residue(_args: argparse.Namespace) -> int:
 def cmd_reap(args: argparse.Namespace) -> int:
     """Clear this run's spent locks, and verify the teardown by reading the state again."""
     s = Sync()
+    if getattr(args, "own", False):
+        return _reap_by_operator_decision(s, args.keys)
     result = s.reap(args.keys or None)
     for e in result["reaped"]:
         print(f"  reaped {e['key']} — {e['why']}, confirmed gone by re-reading "
@@ -3370,6 +3372,81 @@ def cmd_reap(args: argparse.Namespace) -> int:
             and s.lease_mode != "git":
         print("  nothing this run can prove it owns and has spent — nothing reaped")
     return 1 if (result["remaining"] or result["refused"] or git_bad) else 0
+
+
+def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
+    """`--i-own-this` — the one path that clears state no RUN can prove is its own.
+
+    AS-01b. The classifier is right to refuse: a run whose identity is the shared fallback
+    cannot prove a matching run id means anything, so every such lock is `ambiguous` and
+    nothing reaps it. The consequence is that expired locks accumulate with no path out for
+    anybody — 28 of them on this machine by 2026-08-20, the oldest overdue by 21 days
+    against a 2700-second TTL.
+
+    M-50 forbids a RUN from deleting what it cannot prove. A person deciding, per key, is
+    not a run guessing — so the decision is available, and three things make it a decision
+    rather than a sweep:
+
+    * **it takes named keys and refuses to run without them.** A blanket override is the
+      thing the classifier exists to prevent, wearing a flag;
+    * **it refuses a LIVE lease.** Residue is what this clears; a live lease belongs to a
+      run that may still be working, and taking it by hand is the collision the tool exists
+      to prevent;
+    * **it prints the payload it destroyed** — run, timestamp, machine — so the decision is
+      auditable afterwards by somebody who was not there, and journals it where a record
+      plane is configured.
+    """
+    if not keys:
+        print("reap --i-own-this needs the keys, one or more, by name.\n"
+              "  A blanket override is the sweep the classifier exists to refuse, wearing a "
+              "flag.\n"
+              "  `agent_sync.py residue` lists what is there and why each one is unclearable.",
+              file=sys.stderr)
+        return 2
+
+    by_key = {}
+    for e in s.residue():
+        by_key.setdefault(e["key"], e)
+        by_key.setdefault(s._local_lock(e["key"]).stem, e)
+
+    rc = 0
+    for k in keys:
+        e = by_key.get(k) or by_key.get(s._local_lock(k).stem)
+        if e is None:
+            print(f"  · {k} — there is no lock by that name in this checkout", file=sys.stderr)
+            rc = 1
+            continue
+        if e["state"] == LIVE:
+            print(f"  ✗ {e['key']} is LIVE under {e.get('run') or 'a run'}"
+                  f"{' on ' + e['host'] if e.get('host') else ''} — not cleared. An override "
+                  "is for residue;\n    a live lease belongs to a run that may still be "
+                  "working. Ask the holder, or wait for the TTL.", file=sys.stderr)
+            rc = 1
+            continue
+        had = (f"run {e.get('run') or 'unknown'}"
+               f"{' · host ' + e['host'] if e.get('host') else ''}"
+               f"{' · ' + e['ts'] if e.get('ts') else ''}"
+               f" · {spent(e)}")
+        try:
+            e["path"].unlink()
+        except OSError as exc:
+            print(f"  ✗ {e['key']} could not be removed ({exc})", file=sys.stderr)
+            rc = 1
+            continue
+        # Proved gone by looking again, the same rule the ordinary reap follows.
+        if any(x["key"] == e["key"] for x in s.residue()):
+            print(f"  ✗ {e['key']} is STILL PRESENT after the delete — the teardown was not "
+                  "verified, whatever the call returned", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"  cleared {e['key']} by operator decision — it held {had}")
+        print(f"    the classifier called it `{e['state']}`, and that has not changed: this "
+              "was a person's\n    call, not a proof of ownership.")
+        try:
+            s.journal(f"reap --i-own-this {e['key']} — was {had}, classified {e['state']}")
+        except Exception:                                # noqa: BLE001 - the record plane is optional
+            pass
+    return rc
 
 
 def cmd_journal(args: argparse.Namespace) -> int:
@@ -4470,6 +4547,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("reap", help="clear expired locks this run provably owns; foreign "
                                      "and ambiguous ones are reported, never touched")
     rp.add_argument("keys", nargs="*", help="which to clear (default: every reapable one)")
+    rp.add_argument("--i-own-this", action="store_true", dest="own",
+                    help="clear the NAMED expired locks even though this run cannot prove "
+                         "they are its own — an operator's decision, per key, recorded. "
+                         "Refuses a live lease and refuses to run with no key.")
     rp.set_defaults(fn=cmd_reap)
 
     g = sub.add_parser("guard", help="may this run write that path? exit 2 = no")

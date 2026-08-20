@@ -197,6 +197,28 @@ only thing that removes any of it. The split between the two kinds is the mechan
 In doubt the answer is `ambiguous`, never `reapable`. A classifier that resolves doubt by
 deleting is worse than none, because it deletes under a claim of authority.
 
+**And that has a consequence the classifier cannot fix: nobody could ever clear an
+`ambiguous` lock.** A shell with no session id answers to the shared identity, so a
+matching run id proves nothing, so the lock is `ambiguous`, so no run reaps it — for ever.
+28 of them had accumulated on this machine by 2026-08-20, the oldest overdue by 21 days
+against a 2700-second TTL, every one of them correctly refused.
+
+`reap --i-own-this <key>` is the way out, and it is a **person's** decision rather than a
+run's proof. M-50 forbids a RUN from deleting what it cannot establish; it does not forbid
+an operator from deciding. Three things keep it a decision instead of a sweep:
+
+* **named keys, and it refuses to run without them** — a blanket override is the sweep the
+  classifier exists to refuse, wearing a flag. Use `--` before a key that starts with a
+  dash: the tool slugifies guarded-file paths into keys like
+  `-claude-plugin-marketplace-json`, and a key the tool writes must be a key the tool can
+  address;
+* **it refuses a LIVE lease** — residue is what it clears, and a live lease belongs to a run
+  that may still be working;
+* **it prints the payload it destroyed** — run, timestamp, machine, how long expired — and
+  journals the decision where a record plane is configured. The classifier's verdict is
+  printed unchanged beside it, because the override does not make the lock provably yours;
+  it makes the deletion attributable.
+
 **Teardown is verified by re-reading the state, never by the delete's return value.**
 `unlink` returns nothing and raises nothing on a filesystem where the entry survives the
 call — a read-only mount, an NFS write that never lands, another process recreating the

@@ -379,6 +379,94 @@ def residue_says_it_could_not_look_when_the_remote_is_gone():
     assert "nothing on disk" not in out, f"an unreachable remote read as an empty sweep: {out}"
 
 
+def a_foreign_lock_still_refuses_a_plain_reap():
+    """AS-01b's floor, and the regression the override must not cause. Without an explicit
+    per-key decision a run may never clear state it cannot prove is its own."""
+    d = project(["| B-01 | a thing | open |\n"])
+    leases = os.path.join(d, ".agent-sync", "leases")
+    os.makedirs(leases, exist_ok=True)
+    with open(os.path.join(leases, "B-77.lock"), "w") as fh:
+        json.dump({"run": "r-somebody-else", "ts": "2026-01-01T00:00:00Z", "ttl": 2,
+                   "repo": os.path.basename(d), "host": "another-machine"}, fh)
+    r = cli(d, "reap")
+    assert os.path.exists(os.path.join(leases, "B-77.lock")), \
+        "a plain reap deleted a foreign lock"
+    assert "left alone" in r.stdout, f"the refusal is not reported: {r.stdout}"
+
+
+def an_operator_can_clear_state_no_run_can_prove(key="B-88"):
+    """AS-01b. The classifier is right and its consequence is that nobody can EVER clear an
+    expired foreign lock — 28 of them had accumulated on this machine by 2026-08-20. M-50
+    forbids a RUN from deleting what it cannot prove; a person deciding per key is not a run
+    guessing, so the override exists, names the key, and prints the payload it destroyed."""
+    d = project(["| B-01 | a thing | open |\n"])
+    leases = os.path.join(d, ".agent-sync", "leases")
+    os.makedirs(leases, exist_ok=True)
+    lock = os.path.join(leases, f"{key}.lock")
+    with open(lock, "w") as fh:
+        json.dump({"run": "r-long-gone", "ts": "2026-01-01T00:00:00Z", "ttl": 2,
+                   "repo": os.path.basename(d), "host": "a-dead-machine"}, fh)
+    r = cli(d, "reap", "--i-own-this", key)
+    assert not os.path.exists(lock), f"the override did not clear it: {r.stdout}{r.stderr}"
+    assert "r-long-gone" in r.stdout, \
+        f"the destroyed payload is not printed, so the decision is unauditable: {r.stdout}"
+    assert "a-dead-machine" in r.stdout, "does not say which machine's lease was destroyed"
+
+
+def the_override_refuses_a_blanket_sweep():
+    """It must never become `clear everything`: the whole point is one named key at a time."""
+    d = project(["| B-01 | a thing | open |\n"])
+    leases = os.path.join(d, ".agent-sync", "leases")
+    os.makedirs(leases, exist_ok=True)
+    for k in ("B-91", "B-92"):
+        with open(os.path.join(leases, f"{k}.lock"), "w") as fh:
+            json.dump({"run": "r-gone", "ts": "2026-01-01T00:00:00Z", "ttl": 2,
+                       "repo": os.path.basename(d), "host": "h"}, fh)
+    r = cli(d, "reap", "--i-own-this")
+    assert r.returncode != 0, "a blanket override was accepted"
+    for k in ("B-91", "B-92"):
+        assert os.path.exists(os.path.join(leases, f"{k}.lock")), f"{k} was swept blindly"
+
+
+def the_override_refuses_a_live_lease():
+    """An override is for residue. A live lease belongs to a run that may still be working,
+    and taking it by hand is the collision this tool exists to prevent."""
+    d = project(["| B-01 | a thing | open |\n"])
+    leases = os.path.join(d, ".agent-sync", "leases")
+    os.makedirs(leases, exist_ok=True)
+    lock = os.path.join(leases, "B-93.lock")
+    with open(lock, "w") as fh:
+        json.dump({"run": "r-still-working", "ts": now_iso_for_test(), "ttl": 3600,
+                   "repo": os.path.basename(d), "host": "h"}, fh)
+    r = cli(d, "reap", "--i-own-this", "B-93")
+    assert os.path.exists(lock), f"the override destroyed a LIVE lease: {r.stdout}"
+    assert "live" in (r.stdout + r.stderr).lower(), \
+        f"the refusal does not say the lease is live: {r.stdout}{r.stderr}"
+
+
+def now_iso_for_test():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def a_key_that_starts_with_a_dash_can_still_be_named():
+    """Found by running the override on real state: `sheleg-design` holds a lock called
+    `-claude-plugin-marketplace-json.lock` — the guarded-file key slugified — and argparse
+    reads a leading dash as a flag, so the one command able to clear it could not name it.
+    A key the tool itself writes must be a key the tool can address."""
+    d = project(["| B-01 | a thing | open |\n"])
+    leases = os.path.join(d, ".agent-sync", "leases")
+    os.makedirs(leases, exist_ok=True)
+    key = "-claude-plugin-marketplace-json"
+    lock = os.path.join(leases, f"{key}.lock")
+    with open(lock, "w") as fh:
+        json.dump({"run": "r-gone", "ts": "2026-01-01T00:00:00Z", "ttl": 2,
+                   "repo": os.path.basename(d), "host": "h"}, fh)
+    r = cli(d, "reap", "--i-own-this", "--", key)
+    assert not os.path.exists(lock), \
+        f"a key the tool wrote cannot be named to the tool: {r.stdout}{r.stderr}"
+
+
 def a_local_lock_records_the_machine_that_wrote_it():
     """AS-03. `host` used to be the git mode's alone, and `classify_lock` consumes it —
     so in local mode the classifier had one fewer way to refuse. 25 of the 25 locks this
@@ -430,6 +518,13 @@ CASES = [
     ("an orphaned tag is reported by status/residue/reconcile (#5)",
      an_orphaned_tag_is_reported_by_the_commands_that_report_state),
     ("residue names the git plane it read (AS-01a)", residue_names_the_git_plane_it_read),
+    ("a foreign lock still refuses a plain reap (AS-01b)", a_foreign_lock_still_refuses_a_plain_reap),
+    ("an operator can clear state no run can prove (AS-01b)",
+     an_operator_can_clear_state_no_run_can_prove),
+    ("the override refuses a blanket sweep (AS-01b)", the_override_refuses_a_blanket_sweep),
+    ("the override refuses a live lease (AS-01b)", the_override_refuses_a_live_lease),
+    ("a key that starts with a dash can still be named (AS-01b)",
+     a_key_that_starts_with_a_dash_can_still_be_named),
     ("residue sweeps the git plane's refs (AS-01a)", residue_sweeps_the_git_plane),
     ("a reapable git lease is cleared and proved gone (AS-01a)",
      a_reapable_git_lease_is_cleared_and_proved_gone),

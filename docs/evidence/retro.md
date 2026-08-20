@@ -9,6 +9,7 @@
 | 2026-08-10 | `18b29b8` | Board cleared → 1.8.0 |
 | 2026-08-19 | `36a3b38` | AS-01: a run reports what it leaves behind — manifesto M-49, M-50 |
 | 2026-08-20 | `77deede` | AS-01a: the git plane is swept, not only disclosed |
+| 2026-08-20 | `019867b` | AS-01b: an ambiguous lock became clearable by a person, and 28 were cleared |
 
 ## Standing instructions
 
@@ -59,6 +60,32 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
 
 
 ## Entries
+
+### 2026-08-20 (AS-01b) — the override's two defects came from real state, not from fixtures
+
+**Symptom.** Five fixtures passed and the command still could not do the job it exists for.
+Run against the 28 locks this machine had actually accumulated, `reap --i-own-this` hit a key
+called `-claude-plugin-marketplace-json` — a guarded-file path slugified by this very tool —
+and argparse read the leading dash as a flag. The one command able to clear that lock could
+not name it.
+
+**Where it surfaced.** After the gate was green, applying the mechanism to the state that
+filed the row. **Where it belongs.** Stage 5: the fixtures were written from the row's
+description, and the row described the count rather than the key shapes.
+
+**Root cause.** Every fixture key was `B-nn`. The tool writes two other shapes — a slugified
+guarded-file path, and a task id an operator typed — and neither was in the corpus. A fixture
+set drawn from the prose covers what the prose noticed.
+
+**The second one is mine and smaller.** The shell loop I wrote around the command was wrong
+where the command was right: it reported "no lock by that name" for locks `residue` was
+listing one line above. The command run directly cleared them. A wrapper that disagrees with
+the thing it wraps is worth one minute of checking which of the two is lying — and it was the
+wrapper.
+
+**The fix, by grade.** Mechanical: a fixture for a key that begins with a dash, and `--` named
+in the command's own help. Standing instruction 10 already covers the wider lesson from the
+other direction, so this is an entry rather than an eleventh rule.
 
 ### 2026-08-20 (AS-01a) — the fixture asserted the half-closed state, for the third time in one day
 
