@@ -1,3 +1,26 @@
+## Unreleased — both `AS-01` halves exercised outside their fixtures
+
+The two rows sat at priority `unverified`: shipped, and confirmed by nothing but their own
+fixtures. Both are now exercised against real state, and both hold. **Nothing in the tool
+changed** — this records that the mechanism was watched working on something other than its
+own test data, which is what `unverified` meant.
+
+**The git plane, on a real remote.** A git-mode checkout was built against a local bare
+remote, a lease taken at `ttl 2`, and its local note **deleted** — exactly the state a ref
+won on another machine leaves behind, and the state the row said `residue` could not see.
+`residue` printed *nothing in the lock directory* and then enumerated the git plane:
+`refs/agent-sync/leases/DEMO-KEY @ 495370743e`, run `r-rverifya`, **expired 18s ago**,
+`foreign`, closing with *1 ref(s) on the remote, 0 this run can prove it owns and has spent*.
+
+**Reap, in both directions.** Reaping as a **different** run left the ref standing and said so
+by name. Reaping as the run that took it removed it and reported *confirmed gone by re-reading
+the remote* — the proof coming from `ls-remote`, not from a push's exit code.
+
+**And on live residue.** `~/DATA/0xDEV` carries a genuine foreign expired lock —
+`BLOG-SITEMAP`, run `r-blog-1429e`, **expired 4d 22h ago**. `reap` named it, said *left alone
+— it belongs to run r-blog-1429e, not to this one*, and **deleted nothing**: both lock files
+byte-identical afterwards. State a run cannot prove is its own is reported and untouched.
+
 ## v1.15.0 — a claim tag outlived its lease, and no command reached it
 
 **GitHub issue #5, filed 2026-08-17, reproduced verbatim at v1.14.0.** A board row shipped
