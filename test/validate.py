@@ -2490,11 +2490,26 @@ def check_ledger_names_the_shipped_version() -> None:
     described = subprocess.run(["git", "describe", "--tags", "--abbrev=0"], cwd=ROOT,
                                capture_output=True, text=True)
     tag = described.stdout.strip().lstrip("v") if described.returncode == 0 else ""
+    def _parts(v):
+        return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+]", v)[:3])
+
     if tag and tag != pkg:
-        err(f"`git describe --tags` prints v{tag} while package.json says {pkg} — the "
-            "release and the manifests disagree, so nothing below can be checked against "
-            "either")
-        return
+        if _parts(pkg) > _parts(tag):
+            # AHEAD of the newest tag is a release being PREPARED, and refusing it made
+            # the bump commit uncommittable: the tag cannot exist before the commit that
+            # bumps to it. Four members of this family hit that in one release pass. The
+            # ledger is checked against `package.json` in that state — what is about to
+            # ship — and the release workflow is where a tag that never arrives fails.
+            notes.append(f"version — package.json says {pkg} and the newest tag is "
+                         f"v{tag}: a release in preparation, so the ledger is read "
+                         f"against {pkg}")
+            tag = ""
+        else:
+            err(f"`git describe --tags` prints v{tag} while package.json says {pkg} — the "
+                "release and the manifests disagree, so nothing below can be checked "
+                "against either. package.json is BEHIND the tag, which is a manifest that "
+                "was not bumped rather than a release being prepared")
+            return
     shipped = tag or pkg
 
     ledger = ROOT / "docs" / "evidence" / "verification.md"

@@ -1,3 +1,51 @@
+## v1.15.0 — a claim tag outlived its lease, and no command reached it
+
+**GitHub issue #5, filed 2026-08-17, reproduced verbatim at v1.14.0.** A board row shipped
+in a published release reading `(claimed: r-6e62c4dab)` while the lease plane said
+`leases held: none`. `release <key>` printed `released`, exited **0** and changed nothing;
+`residue` said *nothing on disk*; `reconcile` found *no mechanical divergence*. Three
+commands, none of which could reach the tag, because `write_claim(key, None)` restores the
+cell for the key it holds and it held none.
+
+This is #4 from the other side. #4 was a lease that outlived its run; this is a tag that
+outlived its lease — and the second is worse, because an invisible lease invites a check
+while a confident wrong answer does not. Closed the same way: **one notion of held,
+consulted by both planes.** `_lease_holder` stays the single reader, memoised per command
+so a report over a tagged board costs one `ls-remote` per *tagged row* in git mode rather
+than one per board row. `orphan_claims()` classifies a tag `orphan` — the TTL has ended its
+lease — or `disputed`, live under another run, which is reported and never touched.
+`release` clears an orphan and names the run it belonged to. `status`, `residue` and
+`reconcile` each report one, so the disagreement is visible to a gate rather than to a
+diff.
+
+Four more, each with its plant watched refusing:
+
+- **`residue` read as a complete answer in git mode and could not be.** It walks
+  `.agent-sync/leases/*.lock`, which only the local plane writes, so a ref won on another
+  machine was invisible. It now prints `⚠ INCOMPLETE IN THIS MODE` with the `ls-remote`
+  command it does not run. The sweep itself is still open, and the row says so — a check
+  that cannot look must not read as one that looked.
+- **A `local` lock recorded no host**, so residue could not tell a lock written here from
+  one written on another machine; 25 of 25 locks on this machine carried none. Both modes
+  write it now, with a fixture separating two machines.
+- **The ledger described an artifact nobody shipped**: its newest section was headed
+  *(in tree, unreleased)* and quoted `PASS: agent-sync v1.13.0` while v1.14.0 was tagged,
+  in `package.json` and on npm. Guarded three ways.
+- **Two divisors for one token budget.** The family's auditor measured the pack's body at
+  ~5084 tokens against a 5000 limit; this repo's own gate divided by 4 and passed at 4957.
+  One divisor now (3.9, the auditor's), and the body is under it at ~4683 after a split.
+
+Also corrected: the board's *"14 of the 17 live in repositories this row must not touch"*
+recomputes to **16 outside this checkout, 13 outside it and the umbrella**, with the `find`
+that produces each.
+
+**Found while doing it:** a plant had stopped planting. `the script path is prose only`
+substituted a paragraph that had since been reflowed, so it changed nothing — and a no-op
+plant still reported `detected` for a check that never ran. Re-anchored on the values the
+check actually reads.
+
+Self-test fixtures 43 → **51**; the claim-cell suite 9 → **16 cases**.
+
 ## v1.14.0 — expiry ended a lease and left the file, and every reader folded that away
 
 **`status` reported `leases held: none` over three expired locks in the directory it had
