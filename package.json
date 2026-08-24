@@ -1,6 +1,6 @@
 {
   "name": "@ssheleg/agent-sync",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "description": "Let concurrent coding agents share one project without colliding — leases with TTL, race-free id reservation, a run journal and a generated board, over a pluggable knowledge cloud.",
   "bin": {
     "agent-sync": "bin/agent-sync.js"
@@ -17,7 +17,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "python3 test/validate.py && python3 test/validate.py --self-test && python3 test/claim_cell_test.py",
+    "test": "python3 test/validate.py && python3 test/validate.py --self-test && python3 test/claim_cell_test.py && python3 test/hooks_session_test.py",
     "prepublishOnly": "python3 test/validate.py"
   },
   "publishConfig": {

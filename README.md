@@ -444,6 +444,10 @@ and `.agent-sync/` if you want the project clean too.
 
 ## Develop and verify
 
+<!-- commands-run-in: a clone -->
+These run **in a clone of this repository**. The published npm package ships no
+`test/` directory, so from an install they are names, not commands.
+
 ```bash
 python3 test/validate.py             # manifests, version sync, no host/credential leaks
 python3 test/validate.py --self-test # the validator must still be able to fail

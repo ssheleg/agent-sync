@@ -1,3 +1,31 @@
+## v1.17.0 — the identity that had never once been established
+
+`_session_key()` falls back to one `shared` entry per checkout when it cannot tell which
+session is asking, and everything downstream hedges about it: `classify_lock` answers
+`ambiguous` rather than `reapable`, so an expired lease can never be cleared by the run that
+took it. The fallback was documented as the rare case.
+
+It was the only case. Measured 2026-08-25 in a checkout that had been running the tool all
+day: `.agent-sync/sessions` did not exist, and `.agent-sync/run-id` held exactly one key —
+`shared`. The stamping block in `session-start.sh` required `CLAUDE_SESSION_ID` in the hook's
+**environment**, and Claude Code delivers the id to a hook on **stdin as JSON**, which is how
+`guard.sh` next to it has always read its own payload. So the block had never run, in any
+session, since it was written. A fallback that is always taken is not a fallback.
+
+The hook reads its payload now, with the environment variable still winning where it exists.
+`test/hooks_session_test.py` runs the real hook as a process — the only way this was ever
+going to be caught, because every unit around it was correct — and covers the four ways it
+must behave: an id from stdin is stamped, an id from the environment still wins, a payload
+carrying no id stamps nothing rather than keying every session alike, and a payload that is
+not JSON leaves the hook exit 0, because a SessionStart hook that throws takes the session
+with it. A fifth case walks the whole chain: stamp, then the descendant's key, then the
+run-id map, then `classify_lock` returning `reapable` where it used to return `ambiguous`.
+
+Watched failing against the previous hook: 2 of the 5 cases red, and green after.
+
+Also: the README no longer tells a reader to run `python3 test/validate.py` and `npm test`
+from a package that ships no `test/` directory. It names where they run.
+
 ## Unreleased — both `AS-01` halves exercised outside their fixtures
 
 The two rows sat at priority `unverified`: shipped, and confirmed by nothing but their own

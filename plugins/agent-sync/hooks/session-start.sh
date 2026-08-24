@@ -6,14 +6,36 @@ S="$AGENT_SYNC_PY"
 agent_sync_configured || exit 0
 
 # Stamp who this session is, keyed by the process every command in it descends from.
-# A hook has CLAUDE_SESSION_ID in its environment and a plain shell command does not, so without
-# this a second session in the same checkout adopts the first one's identity: both acquire and
-# release as one run, and the lease stops separating the exact case it exists for. $PPID here is
-# the CLI process, which is the one ancestor every later command shares.
-if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+# Without this a second session in the same checkout adopts the first one's identity: both
+# acquire and release as one run, and the lease stops separating the exact case it exists for.
+# $PPID here is the CLI process, which is the one ancestor every later command shares.
+#
+# The id arrives on STDIN as JSON, the way every other hook here reads its payload -- see
+# guard.sh. This block used to require CLAUDE_SESSION_ID in the ENVIRONMENT and nothing else,
+# so on this machine it never ran once: measured 2026-08-25, `.agent-sync/sessions` had never
+# been created and the run-id map held a single `shared` key, which is the weak identity that
+# makes an expired lease unattributable and `reap` refuse it forever. A fallback that is always
+# taken is not a fallback.
+if [ -t 0 ]; then
+  payload=""                       # no stdin (invoked by hand) -- do not block on `cat`
+else
+  payload=$(cat 2>/dev/null || true)
+fi
+sid="${CLAUDE_SESSION_ID:-}"
+if [ -z "$sid" ] && [ -n "$payload" ]; then
+  sid=$(printf '%s' "$payload" | python3 -c '
+import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(d.get("session_id") or "")
+' 2>/dev/null)
+fi
+if [ -n "$sid" ]; then
   d="$(git rev-parse --show-toplevel 2>/dev/null)/.agent-sync/sessions"
   if mkdir -p "$d" 2>/dev/null; then
-    printf '%s' "$CLAUDE_SESSION_ID" > "$d/$PPID" 2>/dev/null || true
+    printf '%s' "$sid" > "$d/$PPID" 2>/dev/null || true
     # forget the stamps of processes that are gone, so the directory cannot grow without bound
     for f in "$d"/*; do
       b="$(basename "$f")"

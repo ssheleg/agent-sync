@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.17.0 — the fallback that was the only path
+
+**Shipped in v1.17.0.** Written before the tag, the only order that works.
+
+| REQ | What shipped | How it was confirmed | Confirmed |
+|---|---|---|---|
+| R-43 | The SessionStart hook establishes a session identity from the payload it is actually given | measured 2026-08-25 in a checkout that had been running the tool all day: `.agent-sync/sessions` did not exist and `.agent-sync/run-id` held one key, `shared`. The stamping block required `CLAUDE_SESSION_ID` in the hook's ENVIRONMENT while the id arrives on stdin as JSON, so it had never run once since it was written | **observed** |
+| R-44 | The four ways the hook must behave are asserted against the hook as a PROCESS | `test/hooks_session_test.py` — an id from stdin is stamped, an environment id still wins, a payload with no id stamps nothing, and a payload that is not JSON leaves the hook at exit 0 | **planted** |
+| R-45 | The chain from stamp to verdict is walked end to end | the fifth case resolves the descendant's key, reads the run-id map, and requires `classify_lock` to answer `reapable` where it answered `ambiguous`; run against the PREVIOUS hook it is red — 2 of 5 — and green against this one | **planted** + **observed** |
+| R-46 | The README stops claiming commands the published package cannot run | it ships no `test/` directory, so `npm test` and `python3 test/validate.py` resolved in a clone and nowhere else; the umbrella's validator now refuses a member whose README presents such a command without naming where it runs | **planted** |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.17.0 — all checks green`, exit 0. `python3 test/claim_cell_test.py` → `PASS: … — 24 cases`, exit 0. `python3 test/hooks_session_test.py` → `PASS: SessionStart identity — 5 cases`, exit 0 — and 2 of those 5 red against the previous hook | 2026-08-25 |
+
 ## v1.16.0 — the release that closes one version string over two trees
 
 **Shipped in v1.16.0.** Written before the tag, the only order that works.
@@ -43,7 +55,7 @@ so a tag with nothing behind it could be reported to nobody. Same shape as #4, o
 | AS-03 | A `local` lock records the machine that wrote it, and two machines are separated in that mode | `check_local_locks_record_their_host` (through the CLI) + fixtures `a local lock records its host (AS-03)`, `two machines are separated in local mode (AS-03)` + plant `a local lock records no host` → **exit 1** | 2026-08-20 |
 | AS-05 | The newest ledger section names what `git describe --tags` prints | `check_ledger_names_the_shipped_version` — `git describe --tags --abbrev=0` where there is a git directory, `package.json` where there is not (the self-test's copy), refusing when the two disagree; plus an "unreleased" claim about a version the CHANGELOG already carries. Plants `the ledger names a version that did not ship` and `the ledger calls a shipped artifact unreleased` → **exit 1** each | 2026-08-20 |
 | AS-06 | One divisor for the token budget, and the body under it | `test/validate.py` divides by **3.9**, matching `CHARS_PER_TOKEN` in make-skill's `audit_skill.py`. Body: **18265 chars / ~4683 tokens**, `0 GAP, 14 PASS` from `audit_skill.py --house`, inside the 5000 budget and the 4750 working limit. Plant `skill body over the token budget` → **exit 1**, `body is ~5360 tokens (20906 chars / 3.9)` | 2026-08-20 |
-| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.16.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (51 fixtures, 8 at a time)`, exit 0 — up from 43. `python3 test/claim_cell_test.py` → `PASS: … — 16 cases`, exit 0 — up from 9 | 2026-08-20 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.15.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (51 fixtures, 8 at a time)`, exit 0 — up from 43. `python3 test/claim_cell_test.py` → `PASS: … — 16 cases`, exit 0 — up from 9 | 2026-08-20 |
 | Reproduced | The defect was real at the tagged version, not only in a description | Driven by hand against a fixture board at v1.14.0 before the fix: `release B-77` printed `released B-77`, exit **0**, `git diff --stat` empty; `residue` → `nothing on disk`; `reconcile` → `no mechanical divergence found`; `status` → `leases held: none` / `expired locks: none` | 2026-08-20 |
 
 **What this row does NOT prove.** The sweep reads and clears the refs the configured remote
@@ -68,7 +80,7 @@ for a key nobody names. Every reader of lease state folds the TTL into the read,
 | M-49b | Only state this run PROVABLY owns and has spent is reapable; foreign and ambiguously owned state is reported and left alone, including when named on the command line | `check_residue_ownership_must_be_provable` — 10 classifier verdicts plus 5 locks on disk (own, foreign, owner-less, unreadable, live) + self-tests `a foreign expired lock is called this run's`, `unprovable ownership defaults to reapable` | 2026-08-19 |
 | M-49c | The reason a lock was left alone is printed, never just the verdict | same check — every non-live verdict must carry a `why` | 2026-08-19 |
 | M-50 | Teardown is verified by re-reading the state, not by the delete's return value | `check_reap_verifies_teardown_by_re_reading` — `Path.unlink` replaced with a no-op, so the delete *succeeds* and the state does not change; `reap` must report `remaining`, not `reaped` + self-test `teardown trusts the delete instead of re-reading`. Also driven by hand against a `chmod 500` lease directory: exit 1, `MINE is STILL PRESENT after the delete` | 2026-08-19 |
-| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.16.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.14.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
 | Measured | The family's residue is counted, not estimated | the classifier run read-only over every lock in the nine checkouts of `sshlg-skills`: **24 locks, 7 live, 17 expired** — `foreign` to any fresh session, `ambiguous` to a plain shell, `reapable` only by the session that took them. **0 reapable by any run today** | 2026-08-19 |
 | Measured | The run that reported the residue deleted none of it | the same sweep after the commit: 17/17 still present | 2026-08-19 |
 

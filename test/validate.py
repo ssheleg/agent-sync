@@ -2519,14 +2519,24 @@ def check_ledger_names_the_shipped_version() -> None:
         return
     text = ledger.read_text()
 
-    # 1. A quoted command output is not prose.
-    for quoted in sorted(set(re.findall(r"PASS: agent-sync v(\d+\.\d+\.\d+)", text))):
-        if quoted != shipped:
-            err(f"verification.md quotes `PASS: agent-sync v{quoted}` while the suite "
-                f"prints v{shipped} — a restated command output, and the one thing a "
-                "ledger may never carry")
-
     sections = re.split(r"(?m)^## ", text)[1:]
+
+    # 1. A quoted command output is not prose -- IN THE SECTION THAT DESCRIBES THIS TREE.
+    #
+    # Scanning the whole ledger made every past release's quote a claim about now, so each
+    # release rewrote them to match, and the record stopped being one: measured 2026-08-25,
+    # the rows dated 2026-08-19 and 2026-08-20 both quoted `PASS: agent-sync v1.16.0` while
+    # git says those trees shipped 1.14.0 and 1.15.0. A guard that can only be satisfied by
+    # falsifying a dated record is not protecting the ledger, and this family says so about
+    # its own dated rows one repository up: they cite past states on purpose, and are counted
+    # rather than gated. Both rows are restored, and this now reads the newest section only.
+    for quoted in sorted(set(re.findall(r"PASS: agent-sync v(\d+\.\d+\.\d+)",
+                                        sections[0] if sections else ""))):
+        if quoted != shipped:
+            err(f"verification.md's newest section quotes `PASS: agent-sync v{quoted}` while "
+                f"the suite prints v{shipped} — a restated command output, and the one thing "
+                "a ledger may never carry")
+
     if not sections:
         err("verification.md carries no `## ` section, so it states nothing about any "
             "shipped requirement")
@@ -2923,9 +2933,13 @@ def self_test() -> int:
                 "        if lock.exists():")),
         # The ledger back to naming a version that is not the one that shipped — the exact
         # state found at 1.14.0, where the newest section cited v1.13.0 under a v1.14.0 tag.
+        # Planted in the NEWEST section, because that is the only place the check reads
+        # since it stopped demanding that every dated row be rewritten on each release.
+        # Anchored on `## ` rather than on a version, so a renamed heading cannot disarm it.
         "the ledger names a version that did not ship": (
             "docs/evidence/verification.md",
-            lambda t: t.replace("PASS: agent-sync v", "PASS: agent-sync v0.0.0 not-v", 1)),
+            lambda t: re.sub(r"(?s)(\n## .*?)PASS: agent-sync v",
+                             r"\1PASS: agent-sync v0.0.0 not-v", t, count=1)),
         "the newest ledger section names no version": (
             "docs/evidence/verification.md",
             lambda t: t.replace("\n## ", "\n## A section that names no version\n\n"
