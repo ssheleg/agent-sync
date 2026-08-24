@@ -21,6 +21,33 @@ the remote* — the proof coming from `ls-remote`, not from a push's exit code.
 — it belongs to run r-blog-1429e, not to this one*, and **deleted nothing**: both lock files
 byte-identical afterwards. State a run cannot prove is its own is reported and untouched.
 
+## v1.16.0 — the release that closes one version string over two trees
+
+**281 lines of shipped behaviour had been sitting behind the tag.** `AS-01a` (the
+git plane is swept, not only disclosed) and `AS-01b` (an ambiguous lock is
+clearable by a person, per key, attributably) landed on `main`, were pinned by the
+umbrella, and were never tagged. So three channels served `1.15.0` and two
+different trees:
+
+| channel | source | `agent_sync.py` |
+|---|---|---|
+| npm `@ssheleg/agent-sync@1.15.0` | the tag | 4344 lines |
+| the plugin marketplace | the branch tip | 4575 lines |
+| the skills CLI | the branch tip | 4575 lines |
+
+All three reported `1.15.0`. `check_pins.py` was green throughout — correctly,
+because it compares the version STRING, and the string did match. A version that
+identifies two artefacts cannot be reasoned about, and the family's own invariant
+("the pin is the promise") was satisfied to the letter while being false in
+substance.
+
+Found on 2026-08-23 by fetching the npm tarball and counting lines in all three
+channels rather than trusting any of them. This release makes the number true.
+
+Also in this range: the release workflow refuses a tag whose commit no clone can
+reach, and the evidence ledger records both `AS-01` halves exercised on a real
+remote rather than in a fixture.
+
 ## v1.15.0 — a claim tag outlived its lease, and no command reached it
 
 **GitHub issue #5, filed 2026-08-17, reproduced verbatim at v1.14.0.** A board row shipped

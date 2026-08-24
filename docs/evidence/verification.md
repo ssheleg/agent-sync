@@ -8,6 +8,19 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.16.0 — the release that closes one version string over two trees
+
+**Shipped in v1.16.0.** Written before the tag, the only order that works.
+
+| REQ | What shipped | How it was confirmed | Confirmed |
+|---|---|---|---|
+| R-40 | 281 lines of `AS-01a`/`AS-01b` behaviour, pinned by the umbrella and never tagged, reach the registry | measured 2026-08-23 by fetching the npm tarball and counting all three channels rather than trusting any: npm `@ssheleg/agent-sync@1.15.0` served `agent_sync.py` at **4344** lines, the plugin marketplace and the skills CLI at **4575**, and all three reported `1.15.0`. `check_pins.py` was green throughout — correctly, because it compares the version STRING | **observed** |
+| R-41 | The release workflow refuses a tag whose commit no clone can reach | the guard is in `.github/workflows/release.yml` for this range; a tag on an unreachable commit fails every clone with `upload-pack: not our ref` while `git submodule status` shows no `+` | **planted** |
+| R-42 | Six version surfaces move together, not five | the gate refused this very release until `agent_sync.py`'s `VERSION` and `SKILL.md`'s front-matter version followed the three manifests and the CHANGELOG — and refused again until this ledger named v1.16.0 and quoted the output the suite actually prints | **planted** + **observed** |
+
+**Counts at ship: 3 rows — 1 observed · 1 planted · 1 planted+observed.**
+
+
 ## AS-04 — a claim tag stops outliving its lease (shipped in v1.15.0)
 
 Closes **[ssheleg/agent-sync#5](https://github.com/ssheleg/agent-sync/issues/5)**, open since
@@ -30,7 +43,7 @@ so a tag with nothing behind it could be reported to nobody. Same shape as #4, o
 | AS-03 | A `local` lock records the machine that wrote it, and two machines are separated in that mode | `check_local_locks_record_their_host` (through the CLI) + fixtures `a local lock records its host (AS-03)`, `two machines are separated in local mode (AS-03)` + plant `a local lock records no host` → **exit 1** | 2026-08-20 |
 | AS-05 | The newest ledger section names what `git describe --tags` prints | `check_ledger_names_the_shipped_version` — `git describe --tags --abbrev=0` where there is a git directory, `package.json` where there is not (the self-test's copy), refusing when the two disagree; plus an "unreleased" claim about a version the CHANGELOG already carries. Plants `the ledger names a version that did not ship` and `the ledger calls a shipped artifact unreleased` → **exit 1** each | 2026-08-20 |
 | AS-06 | One divisor for the token budget, and the body under it | `test/validate.py` divides by **3.9**, matching `CHARS_PER_TOKEN` in make-skill's `audit_skill.py`. Body: **18265 chars / ~4683 tokens**, `0 GAP, 14 PASS` from `audit_skill.py --house`, inside the 5000 budget and the 4750 working limit. Plant `skill body over the token budget` → **exit 1**, `body is ~5360 tokens (20906 chars / 3.9)` | 2026-08-20 |
-| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.15.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (51 fixtures, 8 at a time)`, exit 0 — up from 43. `python3 test/claim_cell_test.py` → `PASS: … — 16 cases`, exit 0 — up from 9 | 2026-08-20 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.16.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (51 fixtures, 8 at a time)`, exit 0 — up from 43. `python3 test/claim_cell_test.py` → `PASS: … — 16 cases`, exit 0 — up from 9 | 2026-08-20 |
 | Reproduced | The defect was real at the tagged version, not only in a description | Driven by hand against a fixture board at v1.14.0 before the fix: `release B-77` printed `released B-77`, exit **0**, `git diff --stat` empty; `residue` → `nothing on disk`; `reconcile` → `no mechanical divergence found`; `status` → `leases held: none` / `expired locks: none` | 2026-08-20 |
 
 **What this row does NOT prove.** The sweep reads and clears the refs the configured remote
@@ -55,7 +68,7 @@ for a key nobody names. Every reader of lease state folds the TTL into the read,
 | M-49b | Only state this run PROVABLY owns and has spent is reapable; foreign and ambiguously owned state is reported and left alone, including when named on the command line | `check_residue_ownership_must_be_provable` — 10 classifier verdicts plus 5 locks on disk (own, foreign, owner-less, unreadable, live) + self-tests `a foreign expired lock is called this run's`, `unprovable ownership defaults to reapable` | 2026-08-19 |
 | M-49c | The reason a lock was left alone is printed, never just the verdict | same check — every non-live verdict must carry a `why` | 2026-08-19 |
 | M-50 | Teardown is verified by re-reading the state, not by the delete's return value | `check_reap_verifies_teardown_by_re_reading` — `Path.unlink` replaced with a no-op, so the delete *succeeds* and the state does not change; `reap` must report `remaining`, not `reaped` + self-test `teardown trusts the delete instead of re-reading`. Also driven by hand against a `chmod 500` lease directory: exit 1, `MINE is STILL PRESENT after the delete` | 2026-08-19 |
-| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.15.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
+| Gate | The whole suite, and every check watched failing | `python3 test/validate.py` → `PASS: agent-sync v1.16.0 — all checks green`, exit 0. `python3 test/validate.py --self-test` → `SELF-TEST PASS: every injected defect was caught (43 fixtures, 8 at a time)`, exit 0 — up from 38 | 2026-08-19 |
 | Measured | The family's residue is counted, not estimated | the classifier run read-only over every lock in the nine checkouts of `sshlg-skills`: **24 locks, 7 live, 17 expired** — `foreign` to any fresh session, `ambiguous` to a plain shell, `reapable` only by the session that took them. **0 reapable by any run today** | 2026-08-19 |
 | Measured | The run that reported the residue deleted none of it | the same sweep after the commit: 17/17 still present | 2026-08-19 |
 
