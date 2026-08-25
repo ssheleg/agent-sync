@@ -1,3 +1,66 @@
+## v1.18.0 — a third backend, and two people who can finally see each other
+
+`fs` keeps the record on one machine and `outline` costs $10 a month for a team; between
+them sat the case this release is for — **two people, two machines, one plane, nothing to
+pay**. `notion` is that plane. The container is a page, every log is a child page of it,
+and every line is one paragraph block appended by `PATCH /v1/blocks/{id}/children`, which
+is a server-side append with no read-modify-write anywhere in the class.
+
+**The capability flags are earned, and the earning found two defects.**
+`test/notion_live_test.py` ran against a live workspace on 2026-08-25 and passed on the
+fourth attempt: `200 appends from two processes, 200 lines on one page`, `two reads return
+one order`, `tree.ensure is idempotent`, `both fresh shards enumerated, 200 lines across
+them`, and the forced degradation. The three runs before it are the reason to trust the
+fourth. Run two went red at 171 lines with a dead writer: the retry path had never executed
+in run one, and it turned out `TimeoutError` is an `OSError` rather than a `URLError`, so a
+read that timed out **after** the connection was established fell past both retry branches
+into the catch-all and failed permanently. Run three went red differently — 100 lines, all
+from one writer, both exiting 0 — because the two writers each called `tree.ensure` on a
+shared title and the check-then-create raced into two pages of that name. That one is a
+finding about the measurement: `Sync.log_id()` says *this run's OWN shard, one writer per
+document, always*, so the protocol never creates it. The contention case is now handed the
+page id, and the case the sharded design actually depends on took its place — two fresh
+shards, both enumerated, which is precisely what Outline's search index could not do.
+
+The suite covers both halves of the retry loop now. The success half had never existed:
+every assertion drove a transport that always failed, so nothing measured whether a retry
+can succeed — a loop that cannot is a loop that only fails more slowly.
+
+It needs credentials and a network, so it stays outside `npm test` and **says SKIP loudly**
+rather than passing quietly where it cannot run. `exclusiveLease` stays false and no
+measurement can move it: Notion has no compare-and-swap, and the endpoint's own
+`conflict_error` is a retry hint rather than an arbiter.
+
+**One registry of backends, because three copies of a two-item list is how a backend comes
+to half-exist.** `CLOUD_ADAPTERS` is the single home; `init`'s argument parser, `check`'s
+known-adapter test and `bootstrap`'s dispatch all read it. `bootstrap` used to build an
+Outline collection whatever the project was configured for — on an `fs` project it demanded
+Outline credentials for a backend that has no container at all. `check`'s credential test
+now asks the adapter (`REQUIRED_ENV`, `preflight()`) instead of naming Outline's variables
+in an `if`, and the Notion preflight is a real call — `GET /v1/users/me` — because "knowledge
+base reachable" printed after a function that only parsed a string is the defect class this
+suite exists to refuse.
+
+**B-34's other half.** `_allocated_ids` still read `nextFreeIdPattern` directly while
+`id_pattern()` beside it accepted both keys, so a config written with the modern `pattern`
+key never discarded its own *Next free ID* line: `--set-baseline` stamped one above reality,
+and every id at the true top read as pre-baseline and was never asked for an as-built
+record. Reproduced in `fabric` on 2026-08-25, fixed here, fixture plants it back.
+
+**`FsAdapter`'s docstring said its files are "committed and pushed"** while `check` reports a
+tracked `.agent-sync/` as a problem — a committed run id hands one checkout's identity to
+every clone. The check was right; the line now says so.
+
+**And a defect in the suite itself.** `Sync()` calls `load_env_file`, which writes the
+project's variables into `os.environ` — correct for the CLI, a leak in-process. Two checks
+built temporary `fs` projects and left `AGENT_SYNC_BACKEND=fs` behind, and that variable
+OVERRIDES the configured backend, so the next check to depend on it silently read the
+previous check's project. The new dispatch check passed alone and failed in the suite, which
+is the signature of this class rather than of the code under test. Every check now runs
+through `_guarded`, which restores the environment and the working directory after it.
+
+Five checks, five planted defects: 51 → 56 fixtures.
+
 ## v1.17.0 — the identity that had never once been established
 
 `_session_key()` falls back to one `shared` entry per checkout when it cannot tell which

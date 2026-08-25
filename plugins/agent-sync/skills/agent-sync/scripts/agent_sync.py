@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -489,6 +489,23 @@ class Adapter:
     name = "none"
     capabilities = {"atomicAppend": False, "totalOrderRead": False, "search": False,
                     "exclusiveLease": False}
+    # What must be in the environment before this adapter can reach anything, and the
+    # variable holding its container id. Declared here so `check` and `status` ask the
+    # adapter instead of carrying a per-backend branch each — the shape that let the
+    # Outline credential check live in one place and be missing from the other.
+    REQUIRED_ENV: tuple[str, ...] = ()
+    COLLECTION_ENV = ""
+
+    def preflight(self) -> str:
+        """One cheap live call proving the credential works, or "" for none.
+
+        `check` used to report "knowledge base reachable" after a call that only
+        parsed a string. A check that reports reachability without reaching is the
+        defect class this whole suite exists to refuse."""
+        return ""
+
+    def create_container(self, name: str) -> str:
+        raise Fail(f"backend '{self.name}' has no container to create")
 
     def configured(self) -> bool:
         raise NotImplementedError
@@ -531,6 +548,8 @@ class OutlineAdapter(Adapter):
     """
 
     name = "outline"
+    REQUIRED_ENV = ("AGENT_SYNC_OUTLINE_URL", "AGENT_SYNC_OUTLINE_TOKEN")
+    COLLECTION_ENV = "AGENT_SYNC_OUTLINE_COLLECTION"
     # exclusiveLease is FALSE and that is not a formality. Outline has no
     # compare-and-swap, so a decision cannot be made after all contenders have
     # written — only after a settle window that is long enough in practice. Two runs
@@ -596,6 +615,16 @@ class OutlineAdapter(Adapter):
                     continue
                 raise Fail(f"outline {endpoint}: cannot reach the instance ({exc.reason})") from exc
         raise Fail(f"outline {endpoint}: gave up after 7 attempts")
+
+    def preflight(self) -> str:
+        self.resolve_collection()
+        return "knowledge base reachable and the collection resolves"
+
+    def create_container(self, name: str) -> str:
+        data = self._call("collections.create", {"name": name, "description":
+                                                 "Coordination plane for agent-sync. Generated pages "
+                                                 "are stamped; edit sources in git."})
+        return str(data["id"])
 
     def resolve_collection(self) -> str:
         """Accept a UUID, a urlId, or the whole `name-urlId` slug from the browser.
@@ -698,7 +727,11 @@ class OutlineAdapter(Adapter):
 
 
 class FsAdapter(Adapter):
-    """Degraded mode. Files under .agent-sync/, committed and pushed.
+    """Degraded mode. Files under .agent-sync/, and NOT committed.
+
+    `check` refuses a tracked state directory — a committed run id hands this
+    checkout's identity to every clone, and the tree is dirty after every tool call.
+    This line claimed the opposite until 2026-08-25; the check was right.
 
     atomicAppend is FALSE on purpose: agents here are separated by git, not by a
     filesystem, so ordering is decided by a merge after the fact — which is not
@@ -767,10 +800,295 @@ class FsAdapter(Adapter):
         return [str(q) for q in sorted(self.base.glob(f"{stem}*.md"))]
 
 
+class NotionAdapter(Adapter):
+    """Notion. The container is a page, every log is a child page of it, and every
+    line is one paragraph block appended server-side.
+
+    The append is a real append: `PATCH /v1/blocks/{id}/children` "creates and appends
+    new children blocks to the parent block_id specified", at the end by default. There
+    is no read-modify-write anywhere in this class, which is what `atomicAppend` claims
+    and the only thing it claims.
+
+    `exclusiveLease` is FALSE and no measurement can change it: Notion has no
+    compare-and-swap. Two appends racing on one page can both succeed — the endpoint
+    documents `conflict_error` (409) for the case where they collide instead — so a
+    decision made by replaying this log is a decision made after the fact. Exclusion
+    stays with `leaseBackend`.
+    """
+
+    name = "notion"
+    REQUIRED_ENV = ("AGENT_SYNC_NOTION_TOKEN",)
+    COLLECTION_ENV = "AGENT_SYNC_NOTION_COLLECTION"
+    API = "https://api.notion.com/v1"
+    # Pinned, not floating. Notion versions its API by date and an unpinned client
+    # gets whatever is current the morning a breaking change ships.
+    NOTION_VERSION = "2026-03-11"
+    # One rich_text item caps at 2000 characters. Chunk below it rather than at it:
+    # a line that lands exactly on the boundary is the one that fails in production.
+    CHUNK = 1900
+    # The endpoint's own cap on children per request.
+    BATCH = 100
+
+    capabilities = {"atomicAppend": True, "totalOrderRead": True, "search": True,
+                    "exclusiveLease": False}
+
+    def __init__(self) -> None:
+        self.token = os.environ.get("AGENT_SYNC_NOTION_TOKEN") or ""
+        self.parent = os.environ.get("AGENT_SYNC_NOTION_PARENT") or ""
+        self.collection = os.environ.get("AGENT_SYNC_NOTION_COLLECTION") or ""
+        self._ids: dict[str, str] = {}
+
+    def configured(self) -> bool:
+        return bool(self.token and (self.collection or self.parent))
+
+    # -- transport ---------------------------------------------------------
+
+    @staticmethod
+    def _uuid(value: str) -> str:
+        """Accept what a person copies out of the address bar.
+
+        A Notion URL ends in 32 undashed hex characters; the API takes either form,
+        but a slug like `Board-1f2e…` does not resolve, so the digits are extracted
+        rather than assumed to be the whole string."""
+        raw = re.sub(r"[^0-9a-fA-F]", "", (value or "").rsplit("/", 1)[-1])
+        if len(raw) < 32:
+            raise Fail(f"'{value}' does not contain a 32-character Notion id — copy the "
+                       "page's URL and use the id at its end")
+        raw = raw[-32:].lower()
+        return f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}"
+
+    def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self.configured():
+            raise Fail("Notion is not configured (AGENT_SYNC_NOTION_TOKEN missing from "
+                       "the environment, or neither _COLLECTION nor _PARENT is set)")
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(f"{self.API}/{path}", data=data, method=method)
+        # The token reaches a header and nothing else — never a command line, never a
+        # log line, and never this module's error text.
+        req.add_header("Authorization", f"Bearer {self.token}")
+        req.add_header("Notion-Version", self.NOTION_VERSION)
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+
+        delay = 1.0
+        # Five attempts on a rate limit, then fail loudly — the contract's number,
+        # not a guess.
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return json.loads(resp.read().decode() or "{}")
+            except urllib.error.HTTPError as exc:
+                detail, code = "", ""
+                try:
+                    payload = json.loads(exc.read().decode())
+                    detail = payload.get("message") or ""
+                    code = payload.get("code") or ""
+                except (ValueError, OSError):
+                    pass
+                if exc.code in (401, 403):
+                    raise Fail(
+                        f"notion {method} {path}: {exc.code} — the token is rejected"
+                        f"{': ' + detail if detail else ''}. A credential does not "
+                        "become valid on retry.") from exc
+                # 429 and 529 carry Retry-After in integer seconds and mean *wait*.
+                # 409 conflict_error is two writers touching one page — the same
+                # answer, on a shorter clock. 5xx is the server's own bad minute.
+                if exc.code in (409, 429, 500, 502, 503, 504, 529) and attempt < 4:
+                    hint = exc.headers.get("Retry-After")
+                    time.sleep((float(hint) if hint else delay) + random.random() * 0.4)
+                    delay *= 2
+                    continue
+                reason = f"{code}: {detail}" if code and detail else (detail or code)
+                raise Fail(f"notion {method} {path}: HTTP {exc.code}"
+                           f"{' — ' + reason if reason else ''}") from exc
+            except urllib.error.URLError as exc:
+                if attempt < 2:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: cannot reach the API "
+                           f"({exc.reason})") from exc
+            except TimeoutError as exc:
+                # A read that times out AFTER the connection is established raises this
+                # directly — `URLError` wraps only the connect failure — so it used to
+                # fall into the catch-all below and fail permanently on the first slow
+                # response. The contract calls a transport error retryable, and this is
+                # one. Measured 2026-08-25: a writer died mid-run with "The read
+                # operation timed out" while the workspace was under its own rate limit.
+                if attempt < 2:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: the API did not answer within "
+                           f"{20}s, {attempt + 1} times over") from exc
+            except (ValueError, OSError) as exc:
+                raise Fail(f"notion {method} {path}: {exc}") from exc
+        raise Fail(f"notion {method} {path}: rate limited through 5 attempts — the "
+                   "workspace limit is shared by every connection in it, so this is "
+                   "not necessarily your own traffic")
+
+    # -- containers --------------------------------------------------------
+
+    def preflight(self) -> str:
+        self._call("GET", "users/me")
+        self.resolve_collection()
+        return "token accepted by Notion and the container id resolves"
+
+    def create_container(self, name: str) -> str:
+        if not self.parent:
+            raise Fail("AGENT_SYNC_NOTION_PARENT is not set — put the id of the page "
+                       "the container should live under in it. Copy the 32-character "
+                       "id from the end of that page's URL.")
+        page = self._call("POST", "pages", {
+            "parent": {"type": "page_id", "page_id": self._uuid(self.parent)},
+            "properties": {"title": {"title": [{"type": "text",
+                                                "text": {"content": name[:2000]}}]}},
+        })
+        return str(page["id"])
+
+    def resolve_collection(self) -> str:
+        if not self.collection:
+            raise Fail("AGENT_SYNC_NOTION_COLLECTION is not set — run `bootstrap` to "
+                       "create the container page, then put the id it prints into "
+                       f"{ENV_FILE}")
+        return self._uuid(self.collection)
+
+    def _children(self, oid: str) -> list[dict[str, Any]]:
+        """Every child block, followed to the last page.
+
+        Stopping at the first page would make a long log read as a short one, and a
+        short log replays into a wrong answer rather than an error."""
+        out: list[dict[str, Any]] = []
+        cursor = ""
+        while True:
+            q = f"blocks/{oid}/children?page_size=100" + (f"&start_cursor={cursor}" if cursor else "")
+            data = self._call("GET", q)
+            out.extend(data.get("results") or [])
+            if not data.get("has_more"):
+                return out
+            cursor = data.get("next_cursor") or ""
+            if not cursor:
+                return out
+
+    def tree_ensure(self, path: str) -> str:
+        if path in self._ids:
+            return self._ids[path]
+        collection = self.resolve_collection()
+        # Enumerate by STRUCTURE, never by the search index — Notion's search is
+        # eventually consistent, and a shard it has not indexed yet reads as a shard
+        # that does not exist. That is how eight processes each see only their own
+        # log and each conclude they won.
+        for block in self._children(collection):
+            if block.get("type") == "child_page" \
+                    and (block.get("child_page") or {}).get("title") == path:
+                self._ids[path] = block["id"]
+                return str(block["id"])
+        page = self._call("POST", "pages", {
+            "parent": {"type": "page_id", "page_id": collection},
+            "properties": {"title": {"title": [{"type": "text",
+                                                "text": {"content": path[:2000]}}]}},
+        })
+        self._ids[path] = page["id"]
+        return str(page["id"])
+
+    # -- logs --------------------------------------------------------------
+
+    def _rich(self, text: str) -> list[dict[str, Any]]:
+        parts = [text[i:i + self.CHUNK] for i in range(0, len(text), self.CHUNK)] or [""]
+        return [{"type": "text", "text": {"content": p}} for p in parts]
+
+    @staticmethod
+    def _text_of(block: dict[str, Any]) -> str | None:
+        """The literal text of a block, or None when it carries none.
+
+        `None` and `""` are different answers here: an empty paragraph is a line, and
+        a divider is not, and folding the two loses a line every time somebody presses
+        enter in the Notion editor."""
+        body = block.get(block.get("type") or "") or {}
+        rich = body.get("rich_text")
+        if not isinstance(rich, list):
+            return None
+        return "".join(r.get("plain_text") or (r.get("text") or {}).get("content") or ""
+                       for r in rich)
+
+    def log_append(self, oid: str, line: str) -> None:
+        self._call("PATCH", f"blocks/{oid}/children", {"children": [
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": self._rich(line.rstrip("\n"))}}]})
+
+    def log_read(self, oid: str) -> str:
+        lines = [t for t in (self._text_of(b) for b in self._children(oid)) if t is not None]
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    # -- generated documents ----------------------------------------------
+
+    def doc_put(self, oid: str, text: str) -> None:
+        """Generated pages only, and they are ONE code block on purpose.
+
+        The obvious implementation — delete every child, append the new ones — costs
+        one request per existing block, and at three requests a second a regenerated
+        board would take minutes. A single block is two requests whatever the size."""
+        blocks = self._children(oid)
+        target = next((b for b in blocks if b.get("type") == "code"), None)
+        payload = {"rich_text": self._rich(text), "language": "markdown"}
+        if target:
+            self._call("PATCH", f"blocks/{target['id']}", {"code": payload})
+            return
+        for block in blocks:
+            self._call("DELETE", f"blocks/{block['id']}")
+        self._call("PATCH", f"blocks/{oid}/children",
+                   {"children": [{"object": "block", "type": "code", "code": payload}]})
+
+    def doc_get(self, oid: str) -> str:
+        blocks = self._children(oid)
+        target = next((b for b in blocks if b.get("type") == "code"), None)
+        if target is not None:
+            return self._text_of(target) or ""
+        return self.log_read(oid)
+
+    # -- search ------------------------------------------------------------
+
+    def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        data = self._call("POST", "search", {"query": query, "page_size": max(1, min(limit, 100))})
+        out: list[dict[str, Any]] = []
+        for row in (data.get("results") or [])[:limit]:
+            title = ""
+            for prop in (row.get("properties") or {}).values():
+                if isinstance(prop, dict) and prop.get("type") == "title":
+                    title = "".join(t.get("plain_text") or "" for t in (prop.get("title") or []))
+                    break
+            out.append({"id": row.get("id"), "title": title, "snippet": ""})
+        return out
+
+    def log_shards(self, prefix: str) -> list[str]:
+        out: list[str] = []
+        for block in self._children(self.resolve_collection()):
+            if block.get("type") != "child_page":
+                continue
+            title = (block.get("child_page") or {}).get("title") or ""
+            if title.startswith(prefix):
+                out.append(str(block["id"]))
+                self._ids[title] = block["id"]
+        return out
+
+
+# Every backend that talks to a service, in ONE place. `check`, `init`'s argument
+# parser, `bootstrap` and `status` all read this dict rather than each carrying a copy
+# of the list — the copies are what drift, and a backend missing from one of them is a
+# backend that half exists.
+CLOUD_ADAPTERS: dict[str, type[Adapter]] = {
+    "outline": OutlineAdapter,
+    "notion": NotionAdapter,
+}
+BACKENDS = tuple(sorted(CLOUD_ADAPTERS)) + ("fs",)
+
+
 def make_adapter(cfg: dict[str, Any], root: Path) -> Adapter:
     backend = os.environ.get("AGENT_SYNC_BACKEND") or cfg.get("backend") or "fs"
-    if backend == "outline":
-        ad = OutlineAdapter()
+    cls = CLOUD_ADAPTERS.get(backend)
+    if cls is not None:
+        ad = cls()
         if not ad.configured():
             return FsAdapter(root)
         return ad
@@ -2374,7 +2692,11 @@ class Sync:
             return set()
         text = path.read_text()
         ids = set(re.findall(rf"\b{reg}-\d+\b", text))
-        pattern = spec.get("nextFreeIdPattern")
+        # Through the shim, not the raw key. Reading `nextFreeIdPattern` directly meant
+        # a config written with the modern `pattern` key never discarded its own
+        # next-free line, and the baseline was stamped one higher than reality —
+        # exactly what the docstring above warns about. Reproduced 2026-08-25.
+        pattern = id_pattern(spec)
         if pattern:
             m = re.search(pattern, text)
             if m:
@@ -2889,6 +3211,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         extra = (f"AGENT_SYNC_OUTLINE_URL={args.url}\n"
                  "AGENT_SYNC_OUTLINE_TOKEN=\n"
                  "AGENT_SYNC_OUTLINE_COLLECTION=\n")
+    elif backend == "notion":
+        extra = ("AGENT_SYNC_NOTION_TOKEN=\n"
+                 "AGENT_SYNC_NOTION_PARENT=\n"
+                 "AGENT_SYNC_NOTION_COLLECTION=\n")
     env_path = root / ENV_FILE
     if env_path.exists() and not args.force:
         print(f"• {ENV_FILE} already exists — left untouched")
@@ -2902,7 +3228,25 @@ def cmd_init(args: argparse.Namespace) -> int:
     ensure_untracked(root, f"{STATE_DIR}/")
 
     print()
-    if backend == "outline":
+    if backend == "notion":
+        print("NEXT — three things only you can do:")
+        print("  1. Create a personal access token: Notion's developer portal →")
+        print("     Personal access tokens → New token. It begins `ntn_`.")
+        print("     Reference: https://developers.notion.com/docs/create-a-notion-integration")
+        print(f"  2. Put it, and the page the container should live under, in {ENV_FILE}:")
+        print("       AGENT_SYNC_NOTION_TOKEN=<paste it here>")
+        print("       AGENT_SYNC_NOTION_PARENT=<the 32-character id ending that page's URL>")
+        print("  3. Load the file into your shell before running agents:")
+        print(f"       set -a && . ./{ENV_FILE} && set +a")
+        print()
+        print("  Then run `bootstrap` — it creates the container page and prints the id")
+        print("  to paste into AGENT_SYNC_NOTION_COLLECTION. Share that page in Notion")
+        print("  with the other people working this repository; each of them uses their")
+        print("  OWN token, and yours stays yours.")
+        print()
+        print("  The lease is decided by `leaseBackend`, not by Notion — Notion has no")
+        print("  compare-and-swap. See references/backend-notion.md.")
+    elif backend == "outline":
         print("NEXT — two things only you can do:")
         print(f"  1. Create an API token in your Outline instance at {args.url}")
         print("     (Settings → API and access), then put it in this line of "
@@ -3005,8 +3349,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
     elif not s.lease_is_cross_machine:
         print(f"  ({detail})")
 
-    if ad.name == "outline" and isinstance(ad, OutlineAdapter) and not ad.collection:
-        print("\n✗ AGENT_SYNC_OUTLINE_COLLECTION is empty.")
+    if ad.COLLECTION_ENV and not getattr(ad, "collection", ""):
+        print(f"\n✗ {ad.COLLECTION_ENV} is empty.")
         print("\nNEXT: create the container, then paste the id into "
               f"{ENV_FILE}:")
         print("  agent_sync.py bootstrap")
@@ -3166,20 +3510,26 @@ def pipeline_installed() -> bool:
 
 
 def cmd_bootstrap(_args: argparse.Namespace) -> int:
-    load_env_file(project_root())
-    ad = OutlineAdapter()
+    root = project_root()
+    load_env_file(root)
+    cfg_path = root / CONFIG_PATH
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    backend = os.environ.get("AGENT_SYNC_BACKEND") or cfg.get("backend") or "fs"
+    cls = CLOUD_ADAPTERS.get(backend)
+    if cls is None:
+        raise Fail(f"backend '{backend}' has no container to create — `bootstrap` is "
+                   f"for {', '.join(sorted(CLOUD_ADAPTERS))}")
+    ad = cls()
     if not ad.configured():
-        raise Fail("set AGENT_SYNC_OUTLINE_URL and AGENT_SYNC_OUTLINE_TOKEN first")
-    if ad.collection:
-        print(f"collection already set: {ad.collection}")
+        raise Fail(f"set {' and '.join(cls.REQUIRED_ENV)} first")
+    if getattr(ad, "collection", ""):
+        print(f"container already set: {ad.collection}")
         return 0
     name = f"agent-sync — {repo_name()}"
-    data = ad._call("collections.create", {"name": name, "description":
-                                           "Coordination plane for agent-sync. Generated pages "
-                                           "are stamped; edit sources in git."})
-    print(f"✓ created collection '{name}'")
+    oid = ad.create_container(name)
+    print(f"✓ created container '{name}'")
     print(f"\nNEXT: put this in {ENV_FILE}:")
-    print(f"  AGENT_SYNC_OUTLINE_COLLECTION={data['id']}")
+    print(f"  {cls.COLLECTION_ENV}={oid}")
     return 0
 
 
@@ -4027,7 +4377,7 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
         raise Fail(f"{CONFIG_PATH} is not valid JSON: {exc}") from exc
     ok.append(f"config parses ({CONFIG_PATH})")
 
-    if cfg.get("backend") not in ("outline", "fs"):
+    if cfg.get("backend") not in BACKENDS:
         problems.append(f"backend '{cfg.get('backend')}' is not a known adapter")
     for k in sorted(set(cfg) - CONFIG_KEYS):
         problems.append(f"config key '{k}' is not in the schema — it will be ignored")
@@ -4142,20 +4492,19 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
         ok.append(f"credentials file in force: {env} (outside this repository)")
     elif env is not None:
         ok.append(f"credentials file in force: {env}")
-    if cfg.get("backend") == "outline":
+    cloud = CLOUD_ADAPTERS.get(cfg.get("backend") or "")
+    if cloud is not None:
         if env is None:
             problems.append(f"no {ENV_FILE} found here or in any parent — the backend "
                             "cannot be reached, and every run silently degrades")
         else:
             ok.append(f"credentials file found at {env}")
-            missing = [k for k in ("AGENT_SYNC_OUTLINE_URL", "AGENT_SYNC_OUTLINE_TOKEN")
-                       if not os.environ.get(k)]
+            missing = [k for k in cloud.REQUIRED_ENV if not os.environ.get(k)]
             if missing:
                 problems.append(f"{', '.join(missing)} is empty — runs will degrade to `fs`")
             else:
                 try:
-                    OutlineAdapter().resolve_collection()
-                    ok.append("knowledge base reachable and the collection resolves")
+                    ok.append(cloud().preflight() or f"{cloud.name}: credentials present")
                 except Fail as exc:
                     problems.append(f"knowledge base unreachable: {exc}")
 
@@ -4467,7 +4816,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     i = sub.add_parser("init", help="ask where to store, write config and env file")
-    i.add_argument("--backend", required=True, choices=["outline", "fs"])
+    i.add_argument("--backend", required=True, choices=list(BACKENDS))
     i.add_argument("--url", help="instance URL (required for outline)")
     i.add_argument("--force", action="store_true")
     i.set_defaults(fn=cmd_init)

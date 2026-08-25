@@ -462,7 +462,7 @@ npm test                             # both of the above
 ```
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
-scripts, the slash command, `agent-sync.schema.json`, and ten reference contracts the
+scripts, the slash command, `agent-sync.schema.json`, and eleven reference contracts the
 agent loads on their own trigger rather than by default:
 
 | Reference | Read it when |
@@ -470,6 +470,7 @@ agent loads on their own trigger rather than by default:
 | [`adapter-contract.md`](plugins/agent-sync/skills/agent-sync/references/adapter-contract.md) | adding or auditing a knowledge backend |
 | [`lease-protocol.md`](plugins/agent-sync/skills/agent-sync/references/lease-protocol.md) | changing acquisition, expiry, stealing or id allocation |
 | [`backend-outline.md`](plugins/agent-sync/skills/agent-sync/references/backend-outline.md) | making any Outline API call, or debugging one |
+| [`backend-notion.md`](plugins/agent-sync/skills/agent-sync/references/backend-notion.md) | making any Notion API call, or debugging one |
 | [`backend-fs.md`](plugins/agent-sync/skills/agent-sync/references/backend-fs.md) | running without a cloud backend, or explaining degraded mode |
 | [`pipeline-binding.md`](plugins/agent-sync/skills/agent-sync/references/pipeline-binding.md) | wiring `pipeline.json`, or adding a stage hook |
 | [`hooks.md`](plugins/agent-sync/skills/agent-sync/references/hooks.md) | installing, debugging or removing the Claude Code hooks |

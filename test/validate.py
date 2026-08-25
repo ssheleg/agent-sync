@@ -12,6 +12,7 @@ Run:  python3 test/validate.py
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import platform
@@ -31,12 +32,17 @@ ALLOWED_HOSTS = {
     "github.com", "raw.githubusercontent.com", "www.github.com",
     "code.claude.com", "docs.claude.com", "agentskills.io", "www.agentskills.io",
     "www.getoutline.com", "getoutline.com", "app.getoutline.com",
+    # Notion is single-tenant SaaS: `api.notion.com` is a constant every client hard-codes,
+    # not somebody's private address. Outline is self-hostable, which is why ITS instance
+    # address stays in the environment and only the vendor's own site is listed here.
+    "api.notion.com", "developers.notion.com", "www.notion.so",
     "json-schema.org", "npmjs.com", "www.npmjs.com", "img.shields.io",
     "x.com", "sshlg.me", "t.me",
     "localhost", "127.0.0.1", "example.com", "wiki.example.com",
 }
 
 PUBLISHED = ["plugins", "bin", "test", "agent-sync.example.json", "agent-sync.schema.json"]
+SCRIPT_PATH = "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py"
 
 errors: list[str] = []
 notes: list[str] = []
@@ -2560,65 +2566,379 @@ def check_ledger_names_the_shipped_version() -> None:
                 "such release — the ledger announces a version that does not exist")
 
 
+class _Resp(io.BytesIO):
+    """A urlopen result: a context manager over bytes, which is all `_call` uses."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _notion_env(**over) -> dict[str, str]:
+    """Deterministic Notion credentials for a fixture: present, and worthless.
+
+    The values must be non-empty (so `configured()` is true) and obviously fake (so a
+    check can never accidentally reach the real API with the developer's own token
+    inherited from the shell)."""
+    base = {"AGENT_SYNC_NOTION_TOKEN": "not-a-token",
+            "AGENT_SYNC_NOTION_PARENT": "0" * 32,
+            "AGENT_SYNC_NOTION_COLLECTION": "0" * 32}
+    base.update(over)
+    return base
+
+
+def check_notion_retries_only_what_can_succeed() -> None:
+    """A credential does not become valid on retry, and a 429 is not a failure.
+
+    Both halves are in `references/adapter-contract.md`'s error table and both are
+    easy to get backwards. Retrying a 401 spends the rate limit on an answer that
+    cannot change; failing on the first 429 turns a limit shared with every other
+    connection in the workspace — spent by somebody else's script — into this run's
+    error. Driven with a stubbed transport, so it needs no network and no credentials.
+    """
+    sys.path.insert(0, str(ROOT / "plugins/agent-sync/skills/agent-sync/scripts"))
+    import io
+    import urllib.error
+    import urllib.request
+    try:
+        import agent_sync as mod
+    except Exception as exc:                    # pragma: no cover
+        err(f"notion: cannot import the adapter to test it ({exc})")
+        return
+
+    calls = {"n": 0}
+
+    def transport(code: int):
+        def _open(req, timeout=None):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                req.full_url, code, "planted", {"Retry-After": "0"},
+                io.BytesIO(b'{"code":"planted","message":"planted"}'))
+        return _open
+
+    saved_open, saved_env = urllib.request.urlopen, dict(os.environ)
+    # The backoff is real and this check does not measure it — it measures the number of
+    # attempts. Left alone it sleeps ~3s, and the self-test runs the whole validator once
+    # per planted defect, so three seconds here is three minutes there.
+    saved_sleep, mod.time.sleep = mod.time.sleep, lambda _s: None
+    os.environ.update(_notion_env())
+    try:
+        for code, expected, label in ((401, 1, "a rejected token"),
+                                      (429, 5, "a rate limit"),
+                                      (409, 5, "a write conflict")):
+            calls["n"] = 0
+            urllib.request.urlopen = transport(code)
+            try:
+                mod.NotionAdapter()._call("GET", "users/me")
+                err(f"notion: {label} was reported as success")
+            except mod.Fail:
+                pass
+            except Exception as exc:            # pragma: no cover
+                err(f"notion: {label} escaped as {type(exc).__name__}, not the tool's "
+                    "own failure type — the caller gets a traceback for a network answer")
+            if calls["n"] != expected:
+                err(f"notion: {label} was attempted {calls['n']} times, expected "
+                    f"{expected} — " + ("a credential does not become valid on retry"
+                                        if expected == 1 else
+                                        "a retryable answer must be retried, not raised"))
+        # And the half that had never been exercised: a retryable answer followed by
+        # a real one. A retry loop that cannot SUCCEED after retrying is a loop that
+        # only ever fails slower — and a read timeout is the case that found this, by
+        # killing a writer mid-measurement because TimeoutError is an OSError and fell
+        # through to the catch-all instead of being retried.
+        for planted, label in ((urllib.error.HTTPError("u", 429, "x", {"Retry-After": "0"},
+                                                       io.BytesIO(b"{}")), "a rate limit"),
+                               (TimeoutError("The read operation timed out"),
+                                "a read timeout")):
+            state = {"n": 0}
+
+            def _open(req, timeout=None, _p=planted, _s=state):
+                _s["n"] += 1
+                if _s["n"] == 1:
+                    raise _p
+                return _Resp(b'{"ok": 1}')
+
+            urllib.request.urlopen = _open
+            try:
+                mod.NotionAdapter()._call("GET", "users/me")
+            except Exception as exc:
+                err(f"notion: {label} followed by a good answer still failed "
+                    f"({type(exc).__name__}: {exc}) — the retry loop cannot succeed, "
+                    "only fail more slowly")
+            if state["n"] != 2:
+                err(f"notion: {label} was not retried into its answer "
+                    f"({state['n']} attempt(s))")
+    finally:
+        urllib.request.urlopen = saved_open
+        mod.time.sleep = saved_sleep
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+
+def check_init_notion_writes_its_env_keys() -> None:
+    """`init` writes the shape and never the secret.
+
+    The whole security model of this tool is that the token is the operator's: created
+    by them, pasted by them. An `init` that writes a value into that line — or that
+    omits the line, so they paste it somewhere of their own choosing — breaks it from
+    opposite directions.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — notion init check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        r = _run_script(project, "init", "--backend", "notion")
+        if r.returncode != 0:
+            err(f"init --backend notion failed: {r.stderr.strip()[:200]}")
+            return
+        env = (Path(project) / ".env.agent-sync").read_text()
+        for key in ("AGENT_SYNC_NOTION_TOKEN", "AGENT_SYNC_NOTION_PARENT",
+                    "AGENT_SYNC_NOTION_COLLECTION"):
+            if f"{key}=" not in env:
+                err(f"init --backend notion: {key} is missing from the env file, so the "
+                    "operator has nowhere named to paste it")
+        if re.search(r"AGENT_SYNC_NOTION_TOKEN=\S", env):
+            err("init --backend notion wrote a VALUE into the token line — the token is "
+                "the operator's to create and paste, and nothing else may place one")
+        if "bootstrap" not in r.stdout:
+            err("init --backend notion did not name `bootstrap` as the next step, so the "
+                "container is never created and every later command reports it missing")
+
+
+def check_bootstrap_follows_the_configured_backend() -> None:
+    """`bootstrap` built an Outline collection whatever the project was configured for.
+
+    It read `OutlineAdapter()` directly. On a `notion` project it demanded Outline
+    credentials; on `fs` it demanded them too, for a backend with no container at all.
+    A command that ignores the configuration is a command that answers a question
+    nobody asked.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — bootstrap dispatch check skipped")
+        return
+    # AGENT_SYNC_BACKEND is in here on purpose: it OVERRIDES the config, so a check
+    # that does not state it is a check whose answer depends on what ran before it.
+    blank = {k: "" for k in ("AGENT_SYNC_BACKEND",
+                             "AGENT_SYNC_OUTLINE_URL", "AGENT_SYNC_OUTLINE_TOKEN",
+                             "AGENT_SYNC_NOTION_TOKEN", "AGENT_SYNC_NOTION_PARENT",
+                             "AGENT_SYNC_NOTION_COLLECTION")}
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        _run_script(project, "init", "--backend", "fs")
+        out = _run_script(project, "bootstrap", env=blank)
+        said = out.stdout + out.stderr
+        if out.returncode == 0 or "no container" not in said:
+            err("bootstrap on an `fs` project did not say that this backend has no "
+                f"container to create (said: {said.strip()[:160]!r})")
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        started = _run_script(project, "init", "--backend", "notion")
+        if started.returncode != 0:
+            err("bootstrap dispatch: init --backend notion failed, so the rest of this "
+                f"check measured nothing: {(started.stderr or started.stdout).strip()[:200]}")
+            return
+        out = _run_script(project, "bootstrap", env=blank)
+        said = out.stdout + out.stderr
+        if "AGENT_SYNC_NOTION_TOKEN" not in said:
+            err("bootstrap on a `notion` project did not name the Notion credential it "
+                f"needs (said: {said.strip()[:160]!r})")
+        if "OUTLINE" in said:
+            err("bootstrap on a `notion` project asked for Outline credentials — it is "
+                "reading the adapter class rather than the configuration")
+
+
+def check_check_accepts_every_shipped_backend() -> None:
+    """One list of backends, or the tool ships one it refuses to validate.
+
+    `init`'s argument parser, `check`'s known-adapter test and `bootstrap`'s dispatch
+    each used to carry their own copy of the pair. A third backend added to one copy
+    and missed in another is a backend that half exists — accepted at `init` and
+    rejected by `check` an hour later, in a project already configured with it.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — backend list check skipped")
+        return
+    sys.path.insert(0, str(ROOT / "plugins/agent-sync/skills/agent-sync/scripts"))
+    try:
+        from agent_sync import BACKENDS
+    except Exception as exc:                    # pragma: no cover
+        err(f"backends: cannot import the registry to test it ({exc})")
+        return
+    blank = {k: "" for k in ("AGENT_SYNC_BACKEND",
+                             "AGENT_SYNC_OUTLINE_URL", "AGENT_SYNC_OUTLINE_TOKEN",
+                             "AGENT_SYNC_NOTION_TOKEN", "AGENT_SYNC_NOTION_COLLECTION")}
+    for backend in BACKENDS:
+        with tempfile.TemporaryDirectory() as project:
+            _git_project(project)
+            argv = ["init", "--backend", backend]
+            if backend == "outline":
+                argv += ["--url", "https://wiki.example.com"]
+            r = _run_script(project, *argv, env=blank)
+            if r.returncode != 0:
+                err(f"init refuses backend '{backend}', which the registry ships: "
+                    f"{r.stderr.strip()[:160]}")
+                continue
+            out = _run_script(project, "check", env=blank)
+            if "is not a known adapter" in out.stdout:
+                err(f"check calls '{backend}' unknown while `init` writes it — the two "
+                    "are reading different lists")
+
+
+def check_baseline_is_not_poisoned_by_the_next_free_line() -> None:
+    """The baseline counted the id nobody had written yet. B-34's other half.
+
+    B-34 fixed the crash when the register's pattern lives under `pattern` rather than
+    `nextFreeIdPattern`, by reading both through `id_pattern()`. `_allocated_ids` kept
+    reading the raw key — so with a modern config the *next free* line was counted as
+    an allocated id, and `--set-baseline` stamped one higher than reality. Every id at
+    the true top then reads as pre-baseline and is never asked for an as-built record.
+    Reproduced in `fabric`, 2026-08-25.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — baseline check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        (Path(project) / "DECISIONS.md").write_text(
+            "# Decisions\n\nDEC-0001\nDEC-0002\nDEC-0003\n\n"
+            "**Next free ID:** `DEC-0004`\n")
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("baseline: init failed")
+            return
+        _write_cfg(project, idRegisters={"DEC": {
+            "file": "DECISIONS.md",
+            "pattern": r"\*\*Next free ID:\*\* `DEC-(\d{4})`"}})
+        out = _run_script(project, "reconcile", "--set-baseline")
+        if "DEC-0003" not in out.stdout:
+            err("reconcile --set-baseline did not stamp DEC-0003, the highest id actually "
+                f"written — it counted the `Next free ID` line as allocated (said: "
+                f"{out.stdout.strip()[:160]!r})")
+
+
+def check_no_adapter_claims_a_lease_it_cannot_decide() -> None:
+    """`exclusiveLease` is the one flag that can make the tool lie about safety.
+
+    Trap 1 of the skill is that a knowledge base never decides a lease — none of the
+    document stores has compare-and-swap. An adapter declaring otherwise makes every
+    surface report exclusion the store cannot deliver, and the other agent stops
+    checking. The second half is the degradation path: with `atomicAppend` false the
+    coordinator must refuse lease authority, and that must hold for every adapter
+    rather than for the one whose reference file happens to mention it.
+    """
+    sys.path.insert(0, str(ROOT / "plugins/agent-sync/skills/agent-sync/scripts"))
+    try:
+        import agent_sync as mod
+    except Exception as exc:                    # pragma: no cover
+        err(f"adapters: cannot import them to test them ({exc})")
+        return
+    for name, cls in sorted(mod.CLOUD_ADAPTERS.items()):
+        if cls.capabilities.get("exclusiveLease"):
+            err(f"adapter '{name}' declares exclusiveLease — no document store has "
+                "compare-and-swap, and a lease that is not exclusive is worse than none")
+        saved = cls.capabilities
+        try:
+            cls.capabilities = {**saved, "atomicAppend": False}
+            if cls().is_lease_authority:
+                err(f"adapter '{name}': with atomicAppend false it still claims lease "
+                    "authority — the degradation path the contract requires is absent")
+        finally:
+            cls.capabilities = saved
+
+
+def _guarded(fn):
+    """Run one check without letting it change the world the next one runs in.
+
+    `Sync()` calls `load_env_file`, which writes the project's credentials into
+    `os.environ` — correct for the CLI, and a leak in-process: a check that built a
+    temporary `fs` project left `AGENT_SYNC_BACKEND=fs` behind, and that variable
+    OVERRIDES the configured backend. The next check to depend on it read the previous
+    check's project. Two of them also `os.chdir` and never return.
+
+    Found 2026-08-25 while adding the third backend: the new dispatch check passed
+    alone and failed in the suite, which is the signature of this class and not of the
+    code under test.
+    """
+    saved_env, saved_cwd = dict(os.environ), os.getcwd()
+    try:
+        return fn()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+        try:
+            os.chdir(saved_cwd)
+        except OSError:                      # the cwd itself was a temporary directory
+            pass
+
+
 def main() -> int:
-    check_manifests()
-    check_no_stray_skills()
-    ok, version = check_version_sync()
-    check_example_against_schema()
-    check_public_floor()
-    check_npm_excludes()
-    check_no_host_identity()
-    check_no_credentials()
-    check_scripts_run()
-    check_hooks_manifest()
-    check_hooks_noop_without_config()
-    check_lease_report_agrees()
-    check_repo_slug_consistent()
-    check_branch_claim_discipline()
-    check_merge_refuses_conflicts()
-    check_lease_held_is_visible()
-    check_release_refuses_other_runs()
-    check_reserve_respects_the_register()
-    check_reserve_is_race_free()
-    check_renew_extends_the_lease()
-    check_config_round_trip()
-    check_no_success_on_failed_publish()
-    check_guard_denial_names_only_what_it_knows()
-    check_doctrine_is_current()
-    check_steal_is_atomic()
-    check_merge_refuses_stale_target()
-    check_guard_and_check_agree_on_globs()
-    check_unparseable_log_fails_loudly()
-    check_stage_binding_agrees()
-    check_status_reports_the_setup_verdict()
-    check_env_discovery_is_bounded()
-    check_watermark_survives_a_late_entry()
-    check_no_orphan_logs()
-    check_no_dead_declarations()
-    check_claim_round_trip_is_byte_exact()
-    check_claim_lands_on_the_row_whose_id_cell_matches()
-    check_release_notes_are_extractable()
-    check_every_advertised_verb_exists()
-    check_generated_docs_carry_current_doctrine()
-    check_registers_need_a_backend_that_can_reserve()
-    check_skill_gives_a_resolvable_script_path()
-    check_commands_work_without_the_family_installed()
-    check_two_agents_cannot_share_one_task()
-    check_guard_covers_every_write_shape()
-    check_merge_refuses_without_an_identity()
-    check_merge_releases_only_its_key()
+    _guarded(check_manifests)
+    _guarded(check_no_stray_skills)
+    ok, version = _guarded(check_version_sync)
+    _guarded(check_example_against_schema)
+    _guarded(check_public_floor)
+    _guarded(check_npm_excludes)
+    _guarded(check_no_host_identity)
+    _guarded(check_no_credentials)
+    _guarded(check_scripts_run)
+    _guarded(check_hooks_manifest)
+    _guarded(check_hooks_noop_without_config)
+    _guarded(check_lease_report_agrees)
+    _guarded(check_repo_slug_consistent)
+    _guarded(check_branch_claim_discipline)
+    _guarded(check_merge_refuses_conflicts)
+    _guarded(check_lease_held_is_visible)
+    _guarded(check_release_refuses_other_runs)
+    _guarded(check_reserve_respects_the_register)
+    _guarded(check_reserve_is_race_free)
+    _guarded(check_renew_extends_the_lease)
+    _guarded(check_config_round_trip)
+    _guarded(check_no_success_on_failed_publish)
+    _guarded(check_guard_denial_names_only_what_it_knows)
+    _guarded(check_doctrine_is_current)
+    _guarded(check_steal_is_atomic)
+    _guarded(check_merge_refuses_stale_target)
+    _guarded(check_guard_and_check_agree_on_globs)
+    _guarded(check_unparseable_log_fails_loudly)
+    _guarded(check_stage_binding_agrees)
+    _guarded(check_status_reports_the_setup_verdict)
+    _guarded(check_env_discovery_is_bounded)
+    _guarded(check_watermark_survives_a_late_entry)
+    _guarded(check_no_orphan_logs)
+    _guarded(check_no_dead_declarations)
+    _guarded(check_claim_round_trip_is_byte_exact)
+    _guarded(check_claim_lands_on_the_row_whose_id_cell_matches)
+    _guarded(check_release_notes_are_extractable)
+    _guarded(check_every_advertised_verb_exists)
+    _guarded(check_generated_docs_carry_current_doctrine)
+    _guarded(check_registers_need_a_backend_that_can_reserve)
+    _guarded(check_skill_gives_a_resolvable_script_path)
+    _guarded(check_commands_work_without_the_family_installed)
+    _guarded(check_two_agents_cannot_share_one_task)
+    _guarded(check_guard_covers_every_write_shape)
+    _guarded(check_merge_refuses_without_an_identity)
+    _guarded(check_merge_releases_only_its_key)
 
-    check_routed_triggers_still_advertised()
-    check_the_tarball_carries_no_bytecode()
+    _guarded(check_routed_triggers_still_advertised)
+    _guarded(check_the_tarball_carries_no_bytecode)
 
-    check_status_reports_expired_locks_as_residue()
-    check_residue_ownership_must_be_provable()
-    check_reap_verifies_teardown_by_re_reading()
-    check_finish_reports_what_the_run_leaves_behind()
+    _guarded(check_status_reports_expired_locks_as_residue)
+    _guarded(check_residue_ownership_must_be_provable)
+    _guarded(check_reap_verifies_teardown_by_re_reading)
+    _guarded(check_finish_reports_what_the_run_leaves_behind)
 
-    check_a_claim_tag_cannot_outlive_every_command()
-    check_local_locks_record_their_host()
-    check_ledger_names_the_shipped_version()
+    _guarded(check_a_claim_tag_cannot_outlive_every_command)
+    _guarded(check_local_locks_record_their_host)
+    _guarded(check_ledger_names_the_shipped_version)
+
+    _guarded(check_no_adapter_claims_a_lease_it_cannot_decide)
+    _guarded(check_notion_retries_only_what_can_succeed)
+    _guarded(check_init_notion_writes_its_env_keys)
+    _guarded(check_bootstrap_follows_the_configured_backend)
+    _guarded(check_check_accepts_every_shipped_backend)
+    _guarded(check_baseline_is_not_poisoned_by_the_next_free_line)
 
     for n in notes:
         print(f"note: {n}")
@@ -2675,6 +2995,75 @@ def self_test() -> int:
         # assembled from parts for the same reason the leaked host above is — written
         # whole, this fixture is itself a foreign slug in a published file, and the
         # check would fail on the validator that carries it.
+        # --- the third backend, and the two defects fixed beside it (1.18.0) ---
+        # The read timeout sent straight to a permanent failure, which is what killed a
+        # writer mid-measurement on 2026-08-25 and made an atomicity result unreadable.
+        "notion gives up on a read timeout": (
+            SCRIPT_PATH,
+            lambda t: t.replace(
+                '''                if attempt < 2:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: the API did not answer within "''',
+                '''                if False:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: the API did not answer within "''')),
+        # The flag that makes the tool lie about safety, set on the newest adapter.
+        "an adapter claims an exclusive lease": (
+            SCRIPT_PATH,
+            lambda t: t.replace(
+                '''    capabilities = {"atomicAppend": True, "totalOrderRead": True, "search": True,
+                    "exclusiveLease": False}
+
+    def __init__(self) -> None:
+        self.token = os.environ.get("AGENT_SYNC_NOTION_TOKEN")''',
+                '''    capabilities = {"atomicAppend": True, "totalOrderRead": True, "search": True,
+                    "exclusiveLease": True}
+
+    def __init__(self) -> None:
+        self.token = os.environ.get("AGENT_SYNC_NOTION_TOKEN")''')),
+        # A rejected token sent back into the retry loop: five attempts spent on an
+        # answer that cannot change, and the rate limit spent with it.
+        "notion retries a rejected token": (
+            SCRIPT_PATH,
+            # Two edits, because one is not the defect: dropping 401 from the auth
+            # branch alone still fails on the first attempt. The shipped defect is 401
+            # reaching the RETRY set — five attempts, and the shared workspace limit
+            # spent, on an answer that cannot change.
+            lambda t: t.replace(
+                '''if exc.code in (401, 403):
+                    raise Fail(
+                        f"notion ''',
+                '''if exc.code in (403,):
+                    raise Fail(
+                        f"notion ''')
+                       .replace("if exc.code in (409, 429, 500, 502, 503, 504, 529) and attempt < 4:",
+                                "if exc.code in (401, 409, 429, 500, 502, 503, 504, 529) and attempt < 4:")),
+        # The backend removed from the one registry: `init` refuses what `check` would
+        # have accepted, which is the half-existing backend the registry exists to stop.
+        "notion missing from the registry": (
+            SCRIPT_PATH,
+            lambda t: t.replace('    "notion": NotionAdapter,\n', "")),
+        # `check` keeping its own copy of the backend list — the drift the registry
+        # replaced, planted back.
+        "check keeps its own backend list": (
+            SCRIPT_PATH,
+            lambda t: t.replace('if cfg.get("backend") not in BACKENDS:',
+                                'if cfg.get("backend") not in ("outline", "fs"):')),
+        # B-34's other half: the raw key again, so the next-free line counts as an
+        # allocated id and the baseline lands one above reality.
+        "baseline counts the next free id": (
+            SCRIPT_PATH,
+            lambda t: t.replace("        pattern = id_pattern(spec)",
+                                '        pattern = spec.get("nextFreeIdPattern")')),
+        # `init` placing a token value. The whole security model is that it cannot.
+        "init writes the notion token itself": (
+            SCRIPT_PATH,
+            lambda t: t.replace('"AGENT_SYNC_NOTION_TOKEN=\\n"',
+                                '"AGENT_SYNC_NOTION_TOKEN=ntn_planted_value\\n"')),
         "half-finished rename": ("bin/agent-sync.js",
                                  lambda t: re.sub(r"const REPO = '[^']+'",
                                                   "const REPO = '" + "previous-owner"
