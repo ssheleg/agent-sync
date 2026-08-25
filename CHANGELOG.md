@@ -6,14 +6,30 @@ pay**. `notion` is that plane. The container is a page, every log is a child pag
 and every line is one paragraph block appended by `PATCH /v1/blocks/{id}/children`, which
 is a server-side append with no read-modify-write anywhere in the class.
 
-**The capability flags are earned, not declared.** `test/notion_live_test.py` appends 100
-lines from each of two PROCESSES and asserts the page ends with 200 in an order two
-independent reads agree on, calls `tree.ensure` twice and asserts one page, and forces
-`atomicAppend: false` to watch the coordinator refuse lease authority. It needs credentials
-and a network, so it is deliberately outside `npm test` and **says SKIP loudly** rather than
-passing quietly where it cannot run. `exclusiveLease` stays false and no measurement can
-move it: Notion has no compare-and-swap, and the endpoint's own `conflict_error` is a retry
-hint rather than an arbiter.
+**The capability flags are earned, and the earning found two defects.**
+`test/notion_live_test.py` ran against a live workspace on 2026-08-25 and passed on the
+fourth attempt: `200 appends from two processes, 200 lines on one page`, `two reads return
+one order`, `tree.ensure is idempotent`, `both fresh shards enumerated, 200 lines across
+them`, and the forced degradation. The three runs before it are the reason to trust the
+fourth. Run two went red at 171 lines with a dead writer: the retry path had never executed
+in run one, and it turned out `TimeoutError` is an `OSError` rather than a `URLError`, so a
+read that timed out **after** the connection was established fell past both retry branches
+into the catch-all and failed permanently. Run three went red differently — 100 lines, all
+from one writer, both exiting 0 — because the two writers each called `tree.ensure` on a
+shared title and the check-then-create raced into two pages of that name. That one is a
+finding about the measurement: `Sync.log_id()` says *this run's OWN shard, one writer per
+document, always*, so the protocol never creates it. The contention case is now handed the
+page id, and the case the sharded design actually depends on took its place — two fresh
+shards, both enumerated, which is precisely what Outline's search index could not do.
+
+The suite covers both halves of the retry loop now. The success half had never existed:
+every assertion drove a transport that always failed, so nothing measured whether a retry
+can succeed — a loop that cannot is a loop that only fails more slowly.
+
+It needs credentials and a network, so it stays outside `npm test` and **says SKIP loudly**
+rather than passing quietly where it cannot run. `exclusiveLease` stays false and no
+measurement can move it: Notion has no compare-and-swap, and the endpoint's own
+`conflict_error` is a retry hint rather than an arbiter.
 
 **One registry of backends, because three copies of a two-item list is how a backend comes
 to half-exist.** `CLOUD_ADAPTERS` is the single home; `init`'s argument parser, `check`'s

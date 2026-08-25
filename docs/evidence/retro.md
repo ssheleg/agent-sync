@@ -10,16 +10,21 @@
 | 2026-08-19 | `36a3b38` | AS-01: a run reports what it leaves behind — manifesto M-49, M-50 |
 | 2026-08-20 | `77deede` | AS-01a: the git plane is swept, not only disclosed |
 | 2026-08-20 | `019867b` | AS-01b: an ambiguous lock became clearable by a person, and 28 were cleared |
+| 2026-08-25 | *(this run)* | AS-05: the Notion backend, measured four times before it said anything true — 1.18.0 |
 
 ## Standing instructions
 
 Read in full at stage 0. Each one is retired when it becomes a mechanical check, when the paths it
 names are gone, or when it has not fired in five run stamps or sixty days. Hard cap: ten.
 
-1. **A check that has never been watched fail is not evidence.** Every check in `test/validate.py`
-   has a self-test fixture that plants its defect back. Adding a check without one is adding a
-   green light with no bulb. *(Became partly mechanical in 1.5.3 — the self-test enumerates 43
-   fixtures as of 2026-08-19, counted by running it — but "add the fixture with the check" is
+1. **A check that has never been watched fail is not evidence** — and one that has never been
+   watched SUCCEED is half a check. Every check in `test/validate.py` has a self-test fixture
+   that plants its defect back. Adding a check without one is adding a green light with no bulb.
+   The other half was found on 2026-08-25: every assertion about the Notion retry loop drove a
+   transport that always failed, so nothing measured whether a retry can succeed. A retry branch
+   with no success-after-retry case is a branch that only fails more slowly, and a live run is
+   where you discover it. *(Became partly mechanical in 1.5.3 — the self-test enumerates the
+   fixtures, counted by running it — but "add the fixture with the check, in both directions" is
    still a habit, not a gate.)*
 2. **Test the composition, not only the unit.** Every defect the 2026-08-10 audit found lived in
    the gap between two things already tested separately: the allocator was correct and `reserve`
@@ -60,6 +65,57 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
 
 
 ## Entries
+
+### 2026-08-25 (AS-05) — the measurement had to fail three times before it measured anything
+
+**Symptom.** The Notion adapter's capability flags passed their live measurement on the
+first run — 200 appends from two processes, 200 lines — and that PASS was worth nothing.
+Run two returned 171 lines with a dead writer. Run three returned 100, all from one
+writer, with both writers exiting 0. Only run four was true, and by then two defects and
+one design error had come out of it.
+
+**Where it surfaced.** Stage 5, against a live workspace. **Where it belongs.** Stage 2:
+the decomposition treated "measure the flags" as one task with one outcome, when the
+measurement is a piece of software with its own defects and its own untested paths.
+
+**What run two found.** `TimeoutError` is an `OSError`, not a `URLError`. A read that
+times out **after** the connection is established therefore fell past both retry branches
+into the catch-all and failed permanently — while the contract calls a transport error
+retryable. It did not appear in run one because run one never hit the workspace rate
+limit; run two did, on a budget run one had already spent. **The path that handles
+pressure is only exercised under pressure**, and a first green run against a fresh quota
+proves the happy path and nothing else.
+
+**What run three found, and it is about the test.** Both writers called `tree.ensure` on
+one title, the check-then-create raced, and each wrote 100 lines to its own page of that
+name. Real — and unreachable in this protocol, because `Sync.log_id()` gives every run its
+own shard, *one writer per document, always*, precisely because Outline's append was not
+atomic. The measurement had spent its evidence on a scenario the product cannot create,
+and reported `atomicAppend is FALSE` for a cause that was neither. It now hands the
+contention case a page id, and measures instead the thing the sharded design does depend
+on: two fresh shards, both enumerated. That is the Outline defect — eight processes, eight
+winners, because its search index did not return a new document — and Notion's structural
+listing passes it.
+
+**Root cause, one shape under all three.** Every assertion in the suite drove a transport
+that always failed. Attempt counts were checked; **a retry succeeding was not**, because
+nothing in the corpus could express it. The success path existed only in production, and
+production is where each of these was found.
+
+**The fix, by grade.** Mechanical: retry `TimeoutError` twice with backoff; a check that
+drives a planted failure followed by a real answer, for a rate limit and for a timeout,
+with `notion gives up on a read timeout` planting it back. Structural: the live test hands
+the page id for contention and adds the shard-enumeration case, reports a dead writer as
+INCONCLUSIVE rather than as a false flag, and prints the last 2000 characters of a
+writer's stderr — the first version truncated at 400 and cut the traceback off at the
+frame header, so the one run that did crash reported a stack with no exception in it.
+Doctrinal: standing instruction 1 now covers both directions.
+
+**What it cost to find.** Four live runs and about six minutes of Notion's rate limit.
+What it would have cost not to: `atomicAppend: true` shipped on the strength of one green
+run against a fresh quota, and a first user hitting a slow response would have watched a
+writer die and a lease go unrenewed with no idea why.
+
 
 ### 2026-08-20 (AS-01b) — the override's two defects came from real state, not from fixtures
 

@@ -47,11 +47,19 @@ the revision I read*. The endpoint documents `conflict_error` for two writers
 colliding, which is a retry hint, not an arbiter. Exclusion stays with `leaseBackend`
 — see `lease-protocol.md`.
 
-**These flags are set from a measurement, not from the paragraph above.**
-`test/notion_live_test.py` is that measurement: it appends 100 lines from each of two
-processes and asserts 200 lines, in one order both readers agree on. Run it against a
-real workspace before trusting the flags — the equivalent trap on Outline returned
-twelve successes for twelve concurrent appends and left three lines.
+**These flags come from a measurement, not from the paragraph above.**
+`test/notion_live_test.py` is that measurement, and it passed against a live workspace on
+2026-08-25: 200 appends from two processes left 200 lines on one page, two independent
+reads returned one order, and two freshly created shards were both enumerated. Re-run it
+after any change to this adapter. The equivalent trap on Outline returned twelve successes
+for twelve concurrent appends and left three lines, which is why this is measured rather
+than read off the endpoint's documentation.
+
+**One thing the measurement is not allowed to test**, because the protocol never does it:
+two runs calling `tree.ensure` on the SAME title at once. The check-then-create races and
+both win a page of that name — observed, 100 lines on one and 100 on the other, both
+writers exiting 0. `Sync.log_id()` gives every run its own shard for exactly this class of
+reason, so the contention case is handed a page id instead.
 
 ## Primitive mapping
 

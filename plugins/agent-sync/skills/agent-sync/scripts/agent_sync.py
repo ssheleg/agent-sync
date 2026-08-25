@@ -909,6 +909,19 @@ class NotionAdapter(Adapter):
                     continue
                 raise Fail(f"notion {method} {path}: cannot reach the API "
                            f"({exc.reason})") from exc
+            except TimeoutError as exc:
+                # A read that times out AFTER the connection is established raises this
+                # directly — `URLError` wraps only the connect failure — so it used to
+                # fall into the catch-all below and fail permanently on the first slow
+                # response. The contract calls a transport error retryable, and this is
+                # one. Measured 2026-08-25: a writer died mid-run with "The read
+                # operation timed out" while the workspace was under its own rate limit.
+                if attempt < 2:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: the API did not answer within "
+                           f"{20}s, {attempt + 1} times over") from exc
             except (ValueError, OSError) as exc:
                 raise Fail(f"notion {method} {path}: {exc}") from exc
         raise Fail(f"notion {method} {path}: rate limited through 5 attempts — the "

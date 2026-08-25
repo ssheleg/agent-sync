@@ -12,6 +12,7 @@ Run:  python3 test/validate.py
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import platform
@@ -2565,6 +2566,16 @@ def check_ledger_names_the_shipped_version() -> None:
                 "such release — the ledger announces a version that does not exist")
 
 
+class _Resp(io.BytesIO):
+    """A urlopen result: a context manager over bytes, which is all `_call` uses."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _notion_env(**over) -> dict[str, str]:
     """Deterministic Notion credentials for a fixture: present, and worthless.
 
@@ -2608,6 +2619,10 @@ def check_notion_retries_only_what_can_succeed() -> None:
         return _open
 
     saved_open, saved_env = urllib.request.urlopen, dict(os.environ)
+    # The backoff is real and this check does not measure it — it measures the number of
+    # attempts. Left alone it sleeps ~3s, and the self-test runs the whole validator once
+    # per planted defect, so three seconds here is three minutes there.
+    saved_sleep, mod.time.sleep = mod.time.sleep, lambda _s: None
     os.environ.update(_notion_env())
     try:
         for code, expected, label in ((401, 1, "a rejected token"),
@@ -2628,8 +2643,36 @@ def check_notion_retries_only_what_can_succeed() -> None:
                     f"{expected} — " + ("a credential does not become valid on retry"
                                         if expected == 1 else
                                         "a retryable answer must be retried, not raised"))
+        # And the half that had never been exercised: a retryable answer followed by
+        # a real one. A retry loop that cannot SUCCEED after retrying is a loop that
+        # only ever fails slower — and a read timeout is the case that found this, by
+        # killing a writer mid-measurement because TimeoutError is an OSError and fell
+        # through to the catch-all instead of being retried.
+        for planted, label in ((urllib.error.HTTPError("u", 429, "x", {"Retry-After": "0"},
+                                                       io.BytesIO(b"{}")), "a rate limit"),
+                               (TimeoutError("The read operation timed out"),
+                                "a read timeout")):
+            state = {"n": 0}
+
+            def _open(req, timeout=None, _p=planted, _s=state):
+                _s["n"] += 1
+                if _s["n"] == 1:
+                    raise _p
+                return _Resp(b'{"ok": 1}')
+
+            urllib.request.urlopen = _open
+            try:
+                mod.NotionAdapter()._call("GET", "users/me")
+            except Exception as exc:
+                err(f"notion: {label} followed by a good answer still failed "
+                    f"({type(exc).__name__}: {exc}) — the retry loop cannot succeed, "
+                    "only fail more slowly")
+            if state["n"] != 2:
+                err(f"notion: {label} was not retried into its answer "
+                    f"({state['n']} attempt(s))")
     finally:
         urllib.request.urlopen = saved_open
+        mod.time.sleep = saved_sleep
         os.environ.clear()
         os.environ.update(saved_env)
 
@@ -2953,6 +2996,21 @@ def self_test() -> int:
         # whole, this fixture is itself a foreign slug in a published file, and the
         # check would fail on the validator that carries it.
         # --- the third backend, and the two defects fixed beside it (1.18.0) ---
+        # The read timeout sent straight to a permanent failure, which is what killed a
+        # writer mid-measurement on 2026-08-25 and made an atomicity result unreadable.
+        "notion gives up on a read timeout": (
+            SCRIPT_PATH,
+            lambda t: t.replace(
+                '''                if attempt < 2:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: the API did not answer within "''',
+                '''                if False:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise Fail(f"notion {method} {path}: the API did not answer within "''')),
         # The flag that makes the tool lie about safety, set on the newest adapter.
         "an adapter claims an exclusive lease": (
             SCRIPT_PATH,

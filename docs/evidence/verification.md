@@ -12,23 +12,37 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 
 **Shipped in v1.18.0.** Written before the tag, the only order that works.
 
-Three rows below say **unverified**, and they are the three that matter most: the
-capability flags. `references/adapter-contract.md` calls declaring them without a
-server-side append "the most damaging lie an adapter can tell", and this tree has run
-`test/notion_live_test.py` exactly as far as its own guard:
-`SKIP: notion live measurement — AGENT_SYNC_NOTION_TOKEN and AGENT_SYNC_NOTION_COLLECTION are not both set.`
-Until that command prints a PASS against a real workspace, `atomicAppend: true` in
-`NotionAdapter` is a reading of Notion's documentation and nothing more.
+The capability flags were measured against a live workspace on 2026-08-25, and the
+measurement cost two defects and one redesign before it said anything true. That history
+is the evidence, so it is kept:
+
+1. **First run: PASS.** 200 appends from two processes left 200 lines.
+2. **Second run: red** — 171 lines and a writer dead. The retry path had not executed in
+   the first run; the second hit the workspace rate limit and found that `TimeoutError`
+   is an `OSError`, not a `URLError`, so a read that timed out **after** the connection
+   was established fell past both retry branches into the catch-all and failed
+   permanently. Fixed, and covered in both directions.
+3. **Third run: red differently** — 100 lines, all from writer A, both writers exit 0.
+   Not lost appends: the two writers each called `tree.ensure` on the same title, the
+   check-then-create raced, and each wrote to its own page of that name. The finding is
+   about the MEASUREMENT, not the adapter — `Sync.log_id()` says *this run's OWN shard,
+   one writer per document, always*, so the protocol never creates that scenario. The
+   test now passes the page id for the contention case and adds the case that matters
+   instead: two fresh shards, both enumerated.
+4. **Fourth run: PASS**, and it is quoted in the gate row below.
+
+A measurement that had stopped at step 1 would have shipped two defects behind a green
+line.
 
 | REQ | What shipped | How it was confirmed | Confirmed |
 |---|---|---|---|
 | REQ-N01 | Every Notion primitive raises the tool's own failure type, never a bare `HTTPError` | `check_notion_retries_only_what_can_succeed` drives `_call` through a stubbed transport for 401, 429 and 409 and fails the run if anything but `Fail` escapes | **planted** |
 | REQ-N02a | No adapter claims a lease it cannot decide | `check_no_adapter_claims_a_lease_it_cannot_decide` reads `exclusiveLease` off every shipped adapter; fixture `an adapter claims an exclusive lease` sets it true and is caught | **planted** |
-| REQ-N02b | `atomicAppend` and `totalOrderRead` are true of Notion | **not confirmed.** `test/notion_live_test.py` is written and has never run against a workspace | **unverified** |
+| REQ-N02b | `atomicAppend` and `totalOrderRead` are true of Notion | `test/notion_live_test.py` against a live workspace, 2026-08-25: `200 appends from two processes, 200 lines on one page (78s)` and `two reads return one order — totalOrderRead holds` | **observed** |
 | REQ-N03 | The token reaches a header and nothing else | `check_no_credentials` over every published file, plus fixture `init writes the notion token itself`, which plants a value into the env line `init` writes | **planted** |
 | REQ-N04 | 401/403 are never retried; 409, 429 and 529 are, honouring `Retry-After`, five attempts then a loud failure | the same stubbed-transport check asserts the attempt COUNT per status: 1 for a rejected token, 5 for a rate limit and for a write conflict. The fixture needs two edits to plant the defect, and that is the finding: dropping 401 from the auth branch alone still fails on the first attempt — the shipped defect is 401 reaching the retry set | **planted** |
-| REQ-N05 | `tree.ensure` is idempotent against a live workspace | **not confirmed.** Written as the first case of the live measurement | **unverified** |
-| REQ-N06 | Two processes appending 100 lines each leave 200 lines in one agreed order | **not confirmed.** Written as the second case of the live measurement | **unverified** |
+| REQ-N05 | `tree.ensure` is idempotent against a live workspace | same run: `tree.ensure is idempotent — one page for two calls`, with the memo cleared between the two calls so the second is a real lookup | **observed** |
+| REQ-N06 | Two processes appending 100 lines each leave 200 lines in one agreed order | same run, and the case the sharded design actually depends on came with it: `both fresh shards enumerated, 200 lines across them` — Outline's search index did not return a fresh document and cost eight processes eight winners; Notion's structural listing does | **observed** |
 | REQ-N07 | With `atomicAppend` false the coordinator refuses lease authority | `check_no_adapter_claims_a_lease_it_cannot_decide` forces the flag false on every cloud adapter and requires `is_lease_authority` to go false with it — no network needed, which is why it is a suite check and not a live one | **planted** |
 | REQ-N08 | `init --backend notion` writes the three env keys and no value | `check_init_notion_writes_its_env_keys` — asserts each key is present, that the token line is EMPTY, and that the output names `bootstrap` | **planted** |
 | REQ-N09 | `bootstrap` follows the configured backend | `check_bootstrap_follows_the_configured_backend` — on `fs` it must say the backend has no container; on `notion` it must name the Notion credential and never an Outline one | **planted** |
@@ -36,6 +50,9 @@ Until that command prints a PASS against a real workspace, `atomicAppend: true` 
 | REQ-N13 | `--set-baseline` stamps the highest id actually written, under either pattern key | `check_baseline_is_not_poisoned_by_the_next_free_line` builds a register holding DEC-0001…0003 with a `Next free ID` of DEC-0004 under the modern `pattern` key and requires DEC-0003. Reproduced first in `fabric` on 2026-08-25, where the baseline came back `ADR-0011`/`CO-0049` against a tree holding 0010 and 048 | **observed** + **planted** |
 | REQ-N14 | `FsAdapter`'s docstring agrees with `check` about tracking `.agent-sync/` | the line now states the same thing `check` enforces; no fixture, because a comment cannot be asserted against itself | **read** |
 | REQ-N15 | No check hands its environment or working directory to the next one | found by this run: `check_bootstrap_follows_the_configured_backend` passed alone and failed in the suite, because two earlier checks construct `Sync()` in-process and `load_env_file` left `AGENT_SYNC_BACKEND=fs` in `os.environ`, where it OVERRIDES the configured backend. Every check now runs through `_guarded` | **observed** |
+| REQ-N16 | A read that times out is retried, and a retry can SUCCEED | `check_notion_retries_only_what_can_succeed` now drives both halves: attempt counts for 401/429/409, and a planted failure followed by a real answer for a rate limit and a read timeout. The success half had never existed — a retry loop that cannot succeed only fails more slowly. Fixture `notion gives up on a read timeout` plants it back | **observed** + **planted** |
+| REQ-N17 | The measurement measures the protocol's own shape | the contention case is given the page id rather than the title, because two `tree.ensure` calls on one title race into two pages — real, and not a thing this protocol does. Watched failing: run 3 returned `100` lines, `A: 100  B: 0`, both writers exit 0 | **observed** |
+| Gate | The live measurement | `python3 test/notion_live_test.py` → `PASS: notion live measurement — the capability flags are earned`, exit 0, five cases and three pages trashed on the way out | 2026-08-25 |
 | Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.0 — all checks green`, exit 0. `--self-test` → `SELF-TEST PASS: every injected defect was caught (57 fixtures, 8 at a time)`. `python3 test/claim_cell_test.py` → `PASS: claim cell, id registers, lease reaping and orphaned claim tags — 24 cases`. `python3 test/hooks_session_test.py` → `PASS: SessionStart identity — 5 cases` | 2026-08-25 |
 
 
