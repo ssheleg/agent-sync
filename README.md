@@ -7,6 +7,10 @@
 
 **[Docs, and every skill →](https://skills.sshlg.me/)** · [this skill's page](https://skills.sshlg.me/skills/agent-sync/) · [follow @sshlg93 on X](https://x.com/intent/follow?screen_name=sshlg93)
 
+Loads in **DeepSeek Harness** (`dsh`) with **no plugin to write**: it reads the
+Agent Skills standard directly, scanning `~/.agents/skills` — where `npx skills
+add` puts this pack — at rank 500.
+
 **Several coding agents, one repository, no collisions — and each one can see what the
 others are doing.**
 
