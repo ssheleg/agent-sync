@@ -8,6 +8,7 @@ anything that can make the tool report something untrue outranks both.
 
 | ID | Priority | What | Why it is here | Source |
 |---|---|---|---|---|
+| **AS-06** | unverified | **The guard never sees a Bash write.** `hooks.json` matches `Edit\|Write\|MultiEdit\|NotebookEdit` and `Bash(git commit *)`, so a guarded file written with `cat >`, `sed -i` or `tee` reaches disk unchecked — and `GUARD_SHAPES` has no such case, so the suite agrees with the gap. | A project can be described as protected while its most convenient write shape is not. Closing it means matching ALL Bash and parsing a shell command for write targets, which is a decision, not a patch — hence a row rather than a fix. | this run, 2026-08-25; filed in `fabric` as CO-050 |
 
 ## Closed by the verification run of 2026-08-20 — both halves exercised on a real remote
 

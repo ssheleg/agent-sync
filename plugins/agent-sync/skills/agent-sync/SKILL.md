@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.17.0"
+  version: "1.18.0"
   author: ssheleg
 ---
 
@@ -99,22 +99,25 @@ question gets asked and answered, once, and written down.
 **Ask the operator these two things in chat — do not guess, do not pick a default:**
 
 1. **Where should coordination state live?**
-   - a knowledge cloud (`outline`) — the shared record, awareness and board across
-     machines. **It does not decide leases**; nothing in it can (trap 1);
+   - a knowledge cloud — `outline`, hosted or self-hosted, or `notion` — the shared
+     record, awareness and board across machines. **Neither decides leases**; nothing
+     in either can (trap 1);
    - or local files (`fs`) — no credentials, and no visibility to an agent on another
      machine: no shared awareness, no cross-repo signals, no shared board.
 
    The lease is decided separately by `leaseBackend` (trap 2), and **`gated` follows that
    choice, never the record plane**. Report the guarantee you actually have, not the
    stronger one the record plane suggests.
-2. **If cloud: the instance URL.** The URL is configuration, not a secret, so you
-   may write it. The **token is not** — you never ask for it in chat, never read it
-   back, and never place it yourself.
+2. **If cloud: where.** Outline needs its instance URL; Notion needs the id of the page
+   the container goes under. Both are configuration, not secrets, so you may write them.
+   The **token is not** — you never ask for it in chat, never read it back, and never
+   place it yourself.
 
 Then run it with their answers:
 
 ```bash
 python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend outline --url https://<their-instance>
+python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend notion
 python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend fs
 ```
 
@@ -333,6 +336,7 @@ Each file is loaded on its own trigger, not by default.
 | `references/adapter-contract.md` | adding or auditing a knowledge backend — six primitives, the capability flags, an honest degradation path |
 | `references/lease-protocol.md` | changing acquisition, expiry, stealing or id allocation |
 | `references/backend-outline.md` | making any Outline API call, or debugging one |
+| `references/backend-notion.md` | making any Notion API call, or debugging one |
 | `references/backend-fs.md` | running without a cloud backend, or explaining degraded mode |
 | `references/pipeline-binding.md` | wiring `pipeline.json`, or adding a stage hook |
 | `references/hooks.md` | installing, debugging or removing the Claude Code hooks |

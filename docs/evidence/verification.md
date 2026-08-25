@@ -8,6 +8,37 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.0 — a third backend, and the rows it cannot close yet
+
+**Shipped in v1.18.0.** Written before the tag, the only order that works.
+
+Three rows below say **unverified**, and they are the three that matter most: the
+capability flags. `references/adapter-contract.md` calls declaring them without a
+server-side append "the most damaging lie an adapter can tell", and this tree has run
+`test/notion_live_test.py` exactly as far as its own guard:
+`SKIP: notion live measurement — AGENT_SYNC_NOTION_TOKEN and AGENT_SYNC_NOTION_COLLECTION are not both set.`
+Until that command prints a PASS against a real workspace, `atomicAppend: true` in
+`NotionAdapter` is a reading of Notion's documentation and nothing more.
+
+| REQ | What shipped | How it was confirmed | Confirmed |
+|---|---|---|---|
+| REQ-N01 | Every Notion primitive raises the tool's own failure type, never a bare `HTTPError` | `check_notion_retries_only_what_can_succeed` drives `_call` through a stubbed transport for 401, 429 and 409 and fails the run if anything but `Fail` escapes | **planted** |
+| REQ-N02a | No adapter claims a lease it cannot decide | `check_no_adapter_claims_a_lease_it_cannot_decide` reads `exclusiveLease` off every shipped adapter; fixture `an adapter claims an exclusive lease` sets it true and is caught | **planted** |
+| REQ-N02b | `atomicAppend` and `totalOrderRead` are true of Notion | **not confirmed.** `test/notion_live_test.py` is written and has never run against a workspace | **unverified** |
+| REQ-N03 | The token reaches a header and nothing else | `check_no_credentials` over every published file, plus fixture `init writes the notion token itself`, which plants a value into the env line `init` writes | **planted** |
+| REQ-N04 | 401/403 are never retried; 409, 429 and 529 are, honouring `Retry-After`, five attempts then a loud failure | the same stubbed-transport check asserts the attempt COUNT per status: 1 for a rejected token, 5 for a rate limit and for a write conflict. The fixture needs two edits to plant the defect, and that is the finding: dropping 401 from the auth branch alone still fails on the first attempt — the shipped defect is 401 reaching the retry set | **planted** |
+| REQ-N05 | `tree.ensure` is idempotent against a live workspace | **not confirmed.** Written as the first case of the live measurement | **unverified** |
+| REQ-N06 | Two processes appending 100 lines each leave 200 lines in one agreed order | **not confirmed.** Written as the second case of the live measurement | **unverified** |
+| REQ-N07 | With `atomicAppend` false the coordinator refuses lease authority | `check_no_adapter_claims_a_lease_it_cannot_decide` forces the flag false on every cloud adapter and requires `is_lease_authority` to go false with it — no network needed, which is why it is a suite check and not a live one | **planted** |
+| REQ-N08 | `init --backend notion` writes the three env keys and no value | `check_init_notion_writes_its_env_keys` — asserts each key is present, that the token line is EMPTY, and that the output names `bootstrap` | **planted** |
+| REQ-N09 | `bootstrap` follows the configured backend | `check_bootstrap_follows_the_configured_backend` — on `fs` it must say the backend has no container; on `notion` it must name the Notion credential and never an Outline one | **planted** |
+| REQ-N10 | One list of backends across `init`, `check` and `bootstrap` | `check_check_accepts_every_shipped_backend` loops `BACKENDS`, runs `init` then `check` for each; fixture `check keeps its own backend list` restores the hardcoded pair and is caught | **planted** |
+| REQ-N13 | `--set-baseline` stamps the highest id actually written, under either pattern key | `check_baseline_is_not_poisoned_by_the_next_free_line` builds a register holding DEC-0001…0003 with a `Next free ID` of DEC-0004 under the modern `pattern` key and requires DEC-0003. Reproduced first in `fabric` on 2026-08-25, where the baseline came back `ADR-0011`/`CO-0049` against a tree holding 0010 and 048 | **observed** + **planted** |
+| REQ-N14 | `FsAdapter`'s docstring agrees with `check` about tracking `.agent-sync/` | the line now states the same thing `check` enforces; no fixture, because a comment cannot be asserted against itself | **read** |
+| REQ-N15 | No check hands its environment or working directory to the next one | found by this run: `check_bootstrap_follows_the_configured_backend` passed alone and failed in the suite, because two earlier checks construct `Sync()` in-process and `load_env_file` left `AGENT_SYNC_BACKEND=fs` in `os.environ`, where it OVERRIDES the configured backend. Every check now runs through `_guarded` | **observed** |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.0 — all checks green`, exit 0. `--self-test` → `SELF-TEST PASS: every injected defect was caught (57 fixtures, 8 at a time)`. `python3 test/claim_cell_test.py` → `PASS: claim cell, id registers, lease reaping and orphaned claim tags — 24 cases`. `python3 test/hooks_session_test.py` → `PASS: SessionStart identity — 5 cases` | 2026-08-25 |
+
+
 ## v1.17.0 — the fallback that was the only path
 
 **Shipped in v1.17.0.** Written before the tag, the only order that works.

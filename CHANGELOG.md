@@ -1,3 +1,50 @@
+## v1.18.0 — a third backend, and two people who can finally see each other
+
+`fs` keeps the record on one machine and `outline` costs $10 a month for a team; between
+them sat the case this release is for — **two people, two machines, one plane, nothing to
+pay**. `notion` is that plane. The container is a page, every log is a child page of it,
+and every line is one paragraph block appended by `PATCH /v1/blocks/{id}/children`, which
+is a server-side append with no read-modify-write anywhere in the class.
+
+**The capability flags are earned, not declared.** `test/notion_live_test.py` appends 100
+lines from each of two PROCESSES and asserts the page ends with 200 in an order two
+independent reads agree on, calls `tree.ensure` twice and asserts one page, and forces
+`atomicAppend: false` to watch the coordinator refuse lease authority. It needs credentials
+and a network, so it is deliberately outside `npm test` and **says SKIP loudly** rather than
+passing quietly where it cannot run. `exclusiveLease` stays false and no measurement can
+move it: Notion has no compare-and-swap, and the endpoint's own `conflict_error` is a retry
+hint rather than an arbiter.
+
+**One registry of backends, because three copies of a two-item list is how a backend comes
+to half-exist.** `CLOUD_ADAPTERS` is the single home; `init`'s argument parser, `check`'s
+known-adapter test and `bootstrap`'s dispatch all read it. `bootstrap` used to build an
+Outline collection whatever the project was configured for — on an `fs` project it demanded
+Outline credentials for a backend that has no container at all. `check`'s credential test
+now asks the adapter (`REQUIRED_ENV`, `preflight()`) instead of naming Outline's variables
+in an `if`, and the Notion preflight is a real call — `GET /v1/users/me` — because "knowledge
+base reachable" printed after a function that only parsed a string is the defect class this
+suite exists to refuse.
+
+**B-34's other half.** `_allocated_ids` still read `nextFreeIdPattern` directly while
+`id_pattern()` beside it accepted both keys, so a config written with the modern `pattern`
+key never discarded its own *Next free ID* line: `--set-baseline` stamped one above reality,
+and every id at the true top read as pre-baseline and was never asked for an as-built
+record. Reproduced in `fabric` on 2026-08-25, fixed here, fixture plants it back.
+
+**`FsAdapter`'s docstring said its files are "committed and pushed"** while `check` reports a
+tracked `.agent-sync/` as a problem — a committed run id hands one checkout's identity to
+every clone. The check was right; the line now says so.
+
+**And a defect in the suite itself.** `Sync()` calls `load_env_file`, which writes the
+project's variables into `os.environ` — correct for the CLI, a leak in-process. Two checks
+built temporary `fs` projects and left `AGENT_SYNC_BACKEND=fs` behind, and that variable
+OVERRIDES the configured backend, so the next check to depend on it silently read the
+previous check's project. The new dispatch check passed alone and failed in the suite, which
+is the signature of this class rather than of the code under test. Every check now runs
+through `_guarded`, which restores the environment and the working directory after it.
+
+Five checks, five planted defects: 51 → 56 fixtures.
+
 ## v1.17.0 — the identity that had never once been established
 
 `_session_key()` falls back to one `shared` entry per checkout when it cannot tell which
