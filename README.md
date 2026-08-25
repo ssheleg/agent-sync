@@ -3,9 +3,9 @@
 [![CI](https://github.com/ssheleg/agent-sync/actions/workflows/validate.yml/badge.svg)](https://github.com/ssheleg/agent-sync/actions/workflows/validate.yml)
 [![npm](https://img.shields.io/npm/v/%40ssheleg%2Fagent-sync)](https://www.npmjs.com/package/@ssheleg/agent-sync)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![site](https://img.shields.io/badge/docs-ssheleg.github.io-8ab0ff)](https://ssheleg.github.io/sshlg-skills/skills/agent-sync/)
+[![site](https://img.shields.io/badge/docs-skills.sshlg.me-8ab0ff)](https://skills.sshlg.me/skills/agent-sync/)
 
-**[Docs, and all 8 skills →](https://ssheleg.github.io/sshlg-skills/)** · [this skill's page](https://ssheleg.github.io/sshlg-skills/skills/agent-sync/) · [follow @sshlg93 on X](https://x.com/intent/follow?screen_name=sshlg93)
+**[Docs, and all 8 skills →](https://skills.sshlg.me/)** · [this skill's page](https://skills.sshlg.me/skills/agent-sync/) · [follow @sshlg93 on X](https://x.com/intent/follow?screen_name=sshlg93)
 
 **Several coding agents, one repository, no collisions — and each one can see what the
 others are doing.**
