@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.18.2"
+  version: "1.18.3"
   author: ssheleg
 ---
 

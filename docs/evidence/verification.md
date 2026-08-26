@@ -8,6 +8,16 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.3 — the shared seam is explicit
+
+**Release candidate v1.18.3.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| REQ-P05 | Both shared validator headers explicitly declare that this repository has no divergence from the umbrella mechanism | the umbrella structural validator requires `# diverges:` beside every `# shared-mechanism:` declaration | **observed** |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.3 — all checks green`, exit 0 | 2026-08-26 |
+
+
 ## v1.18.2 — the shared guards name their canon
 
 **Release candidate v1.18.2.** This section was written before the tag.
