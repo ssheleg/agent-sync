@@ -1,3 +1,13 @@
+## v1.18.1 — the coordination skill publishes its own trust surface
+
+A root skill card now states the credential, backend and enforcement boundaries.
+Portable trigger and behavioral evals cover leases, id reservation and the
+submodule finish protocol, while recording no model score that was not run. The
+README's first viewport is installable, CI adds the pinned house audit and eval
+plant, and the generated social preview is committed at 1200×630.
+The open Bash-guard gap is now `AS-09`, removing its collision with the already
+closed token-budget row `AS-06`.
+
 ## v1.18.0 — a third backend, and two people who can finally see each other
 
 `fs` keeps the record on one machine and `outline` costs $10 a month for a team; between

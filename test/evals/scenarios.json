@@ -1,0 +1,51 @@
+{
+  "note": "Score each expected_behavior line independently. These are authored evaluations, not executed results.",
+  "scenarios": [
+    {
+      "id": "s01",
+      "title": "Concurrent claim",
+      "skills": [
+        "agent-sync"
+      ],
+      "query": "Two agents need to work from separate sessions on the same roadmap. Establish coordination before either edits a guarded registry.",
+      "files": [],
+      "expected_behavior": [
+        "Checks for project configuration before claiming enforcement",
+        "Uses distinct session identities",
+        "Acquires a scoped lease before the guarded edit",
+        "States TTL and the release path, including failure"
+      ]
+    },
+    {
+      "id": "s02",
+      "title": "Race-free id reservation",
+      "skills": [
+        "agent-sync"
+      ],
+      "query": "Two sessions will append decisions at the same time. Give each a unique id without scanning and incrementing locally.",
+      "files": [],
+      "expected_behavior": [
+        "Uses the reservation mechanism instead of local max-plus-one",
+        "Journals the run that reserved the id",
+        "Reads back the durable append before acting on it",
+        "Does not put credentials in argv or logs"
+      ]
+    },
+    {
+      "id": "s03",
+      "title": "Submodule completion",
+      "skills": [
+        "agent-sync"
+      ],
+      "query": "The member repository is committed, pushed and green, but the umbrella still points to the previous commit. Finish the coordinated work.",
+      "files": [],
+      "expected_behavior": [
+        "Identifies the parent pointer as unfinished work",
+        "Verifies the member commit is reachable upstream",
+        "Updates and verifies the parent pointer",
+        "Releases the held claim and reports residue"
+      ]
+    }
+  ]
+}
+

@@ -5,6 +5,16 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![site](https://img.shields.io/badge/docs-skills.sshlg.me-8ab0ff)](https://skills.sshlg.me/skills/agent-sync/)
 
+**Coordinate concurrent coding agents with expiring claims, race-free ids and a durable run journal.**
+
+```bash
+npx skills add ssheleg/agent-sync
+```
+
+Ask: `Set up leases before three agents edit this repository.`
+
+**[Detailed docs →](https://skills.sshlg.me/skills/agent-sync/)**
+
 **[Docs, and every skill →](https://skills.sshlg.me/)** · [this skill's page](https://skills.sshlg.me/skills/agent-sync/) · [follow @sshlg93 on X](https://x.com/intent/follow?screen_name=sshlg93)
 
 Loads in **DeepSeek Harness** (`dsh`) with **no plugin to write**: it reads the

@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.18.0"
+  version: "1.18.1"
   author: ssheleg
 ---
 
@@ -324,7 +324,7 @@ the parent; a service repo listing the parent's decision register is a config de
 - Credentials never reach `argv`, a log line, or the repository.
 - Degrade out loud. `ungated` is an acceptable state; a false claim of enforcement is not.
 - Two agents in one checkout are two identities, or the lease is decoration.
-- A submodule commit is unfinished until the parent points at it — `finish` before you call it done.
+- A submodule commit is unfinished until the parent points at it — run `finish`.
 - Everything the cloud holds about a durable fact is a link to git, never a substitute.
 
 ## References

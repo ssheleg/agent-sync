@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.1 — the public contract is visible before installation
+
+**Release candidate v1.18.1.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| REQ-P01 | A root skill card states the boundary, trust model, distribution paths, and known limits | `SKILL-CARD.md`; `python3 test/validate.py` resolves the repository contract | **test-only** |
+| REQ-P02 | Trigger and scenario eval fixtures are machine-readable without claiming a model score | `python3 test/evals_validate.py` and `python3 test/evals_validate.py --self-test` | **planted** |
+| REQ-P03 | The committed social card has the public 1200×630 contract | `python3 test/social_preview.py` | **test-only** |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.1 — all checks green`, exit 0 | 2026-08-26 |
+
+
 ## v1.18.0 — a third backend, and the rows it cannot close yet
 
 **Shipped in v1.18.0.** Written before the tag, the only order that works.
