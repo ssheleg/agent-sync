@@ -8,6 +8,16 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.2 — the shared guards name their canon
+
+**Release candidate v1.18.2.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| REQ-P04 | Both copied public-contract validators declare an umbrella-owned shared mechanism | the umbrella structural validator reads every member and refuses a repeated mechanism with no `# shared-mechanism:` header | **observed** |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.2 — all checks green`, exit 0 | 2026-08-26 |
+
+
 ## v1.18.1 — the public contract is visible before installation
 
 **Release candidate v1.18.1.** This section was written before the tag.
