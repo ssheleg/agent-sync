@@ -4,6 +4,7 @@
 [![npm](https://img.shields.io/npm/v/%40ssheleg%2Fagent-sync)](https://www.npmjs.com/package/@ssheleg/agent-sync)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![site](https://img.shields.io/badge/docs-skills.sshlg.me-8ab0ff)](https://skills.sshlg.me/skills/agent-sync/)
+[![skills.sh](https://skills.sh/b/ssheleg/agent-sync)](https://skills.sh/ssheleg/agent-sync)
 
 **Coordinate concurrent coding agents with expiring claims, race-free ids and a durable run journal.**
 
