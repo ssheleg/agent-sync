@@ -8,6 +8,16 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.4 — the badge and the homepage reach npm
+
+**Release candidate v1.18.4.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| REQ-P06 | The `skills.sh` badge and the canonical `homepage` reach the package page, not only `main` | npm serves README and metadata from the last **publish**; both landed on `main` in the previous cycle and the published package still showed a badge-less README and a GitHub homepage. Re-read from the registry after this release | **observed** |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.4 — all checks green`, exit 0 | 2026-08-27 |
+
+
 ## v1.18.3 — the shared seam is explicit
 
 **Release candidate v1.18.3.** This section was written before the tag.
