@@ -1,3 +1,45 @@
+## v1.18.5 — a pipe reaches the guard, and the installers stop deleting blind
+
+Two enforcement holes, each of the same shape: a mechanism whose own text claimed more
+than its code did.
+
+- **ASY-05 — a piped commit bypassed the lease guard entirely.** `guard.sh`'s tokenizer
+  said "each `&&`/`;`/`|` segment is its own command" and consumed only `&&`, `;` and
+  `||` — so `echo msg | git commit -F -`, the ordinary way to commit a generated
+  message, was one segment whose first token is `echo`, and the whole pipeline skipped
+  the guard. The single pipe and `|&` are now consumed (ordered after `||`, or each
+  would shatter into stray halves), three new `GUARD_SHAPES` cover the bypass and the
+  pipe that must NOT block (`git log | grep commit`), and the self-test plants the
+  shipped tokenizer back (`a piped commit slips past the guard`). Watched failing
+  against the pre-fix guard: both piped shapes reached a guarded file with exit 0.
+- **The installers consulted nothing before deleting the Claude Code channel.** This
+  member's installers never write `~/.claude/skills/agent-sync` themselves — the skills
+  CLI they drive recreates it — and both deleted that copy unconditionally afterwards.
+  The family canon this implements (make-skill v0.25.0, distribution.md §3) names the
+  fail-open class, and here it ran in mirror image: on a home where the plugin is NOT
+  installed — no claude CLI, or the plugin install failed — the prune destroyed the only
+  Claude Code channel the very same run had just installed, and exited 0. The fate of
+  the copy is now a decision read from the target home's
+  `~/.claude/plugins/installed_plugins.json` (the record of what is installed; plugin
+  and marketplace names differ, so the spec is taken from the JSON), with the
+  `marketplaces/<name>` dir kept only as the fallback signal: plugin present → the
+  shadow is pruned and the message names the real spec, the plugin-channel remedy and
+  the family launcher; no plugin → the copy is kept, because it IS the Claude Code
+  channel; `--force` → kept beside the plugin, as the recorded choice to run two
+  channels where the stale one wins. Absent or corrupt JSON reads as "no plugin" — fail
+  open, never crash. Only the Claude Code channel is gated; other agents' installs are
+  untouched.
+- **The install now says how the next version arrives** — `npx @ssheleg/agent-sync@latest
+  update`, or the family launcher — because an installer that never mentions updates has
+  still chosen an update model: never.
+- `test/installer_test.js`: 11 cases against throwaway HOMEs with the delegated CLIs
+  stubbed through PATH — plugin-present prune with the spec from the JSON, a
+  differently-named marketplace, `--force`, corrupt JSON, a prefix-collider
+  (`agent-sync-extra@x`), the marketplaces-dir fallback, the update path, and the
+  install.sh mirrors. Ten of eleven watched failing against the pre-fix installers.
+  Wired into `npm test` and CI; `hooks_session_test.py` — already in `npm test` —
+  joins CI in the same step block.
+
 ## v1.18.4 — the channel that sends the installs, on npm too
 
 - The `skills.sh` badge and the canonical `homepage` reached GitHub in the previous cycle and stopped
