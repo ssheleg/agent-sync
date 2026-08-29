@@ -25,6 +25,12 @@ jobs:
       - name: Claim cell and id registers (6 cases, 4 of them watched failing)
         run: python3 test/claim_cell_test.py
 
+      - name: SessionStart identity (the real hook, as a process)
+        run: python3 test/hooks_session_test.py
+
+      - name: Installers settle the Claude channel (11 cases, 10 watched failing pre-fix)
+        run: node test/installer_test.js
+
       - name: Validator must still be able to fail
         run: python3 test/validate.py --self-test
 
