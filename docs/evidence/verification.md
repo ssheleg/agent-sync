@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.5 — a pipe reaches the guard, and the installers stop deleting blind
+
+**Release candidate v1.18.5.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| ASY-05 | `guard.sh` consumes the single pipe and `|&`, so `echo msg \| git commit -F -` is guarded | Watched failing first: with the fix stashed, the new `GUARD_SHAPES` rows printed `guard shapes: \`echo msg \| git commit -F -\` reached a guarded file with no lease (exit 0)` and the same for `\|&`, validator exit 1; with the fix, all shapes green. Self-test plant `a piped commit slips past the guard` restores the shipped tokenizer and is detected | 2026-08-29 |
+| REQ-I01 | The installers settle `~/.claude/skills/agent-sync` against the target home's `installed_plugins.json` instead of deleting it blind (make-skill v0.25.0 canon, distribution.md §3, adapted to the delegating shape) | `node test/installer_test.js` — 11 cases against throwaway HOMEs, delegated CLIs stubbed through PATH; 10 of 11 watched failing against the pre-fix installers (`git stash push -- bin/agent-sync.js install.sh`), all 11 green after. In `npm test` and in CI | 2026-08-29 |
+| REQ-I02 | The success path names how the next version arrives | asserted in the fresh-HOME case: `sshlg-skills@latest update` and `@ssheleg/agent-sync@latest update` both present in the install output | 2026-08-29 |
+| Gate | The whole suite, on this tree | `python3 test/validate.py` → `PASS: agent-sync v1.18.5 — all checks green`, exit 0 | 2026-08-29 |
+
+
 ## v1.18.4 — the badge and the homepage reach npm
 
 **Release candidate v1.18.4.** This section was written before the tag.

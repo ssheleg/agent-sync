@@ -11,6 +11,7 @@
 | 2026-08-20 | `77deede` | AS-01a: the git plane is swept, not only disclosed |
 | 2026-08-20 | `019867b` | AS-01b: an ambiguous lock became clearable by a person, and 28 were cleared |
 | 2026-08-25 | *(this run)* | AS-05: the Notion backend, measured four times before it said anything true — 1.18.0 |
+| 2026-08-29 | *(this run)* | ASY-05: the pipe the guard's comment claimed and never consumed; installers settle the Claude channel instead of deleting it blind — 1.18.5 |
 
 ## Standing instructions
 
