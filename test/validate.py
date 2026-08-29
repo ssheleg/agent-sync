@@ -1907,6 +1907,17 @@ GUARD_SHAPES = [
      '{"tool_name":"Bash","tool_input":{"command":"cd %(dir)s && git commit -m wip"}}', True),
     ("git log --grep=commit",
      '{"tool_name":"Bash","tool_input":{"command":"git log --grep=commit"}}', False),
+    # ASY-05: the tokenizer's own comment claimed `|` while only `||` was consumed, so a
+    # commit fed through a pipe was one segment starting with `echo` and skipped the
+    # guard entirely. A pipe is the ordinary way to commit a generated message.
+    ("echo msg | git commit -F -",
+     '{"tool_name":"Bash","tool_input":{"command":"echo msg | git commit -F -"}}', True),
+    ("echo msg |& git commit -F -",
+     '{"tool_name":"Bash","tool_input":{"command":"echo msg |& git commit -F -"}}', True),
+    # And the pipe that is NOT a commit must stay unblocked, or the fix trades a bypass
+    # for a guard that refuses ordinary reads.
+    ("git log | grep commit",
+     '{"tool_name":"Bash","tool_input":{"command":"git log | grep commit"}}', False),
     ("malformed input", "not json at all", False),
 ]
 
@@ -3242,6 +3253,15 @@ def self_test() -> int:
             "plugins/agent-sync/hooks/guard.sh",
             lambda t: t.replace('if k < len(toks) and toks[k] == "commit":',
                                 'if k < len(toks) and toks[k] == "kommit":')),
+        # ASY-05 planted back exactly as it shipped: the comment kept claiming `|` while
+        # the chain consumed only `||`, so `echo msg | git commit -F -` was one segment
+        # and never guarded. Anchored on the replace chain, the value the check drives.
+        "a piped commit slips past the guard": (
+            "plugins/agent-sync/hooks/guard.sh",
+            lambda t: t.replace(
+                'cmd.replace("&&", "\\n").replace("||", "\\n").replace("|&", "\\n")'
+                '.replace(";", "\\n").replace("|", "\\n")',
+                'cmd.replace("&&", "\\n").replace(";", "\\n").replace("||", "\\n")')),
         # merge back to releasing everything the run holds.
         "merge releases leases it did not land": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",

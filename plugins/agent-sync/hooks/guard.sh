@@ -38,8 +38,12 @@ except Exception:
     print("0 ."); sys.exit(0)
 cmd = (d.get("tool_input") or {}).get("command", "")
 is_commit, repo = 0, "."
-# Each &&/;/| segment is its own command; a commit anywhere in the chain counts.
-for seg in cmd.replace("&&", "\n").replace(";", "\n").replace("||", "\n").split("\n"):
+# Each &&/;/||/|&/| segment is its own command; a commit anywhere in the chain counts.
+# The single pipe was CLAIMED by this comment and never consumed (ASY-05, fixed 2026-08-29):
+# only "||" was replaced, so `echo msg | git commit -F -` stayed one segment whose first
+# token is `echo`, and the whole pipeline skipped the guard. Order matters: "||" and "|&"
+# must be consumed before the bare "|", or each would be split into a stray half.
+for seg in cmd.replace("&&", "\n").replace("||", "\n").replace("|&", "\n").replace(";", "\n").replace("|", "\n").split("\n"):
     try:
         toks = shlex.split(seg)
     except ValueError:
