@@ -8,6 +8,21 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.6 — the guard keeps its own header's promise
+
+**Release candidate v1.18.6.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| ASY-07 | `guard.sh` exits 2 with a named remedy when its parser cannot run — a PATH without python3 no longer fails open | Watched failing first: `check_guard_fails_closed_without_python3` against the shipped guard printed `python3 absent: the guard exited 0 — anything but 2 is non-blocking…`, validator exit 1; green after `parser_or_die` on both substitutions. Self-test plant `an absent interpreter fails open` neuters the check inside `parser_or_die` and is detected (60 fixtures, all caught) | 2026-08-30 |
+| ASY-08 | SessionStart matcher is `startup\|resume\|clear`; `compact` excluded deliberately | Watched failing first: `hooks_session_test.py` case `a cleared session is stamped as a new identity` printed `matcher ['startup\|resume'] misses ['clear']`; green after. The case also drives the real hook with a `source: clear` payload and asserts the stamp is REPLACED | 2026-08-30 |
+| ASY-06 | The guard's internal-failure refusal names its next step (`check`, or acquire a lease) | Read in the diff; the message is the one branch not reachable without breaking `agent_sync.py` mid-run — remedy text asserted by no gate, stated as such | 2026-08-30 |
+| ASY-01 | Hooks export `PYTHONDONTWRITEBYTECODE=1` (`_lib.sh`, sourced by all four); importing tests set `sys.dont_write_bytecode` | `rm -rf scripts/__pycache__`, then full `npm test` — the directory does not return (`test -e` fails after the run) | 2026-08-30 |
+| ASY-04 | `hooks_session_test.py` runs in CI, not only in `npm test` | Already shipped in v1.18.5: `validate.yml:28-29`, added by commit `5446990` (2026-08-29) — the audit predates the fix. Verified present and green in this tree, nothing re-done | 2026-08-30 |
+| ASY-05 | Regression coverage for the piped-commit bypass is present and green | `GUARD_SHAPES` rows `echo msg \| git commit -F -`, `\|&`, and the must-not-block `git log \| grep commit` all pass in `check_guard_covers_every_write_shape`; self-test plant `a piped commit slips past the guard`: detected | 2026-08-30 |
+| Gate | The whole suite, on this tree | `npm test` → validator `PASS: agent-sync v1.18.6 — all checks green`, self-test 60/60 detected, claim-cell, SessionStart identity 6 cases, installer 11 cases | 2026-08-30 |
+
+
 ## v1.18.5 — a pipe reaches the guard, and the installers stop deleting blind
 
 **Release candidate v1.18.5.** This section was written before the tag.
