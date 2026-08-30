@@ -4,6 +4,12 @@
 
 Written by `agent_sync.py merge`. Entries newer than 7 days keep their detail; older ones are compacted to one line each on the next write. Read it before starting work: it is the shortest answer to *what landed while I was on my branch*.
 
+### 2026-08-30T15:04:58Z · `ASY-W2` · asy-wave2-guard-fail-closed → main · `4b3022d`
+- run: r-f31d90ddb
+- files: 16 (16 files changed, 206 insertions(+), 9 deletions(-))
+- conflicts: none
+- summary: v1.18.6: the guard fails closed without python3 (ASY-07), /clear re-stamps identity (ASY-08), refusal names its remedy (ASY-06), bytecode stays out of scripts/ (ASY-01)
+
 ### 2026-08-29T21:31:37Z · `ASY-05` · asy-05-wave15-installer → main · `587ef45`
 - run: r-f31d90ddb
 - files: 14 (14 files changed, 517 insertions(+), 25 deletions(-))
