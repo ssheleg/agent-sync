@@ -1,3 +1,40 @@
+## v1.18.6 — the guard keeps its own header's promise, and /clear gets its own identity
+
+Wave-2 hardening from the 2026-08-29 family audit (ASY-07, ASY-08, ASY-06, ASY-01).
+Same shape as v1.18.5: text that claimed more than the code did.
+
+- **ASY-07 — a machine without python3 had no guard, and said nothing.** `guard.sh`'s
+  header promises that every internal failure exits 2, because any other outcome is
+  non-blocking in Claude Code — and the python3-absent path broke it: both parser
+  substitutions failed under `2>/dev/null`, `path` came back empty, `is_commit`
+  defaulted to 0 and the hook exited 0. Fail OPEN, exactly where the header says it
+  must not, and nothing upstream compensates — hooks.json's `if` filter is best-effort
+  by doctrine, so the parser IS the guard. Both substitutions now report through
+  `parser_or_die`, which exits 2 and names the remedy (install python3 / fix PATH, or
+  remove `.claude/agent-sync.json` to switch coordination off).
+  `check_guard_fails_closed_without_python3` drives the real hook through a shim PATH
+  holding bash and cat but no interpreter — watched failing against the shipped guard
+  (`the guard exited 0`) — and the self-test plants the fail-open back
+  (`an absent interpreter fails open`).
+- **ASY-08 — a post-/clear session inherited the ended run's identity.** The
+  SessionStart matcher read `startup|resume`, and `/clear` ends the run while keeping
+  the CLI process — so the stamp keyed by that process survived into the next session:
+  "two sessions, one identity", the case SKILL.md itself names, and `release` then
+  takes a lease the caller never had. The matcher now carries `clear`; `compact` stays
+  excluded deliberately, because a compaction continues the SAME session.
+  `hooks_session_test.py` gained the case (matcher parts asserted both directions, and
+  the hook re-stamps on a clear payload) — watched failing against the shipped matcher.
+- **ASY-06 — the guard's internal-failure refusal named no next step.** A refusal with
+  no remedy is how an operator learns to switch a hook off. The message now says:
+  diagnose with `python3 <script> check`, or acquire a lease first.
+- **ASY-01 — `scripts/__pycache__` regenerated forever.** Hooks now export
+  `PYTHONDONTWRITEBYTECODE=1` in `_lib.sh` (sourced by all four), and the test files
+  that import `agent_sync.py` set `sys.dont_write_bytecode` — the shipped `scripts/`
+  directory stays source, not build products.
+- ASY-04 (this test class missing from CI) was already closed in v1.18.5:
+  `validate.yml` runs `hooks_session_test.py` since commit `5446990`. Verified, not
+  re-done. ASY-02 (command rename) closed by operator decision 2026-08-30: names stay.
+
 ## v1.18.5 — a pipe reaches the guard, and the installers stop deleting blind
 
 Two enforcement holes, each of the same shape: a mechanism whose own text claimed more

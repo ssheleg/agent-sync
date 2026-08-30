@@ -12,6 +12,7 @@
 | 2026-08-20 | `019867b` | AS-01b: an ambiguous lock became clearable by a person, and 28 were cleared |
 | 2026-08-25 | *(this run)* | AS-05: the Notion backend, measured four times before it said anything true — 1.18.0 |
 | 2026-08-29 | *(this run)* | ASY-05: the pipe the guard's comment claimed and never consumed; installers settle the Claude channel instead of deleting it blind — 1.18.5 |
+| 2026-08-30 | *(this run)* | Wave 2: ASY-07 fail-closed without python3, ASY-08 `clear` in the matcher, ASY-06 remedy, ASY-01 bytecode; ASY-04 found already shipped in 1.18.5 — 1.18.6 |
 
 ## Standing instructions
 
