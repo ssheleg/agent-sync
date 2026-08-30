@@ -42,6 +42,10 @@ import sys
 import time
 from pathlib import Path
 
+# The importlib load below compiles bytecode into the shipped scripts/ directory;
+# a test run must not leave build products in a tree people read as source (ASY-01).
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py"
 LINES = 100
