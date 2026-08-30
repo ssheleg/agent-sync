@@ -29,6 +29,10 @@ import sys
 import tempfile
 import time
 
+# The `import agent_sync` below compiles bytecode into the shipped scripts/ directory;
+# a test run must not leave build products in a tree people read as source (ASY-01).
+sys.dont_write_bytecode = True
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, os.pardir, "plugins", "agent-sync", "skills", "agent-sync",
                       "scripts", "agent_sync.py")

@@ -8,6 +8,17 @@ S="$AGENT_SYNC_PY"
 agent_sync_configured || exit 0
 input=$(cat)
 
+# The parser IS the guard: hooks.json's `if` filter is best-effort and fails open by
+# doctrine, so nothing upstream compensates for a parser that cannot run. A python3
+# missing from PATH used to leave `path` empty, default `is_commit` to 0 and exit 0 —
+# the one machine state that disables the parser silently disabled the guard (ASY-07).
+parser_or_die() {
+  local rc="$1"
+  [ "$rc" -eq 0 ] && return 0
+  echo "agent-sync: the guard could not run its parser (python3 exit $rc — likely missing from PATH). Failing closed. Install python3 or fix PATH and retry, or remove .claude/agent-sync.json to switch coordination off here." >&2
+  exit 2
+}
+
 path=$(python3 -c '
 import json,sys
 try:
@@ -17,6 +28,7 @@ except Exception:
 ti=d.get("tool_input") or {}
 print(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
 ' <<<"$input" 2>/dev/null)
+parser_or_die $?
 
 # git commit: check every staged path instead of a single file argument.
 if [ -z "$path" ]; then
@@ -30,7 +42,7 @@ if [ -z "$path" ]; then
   #
   # Tokenised in python rather than globbed in shell: `git log --grep=commit` must not match, and
   # `git -c user.name=x -C dir commit` must.
-  read -r is_commit repo <<<"$(python3 -c '
+  parsed=$(python3 -c '
 import json, shlex, sys
 try:
     d = json.load(sys.stdin)
@@ -71,7 +83,9 @@ for seg in cmd.replace("&&", "\n").replace("||", "\n").replace("|&", "\n").repla
             repo = r
         break
 print(is_commit, repo)
-' <<<"$input" 2>/dev/null)"
+' <<<"$input" 2>/dev/null)
+  parser_or_die $?
+  read -r is_commit repo <<<"$parsed"
   [ -n "${is_commit:-}" ] || is_commit=0
   [ -n "${repo:-}" ] || repo="."
   [ -d "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -100,6 +114,6 @@ else
     echo "$out" >&2
     exit 2
   fi
-  echo "agent-sync guard failed to run ($code): $out" >&2
+  echo "agent-sync guard failed to run ($code): $out — diagnose with \`python3 $S check\`, or acquire a lease first: \`python3 $S acquire <TASK-ID>\`" >&2
   exit 2
 fi

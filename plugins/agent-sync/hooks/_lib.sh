@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Shared helpers for the agent-sync hooks. Sourced, never executed.
 
+# Every hook runs python3 against the shipped scripts/ directory, which people read
+# as source, not as a build product. Bytecode caching buys nothing at this call rate
+# and left scripts/__pycache__ regenerating forever (ASY-01).
+export PYTHONDONTWRITEBYTECODE=1
+
 # Run a command under a time limit, portably.
 #
 # `timeout` is GNU coreutils and is NOT on a stock macOS. Calling it directly made

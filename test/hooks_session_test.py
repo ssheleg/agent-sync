@@ -25,6 +25,10 @@ import tempfile
 import shutil
 import importlib.util
 
+# The module import below compiles bytecode into the shipped scripts/ directory;
+# a test run must not leave build products in a tree people read as source (ASY-01).
+sys.dont_write_bytecode = True
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 PLUGIN = os.path.join(REPO, "plugins", "agent-sync")
@@ -149,6 +153,47 @@ def a_non_json_payload_does_not_break_the_hook():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def a_cleared_session_is_stamped_as_a_new_identity():
+    """`/clear` ends the run but keeps the CLI process, so the stamp keyed by that
+    process survives into the next session. Without `clear` in the SessionStart
+    matcher the hook never re-runs there and the new session inherits the ended run's
+    identity — "two sessions, one identity", the exact case SKILL.md names, and
+    `release` then takes a lease the caller never had (ASY-08).
+
+    `compact` stays excluded on purpose: a compaction continues the SAME session,
+    and re-stamping it would only churn the marker it already has.
+    """
+    with open(os.path.join(PLUGIN, "hooks", "hooks.json")) as fh:
+        entries = json.load(fh)["hooks"]["SessionStart"]
+    matchers = [e.get("matcher", "") for e in entries]
+    parts = {p for m in matchers for p in m.split("|")}
+    missing = {"startup", "resume", "clear"} - parts
+    assert not missing, (
+        "SessionStart matcher %r misses %r — a post-/clear session keeps the ended "
+        "run's stamp, acquiring and releasing as a run that no longer exists"
+        % (matchers, sorted(missing)))
+    assert "compact" not in parts, (
+        "SessionStart matcher %r includes `compact` — a compaction continues the same "
+        "session; its exclusion is a decision, not an omission" % matchers)
+
+    # And the hook itself must RE-stamp on that event: the fresh id must replace the
+    # ended run's, not be refused because a stamp already exists.
+    root = _repo()
+    try:
+        _run_hook(root, json.dumps({"session_id": "sess-before-clear",
+                                    "source": "startup"}))
+        proc = _run_hook(root, json.dumps({"session_id": "sess-after-clear",
+                                           "source": "clear"}))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        got = open(os.path.join(root, ".agent-sync", "sessions",
+                                str(os.getpid()))).read().strip()
+        assert got == "sess-after-clear", (
+            "after /clear the stamp still reads %r — the new session runs under the "
+            "ended run's identity" % got)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def the_stamp_makes_this_run_identity_strong():
     """End to end: the stamp exists ⇒ a descendant resolves a session key ⇒ identity is strong
     ⇒ `classify_lock` can call this run's own expired lease reapable instead of ambiguous."""
@@ -188,6 +233,8 @@ for name, fn in [
      the_environment_variable_still_wins_when_it_is_there),
     ("a payload with no session_id stamps nothing", a_payload_with_no_session_id_stamps_nothing),
     ("a non-JSON payload does not break the hook", a_non_json_payload_does_not_break_the_hook),
+    ("a cleared session is stamped as a new identity",
+     a_cleared_session_is_stamped_as_a_new_identity),
     ("the stamp makes this run's identity strong", the_stamp_makes_this_run_identity_strong),
 ]:
     case(name, fn)

@@ -24,6 +24,10 @@ import tempfile
 import time
 from pathlib import Path
 
+# The importlib loads below compile bytecode into the shipped scripts/ directory;
+# a validator run must not leave build products in a tree people read as source (ASY-01).
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Hosts a published file may legitimately name. Anything else is treated as an
@@ -1977,6 +1981,49 @@ def check_guard_covers_every_write_shape() -> None:
                     "the guarded files are unwritable by anyone")
 
 
+def check_guard_fails_closed_without_python3() -> None:
+    """A guard whose parser cannot run must refuse, not wave the write through (ASY-07).
+
+    `guard.sh`'s own header promises that every internal failure exits 2, because any
+    other outcome is non-blocking in Claude Code. The promise had one hole: with python3
+    absent from PATH the first substitution failed silently (`2>/dev/null`), `path` came
+    back empty, the commit-branch parser failed the same way, `is_commit` defaulted to 0
+    and the hook exited 0 — so the one machine state that disables the parser disabled
+    the guard with it, and said nothing.
+    """
+    hooks = ROOT / "plugins" / "agent-sync" / "hooks"
+    bash, cat = shutil.which("bash"), shutil.which("cat")
+    if not (hooks / "guard.sh").exists() or not bash or not cat:
+        notes.append("bash, cat or guard.sh not found — python3-absent check skipped")
+        return
+    with tempfile.TemporaryDirectory() as box:
+        project = Path(box) / "project"
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "agent-sync.json").write_text(
+            '{"backend": "fs", "guardedFiles": ["DECISIONS.md"]}')
+        # A PATH holding everything the hook needs except an interpreter.
+        shim = Path(box) / "bin"
+        shim.mkdir()
+        for tool in (bash, cat):
+            (shim / Path(tool).name).symlink_to(tool)
+        env = {**os.environ,
+               "CLAUDE_PLUGIN_ROOT": str(ROOT / "plugins" / "agent-sync"),
+               "CLAUDE_PROJECT_DIR": str(project),
+               "PATH": str(shim)}
+        payload = '{"tool_name":"Edit","tool_input":{"file_path":"DECISIONS.md"}}'
+        r = subprocess.run([bash, str(hooks / "guard.sh")], input=payload,
+                           cwd=str(project), env=env, capture_output=True, text=True,
+                           timeout=60)
+        if r.returncode != 2:
+            err(f"python3 absent: the guard exited {r.returncode} — anything but 2 is "
+                "non-blocking, so a machine without python3 has no guard at all and "
+                "reports nothing")
+            return
+        if "python3" not in r.stderr:
+            err("python3 absent: the refusal does not name python3 — the operator "
+                f"cannot fix what the message never names: {r.stderr[:200]!r}")
+
+
 def check_merge_refuses_without_an_identity() -> None:
     """No committer identity is a preflight failure, not a mid-merge abort.
 
@@ -2095,17 +2142,33 @@ def check_the_tarball_carries_no_bytecode():
     gap between what is on disk and what the packer selects. When npm is absent
     this discloses rather than passing — a check that cannot look must never read
     as one that looked.
+
+    The bytecode npm is asked about is PLANTED, then removed. Until ASY-01 the
+    fixture was an accident: the importlib loads earlier in this file compiled
+    `scripts/__pycache__` into the tree, so npm always had a real .pyc to select or
+    exclude — and `sys.dont_write_bytecode` silenced the self-test plant for this
+    check the moment it stopped the pollution. A check whose fixture is a side
+    effect dies with the side effect; this one now carries its own.
     """
     npm = shutil.which("npm")
     if not npm:
         notes.append("tarball contents — npm is not on PATH here")
         return
+    cache = ROOT / "plugins" / "agent-sync" / "skills" / "agent-sync" / "scripts" / "__pycache__"
+    planted = cache / "validate_plant.cpython-00.pyc"
+    created_dir = not cache.exists()
     try:
+        cache.mkdir(exist_ok=True)
+        planted.write_bytes(b"\x00")
         proc = subprocess.run([npm, "pack", "--dry-run", "--json"],
                               cwd=str(ROOT), capture_output=True, text=True, timeout=180)
     except (OSError, subprocess.SubprocessError) as exc:
         notes.append(f"tarball contents — could not run `npm pack` ({exc})")
         return
+    finally:
+        planted.unlink(missing_ok=True)
+        if created_dir:
+            shutil.rmtree(cache, ignore_errors=True)
     if proc.returncode != 0:
         notes.append("tarball contents — `npm pack --dry-run` exited "
                      f"{proc.returncode}")
@@ -2929,6 +2992,7 @@ def main() -> int:
     _guarded(check_commands_work_without_the_family_installed)
     _guarded(check_two_agents_cannot_share_one_task)
     _guarded(check_guard_covers_every_write_shape)
+    _guarded(check_guard_fails_closed_without_python3)
     _guarded(check_merge_refuses_without_an_identity)
     _guarded(check_merge_releases_only_its_key)
 
@@ -3262,6 +3326,11 @@ def self_test() -> int:
                 'cmd.replace("&&", "\\n").replace("||", "\\n").replace("|&", "\\n")'
                 '.replace(";", "\\n").replace("|", "\\n")',
                 'cmd.replace("&&", "\\n").replace(";", "\\n").replace("||", "\\n")')),
+        # ASY-07 planted back: parser_or_die stops dying, so a machine without python3
+        # is back to a guard that exits 0 and says nothing.
+        "an absent interpreter fails open": (
+            "plugins/agent-sync/hooks/guard.sh",
+            lambda t: t.replace('  [ "$rc" -eq 0 ] && return 0', "  return 0")),
         # merge back to releasing everything the run holds.
         "merge releases leases it did not land": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
