@@ -1,3 +1,35 @@
+## v1.18.7 — the evals stop being a claim, and the manifests say what shapes them
+
+Wave-3 close-out of the 2026-08-29 family audit (ASY-03, ASY-09). No behavior
+changes; a measurement that did not exist now does, and two manifests declare
+their schemas.
+
+- **ASY-03 — the behavioral evals were executed, dated, and the numbers are worse
+  than silence pretended.** `test/evals/RESULTS.md` had one row: "no run yet".
+  It now carries two dated rows (2026-08-31, haiku and sonnet): 24 blind
+  fresh-context trigger probes — one per query per model, the query verbatim plus
+  the installed family list, nothing else — and all six scenario lines driven as
+  real agent sessions against scratch repositories, end states verified on disk.
+  Both models score 11/12 on triggers (train 6/6, validation 5/6) and fail the
+  SAME query: **q06, the submodule-finish positive, 0/3 samples on each model** —
+  the description has no submodule vocabulary to catch it. That gap is filed as
+  ASY-10 (a description change is a minor release, not this patch). The Method
+  section states the harness limits out loud: n=1 sampling except the failing
+  query, the operator's routing doctrine present in probe context, fs-backend
+  `reserve` refusing by design in s02, model aliases rather than pinned snapshot
+  ids. SKILL-CARD.md's "never executed" line now points at the dated rows.
+- **ASY-09 — both plugin manifests declare `$schema`.**
+  `.claude-plugin/marketplace.json` names
+  `https://json.schemastore.org/claude-code-marketplace.json` and
+  `plugins/agent-sync/.claude-plugin/plugin.json` names
+  `https://json.schemastore.org/claude-code-plugin-manifest.json`; both files
+  validate against the schemas those addresses serve (fetched and checked at
+  edit time), and `claude plugin validate --strict` stays green on both. The
+  repo's own no-host-address rule refused the plugin manifest — correctly, by
+  its letter — so `json.schemastore.org` joined `ALLOWED_HOSTS` beside
+  `json-schema.org`: a vendor-neutral public schema registry, not an instance
+  address. The planted `leaked host` self-test still proves the check can fail.
+
 ## v1.18.6 — the guard keeps its own header's promise, and /clear gets its own identity
 
 Wave-2 hardening from the 2026-08-29 family audit (ASY-07, ASY-08, ASY-06, ASY-01).

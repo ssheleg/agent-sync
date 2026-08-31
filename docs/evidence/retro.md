@@ -13,6 +13,7 @@
 | 2026-08-25 | *(this run)* | AS-05: the Notion backend, measured four times before it said anything true — 1.18.0 |
 | 2026-08-29 | *(this run)* | ASY-05: the pipe the guard's comment claimed and never consumed; installers settle the Claude channel instead of deleting it blind — 1.18.5 |
 | 2026-08-30 | *(this run)* | Wave 2: ASY-07 fail-closed without python3, ASY-08 `clear` in the matcher, ASY-06 remedy, ASY-01 bytecode; ASY-04 found already shipped in 1.18.5 — 1.18.6 |
+| 2026-08-31 | *(this run)* | Wave 3: ASY-03 evals executed and dated (11/12 triggers on haiku AND sonnet, the one miss q06 stable at 0/3 each, filed as ASY-10; scenarios driven on disk), ASY-09 `$schema` in both manifests + `json.schemastore.org` allowlisted after the host check refused it correctly — 1.18.7 |
 
 ## Standing instructions
 

@@ -40,7 +40,7 @@ second settings-based hook channel.
 - Protocol tests: repository test suite and planted negative checks
 - House audit: pinned `make-skill` auditor in `validate.yml`
 - Behavioral data: `test/evals/`
-- Evaluation status: authored, never executed against a model
+- Evaluation status: executed 2026-08-31 against haiku and sonnet — dated rows, per-query results and the method's limits in `test/evals/RESULTS.md`
 
 ## Known limits
 

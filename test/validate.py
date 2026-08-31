@@ -40,7 +40,11 @@ ALLOWED_HOSTS = {
     # not somebody's private address. Outline is self-hostable, which is why ITS instance
     # address stays in the environment and only the vendor's own site is listed here.
     "api.notion.com", "developers.notion.com", "www.notion.so",
-    "json-schema.org", "npmjs.com", "www.npmjs.com", "img.shields.io",
+    # json.schemastore.org is the public schema registry the `$schema` keys in both
+    # plugin manifests point at (ASY-09) — a vendor-neutral constant every editor
+    # resolves, the same class as json-schema.org, not an instance address.
+    "json-schema.org", "json.schemastore.org",
+    "npmjs.com", "www.npmjs.com", "img.shields.io",
     "x.com", "sshlg.me", "t.me",
     "localhost", "127.0.0.1", "example.com", "wiki.example.com",
 }
