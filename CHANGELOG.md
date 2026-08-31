@@ -1,3 +1,53 @@
+## v1.19.0 — the skill now promises the finish it has always performed
+
+Wave-4 close-out of the 2026-08-29 family audit (ASY-10), filed by this
+repository's own first eval run. One front-matter line changes; no behaviour
+does.
+
+- **ASY-10 — the submodule-finish request reached nothing, and now reaches this
+  skill on every sample.** `finish` exists for exactly one silent failure — a
+  submodule pushed while the parent still points at the commit before it — and
+  the description advertised none of its words, so "Finish a submodule change so
+  the parent points at the pushed commit" (eval q06) routed past the skill on
+  every probe of the v1.18.7 run. The *Use when* clause now names it, in the
+  words `finish` itself prints (`finishing work across a parent repo and its
+  submodules - clean, pushed, and pointed at`), and the trigger list carries the
+  symptom in both languages: `'the submodule is pushed, the parent points at the
+  old commit' / 'сабмодуль запушен, родитель на старом коммите'`. The
+  description is **951 characters — against the 970 house working limit, not the
+  1024 spec cap**: a first draft at 1017 passed `test/validate.py` and was
+  refused by the family's pinned auditor (`GAP DESC_HEADROOM`, exit 1, a CI
+  failure), so it was rewritten rather than shipped. `yaml.safe_load` reads the
+  front matter — the two things this family has shipped broken before.
+- **The fix is measured, not asserted, and both arms ran in this session.** Two
+  corpus files differing in exactly one line (`- agent-sync: …`, old vs new),
+  one enforced protocol, fresh context-free subagents: **q06 went 0/3 → 3/3 on
+  haiku and 0/3 → 3/3 on sonnet**, and every number in the results file comes
+  from the text that ships — the discarded 1017-char draft was re-measured from
+  scratch after the rewrite rather than having its numbers carried over. The
+  pilot probes are reported too, because
+  they changed the protocol: offered the corpus rather than required to read it,
+  all three sonnet probes answered with no tool call at all, from the machine's
+  own installed listing — so the read was made mandatory and provable, and both
+  arms re-run under it.
+- **Every other query was re-probed, because a widened trigger steals a
+  neighbour's.** All twelve queries × two models: **12/12 on both, train 6/6 and
+  validation 6/6**, up from 11/12. Nothing moved except q06 — including q07
+  (solo git branching) and q08 (the full delivery cycle), the two negatives with
+  the most to lose from submodule and finish vocabulary. Tables, the 68-probe
+  accounting across three arms and the limits are in `test/evals/RESULTS.md`;
+  the v1.18.7 rows are left standing beside the new ones rather than rewritten.
+- Ten routed triggers still advertised — the umbrella's own
+  `advertised_check.js` was run against this checkout (`ok: agent-sync
+  advertises all 10 routed trigger(s)`), not a copy of its table.
+- **Filed, not fixed: AS-10.** `npm test` accepts a description up to 1024
+  characters and CI's pinned auditor refuses one past 970, so a description in
+  that band goes green locally and red on the runner. That is AS-06's shape a
+  second time — the same auditor, the other half of the same budget — and the
+  fix belongs in `test/validate.py` with a planted self-test, not inside a
+  release whose subject is one description line. The retro entry records what
+  the divergence cost here.
+
 ## v1.18.7 — the evals stop being a claim, and the manifests say what shapes them
 
 Wave-3 close-out of the 2026-08-29 family audit (ASY-03, ASY-09). No behavior

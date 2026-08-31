@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Pack and skill | `agent-sync` |
-| Version | `1.18.3` |
+| Version | `1.19.0` |
 | License | MIT |
 | Source | https://github.com/ssheleg/agent-sync |
 
@@ -40,7 +40,7 @@ second settings-based hook channel.
 - Protocol tests: repository test suite and planted negative checks
 - House audit: pinned `make-skill` auditor in `validate.yml`
 - Behavioral data: `test/evals/`
-- Evaluation status: executed 2026-08-31 against haiku and sonnet — dated rows, per-query results and the method's limits in `test/evals/RESULTS.md`
+- Evaluation status: executed twice on 2026-08-31 against haiku and sonnet — 12/12 trigger queries on both models after the v1.19.0 description fix, with the q06 before/after arms, the scenario lines and the method's limits in `test/evals/RESULTS.md`
 
 ## Known limits
 
