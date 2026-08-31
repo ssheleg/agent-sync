@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.19.0 — the skill promises the finish it performs
+
+**Release candidate v1.19.0.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| ASY-10 | The SKILL.md description advertises the multi-repository finish surface: submodule, parent pointer, pushed commit, nothing left held — in the *Use when* clause and as a trigger pair in both languages | **Re-measured, both arms in one session under one protocol, against the text that ships.** Two corpus files identical but for the `- agent-sync:` line; fresh context-free subagents forced to `cat` the corpus and prove the read. q06 **0/3 → 3/3 on haiku** (was `none`, `task-pipeline`, `task-pipeline`) and **0/3 → 3/3 on sonnet** (was `none` ×3). The discarded 1017-char draft's numbers were NOT carried over — the shipped 951-char text was probed from scratch. Tables and the 68-probe, three-arm accounting in `test/evals/RESULTS.md` | 2026-08-31 |
+| ASY-10 | No neighbour query was stolen by the widened trigger | All twelve queries re-probed on both models: 12/12, train 6/6 and validation 6/6 (was 11/12). q07 (solo git branch) and q08 (full delivery cycle) — the two negatives closest to the new vocabulary — answered `none` and `task-pipeline` exactly as before, on both models | 2026-08-31 |
+| ASY-10 | The edit survives a strict YAML reader and stays inside the front-matter budget — the HOUSE one | `yaml.safe_load` over the front matter returns five keys; `len(description)` = 951. The binding limit is the family auditor's 970, not the spec's 1024: a 1017-char draft passed `test/validate.py` and was refused by the CI-pinned `audit_skill.py --house` (`GAP DESC_HEADROOM`, exit 1). Re-run after the rewrite at the pinned commit `991cbb4`: `0 GAP, 14 PASS`, exit 0 | 2026-08-31 |
+| ASY-10 | Every routed trigger the family's hook fires on is still advertised | The umbrella's own checker, reading `lib/triggers.js` rather than a copy: `node ../sshlg-skills/test/advertised_check.js --member agent-sync --root .` → `ok: agent-sync advertises all 10 routed trigger(s) across 1 skill(s)`, exit 0 | 2026-08-31 |
+| Gate | The whole suite, on this tree | `npm test` → validator `PASS: agent-sync v1.19.0 — all checks green`, self-test 60/60 detected, `claim cell, id registers, lease reaping and orphaned claim tags — 24 cases`, `SessionStart identity — 6 cases`, `installer — 11 case(s)`. Beside it: `evals_validate.py` (12 trigger cases, 3 scenarios) and its negative self-test, `social_preview.py` (1200x630), and the CI-pinned `audit_skill.py --house` (`0 GAP, 14 PASS`). Counts read off this run's own output, not restated | 2026-08-31 |
+
 ## v1.18.7 — the evals stop being a claim
 
 **Release candidate v1.18.7.** This section was written before the tag.

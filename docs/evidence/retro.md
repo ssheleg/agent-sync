@@ -14,6 +14,7 @@
 | 2026-08-29 | *(this run)* | ASY-05: the pipe the guard's comment claimed and never consumed; installers settle the Claude channel instead of deleting it blind — 1.18.5 |
 | 2026-08-30 | *(this run)* | Wave 2: ASY-07 fail-closed without python3, ASY-08 `clear` in the matcher, ASY-06 remedy, ASY-01 bytecode; ASY-04 found already shipped in 1.18.5 — 1.18.6 |
 | 2026-08-31 | *(this run)* | Wave 3: ASY-03 evals executed and dated (11/12 triggers on haiku AND sonnet, the one miss q06 stable at 0/3 each, filed as ASY-10; scenarios driven on disk), ASY-09 `$schema` in both manifests + `json.schemastore.org` allowlisted after the host check refused it correctly — 1.18.7 |
+| 2026-08-31 | *(this run)* | Wave 4: ASY-10 — the description now advertises the multi-repository finish, and the fix is a controlled before/after rather than a claim: q06 0/3 → 3/3 on haiku AND on sonnet across two corpora differing in one line, all twelve queries re-probed for a stolen neighbour (12/12 both models, up from 11/12); the local gate's 1024 cap turned out to be looser than the 970 CI enforces, filed as AS-10 — 1.19.0 |
 
 ## Standing instructions
 
@@ -68,6 +69,51 @@ names are gone, or when it has not fired in five run stamps or sixty days. Hard 
 
 
 ## Entries
+
+### 2026-08-31 (ASY-10) — the description was measured twice because the gate that mattered was not the gate that ran
+
+**Symptom.** A one-line front-matter fix, already probed against two models on
+both arms — q06 0/3 → 3/3, all twelve queries re-checked for a stolen neighbour
+— and then the pinned family auditor refused it: `GAP DESC_HEADROOM`,
+description 1017 chars, exit 1. `npm test` had printed
+`PASS: agent-sync v1.19.0 — all checks green` over the same file minutes
+earlier.
+
+**Where it surfaced.** After the measurement, while reading the CI workflow to
+list the gate for the ledger. **Where it belongs.** Before writing the line:
+the budget was read out of `test/validate.py` (1024) and CI enforces 970.
+
+**Root cause.** Two homes for one number, and the local one is the permissive
+one. `check_skill` implements the Agent Skills spec cap; `validate.yml`'s
+`skill-audit` job runs the family's auditor at a pinned commit, which applies a
+5% house working limit. Nothing here names 970, so the number a person writing
+a description will find is the wrong one. **This is AS-06 again** — that row was
+the same disagreement about the BODY budget (3.9 vs 4 chars per token) and was
+closed by adopting the auditor's number here. Only half the field was adopted.
+
+**What it cost.** The rewrite was cheap; re-running the measurement was not, and
+was not optional. A before/after that proves a text which never ships is worth
+nothing, so all 28 probes of the after-arm were thrown away and re-run against
+the 951-char text. Recorded because the instinct in that moment is to keep the
+numbers and change the words — which is precisely the restated-measurement
+defect this repository's own ledger check exists to refuse.
+
+**The fix, by grade.** Filed as **AS-10** rather than fixed in this release: the
+change belongs in `test/validate.py`, which is a guarded file, needs a planted
+self-test in both directions, and moves the fixture ratchet — none of which
+belongs inside a release whose whole subject is one description line.
+
+**A second, smaller one from the same run, and the suite found it.** The first
+draft of this release's ledger section described the gate in prose instead of
+quoting `PASS: agent-sync v1.19.0 — all checks green`, and the self-test went
+red: the plant `the ledger names a version that did not ship` rewrites the first
+`PASS: agent-sync v` after the first `## ` heading, so with no quote in the
+newest section the mutation lands in an older one that
+`check_ledger_names_the_shipped_version` deliberately no longer scans — and the
+plant is reported MISSED. **A plant can only fire on text that exists**, so the
+quote is not decoration in this file; it is the thing under test. Prose about a
+green gate is exactly what this ledger is not for.
+
 
 ### 2026-08-25 (AS-05) — the measurement had to fail three times before it measured anything
 
