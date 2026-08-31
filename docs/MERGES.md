@@ -4,6 +4,12 @@
 
 Written by `agent_sync.py merge`. Entries newer than 7 days keep their detail; older ones are compacted to one line each on the next write. Read it before starting work: it is the shortest answer to *what landed while I was on my branch*.
 
+### 2026-08-31 · `ASY-10` · asy-10-submodule-trigger → main · `4c1c604`
+- run: r-f31d90ddb
+- files: 11 (11 files changed, 238 insertions(+), 20 deletions(-))
+- conflicts: none
+- summary: v1.19.0: the description advertises the multi-repository finish (ASY-10) — q06 0/3 → 3/3 on haiku and on sonnet across two corpora differing in one line, all twelve queries re-probed (12/12 both models, up from 11/12); the local 1024 cap vs CI's 970 filed as AS-10
+
 ### 2026-08-31 · `ASY-W3` · asy-wave3-evals-schema → main · `6dfd6f9`
 - run: r-asyw3fable
 - files: 12 (12 files changed, 140 insertions(+), 13 deletions(-))
