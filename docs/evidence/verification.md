@@ -8,6 +8,17 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.18.7 — the evals stop being a claim
+
+**Release candidate v1.18.7.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| ASY-03 | `test/evals/RESULTS.md` carries dated model rows instead of "no run yet": 24 blind trigger probes (12 queries × haiku, sonnet; n=3 on the failing query) and all 12 scenario lines executed against scratch repositories | Executed 2026-08-31 via fresh context-free subagents; per-query and per-line tables with the method's stated limits are IN the results file, and scenario end states were verified on disk (`git -C /tmp/asy-evals-2026-08-31/... log/submodule status`), not only from probe reports. `evals_validate.py` and `--self-test` both green over the new file | 2026-08-31 |
+| ASY-10 | The one stable trigger miss (q06, submodule finish, 0/3 on both models) is filed on the board, not fixed here | Board row ASY-10 cites the measured 0/3 cells; the fix is a description literal — a minor release, refused for this patch on purpose | 2026-08-31 |
+| ASY-09 | Both manifests declare `$schema` (`claude-code-marketplace.json`, `claude-code-plugin-manifest.json`) | Both documents validated with `jsonschema` against the schemas fetched from the declared addresses (titles: "Claude Code Plugin Marketplace", "Claude Code Plugin Manifest"); `claude plugin validate --strict` green on the marketplace root and on `plugins/agent-sync`; `json.schemastore.org` added to `ALLOWED_HOSTS` after `check_no_host_identity` refused the plugin manifest — watched refusing first (`names host 'json.schemastore.org'`), and the `leaked host` self-test plant still fires | 2026-08-31 |
+| Gate | The whole suite, on this tree | `npm test` → validator `PASS: agent-sync v1.18.7 — all checks green`, self-test all fixtures caught, claim-cell, SessionStart identity cases, installer cases — counts read off the run's own output below, not restated | 2026-08-31 |
+
 ## v1.18.6 — the guard keeps its own header's promise
 
 **Release candidate v1.18.6.** This section was written before the tag.
