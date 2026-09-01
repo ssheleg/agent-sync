@@ -1003,6 +1003,53 @@ def check_renew_extends_the_lease() -> None:
             err("renew: the run does not hold its lease after renewing it")
 
 
+def check_acquire_refreshes_its_own_lease() -> None:
+    """Re-acquiring a lease you already hold must move its timestamp too.
+
+    `renew` was fixed for exactly this and `acquire` was not, in the same file. The
+    own-lock branch called `_touch_renew()` and returned `won` — touching the throttle
+    file and leaving the `ts` the lease is arbitrated by, which is what
+    `_refresh_lease`'s own docstring calls the bug it exists to have fixed.
+
+    Two harms, and the second is the one that bites. The lock stayed expired, so
+    `classify_lock` read it as spent and another run's `acquire` took it over while this
+    one believed it held. And `_touch_renew` resets the marker `renew()` throttles on,
+    so a re-acquire actively SUPPRESSED the next real refresh while refreshing nothing
+    itself. Measured 2026-09-01: a lease expiring three times in one run against a
+    450-step CI job.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — acquire-refresh check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("acquire-refresh: init failed")
+            return
+        _write_cfg(project, leaseTtlSeconds=600, renewIntervalSeconds=300)
+
+        if "won" not in _run_script(project, "acquire", "ACQ-1").stdout:
+            err("acquire-refresh: could not take the lease")
+            return
+
+        lock = Path(project) / ".agent-sync" / "leases" / "ACQ-1.lock"
+        held = json.loads(lock.read_text())
+        mod = _load_script("agent_sync_acquire_probe")
+        aged = datetime_minus(mod, 5000)   # well past the 600s TTL
+        held["ts"] = aged
+        lock.write_text(json.dumps(held))
+
+        out = _run_script(project, "acquire", "ACQ-1").stdout
+        if "won" not in out:
+            err("acquire-refresh: re-acquiring a lease this run already holds did not win")
+        if json.loads(lock.read_text()).get("ts") == aged:
+            err("acquire-refresh: the lease timestamp did not move — `acquire` reports "
+                "`won` and leaves the lock expired, so another run takes it over while "
+                "this one believes it holds it")
+        if _lock_age(project, "ACQ-1") > 60:
+            err("acquire-refresh: the lease is still older than a minute after re-acquiring")
+
+
 def datetime_minus(mod, seconds: int) -> str:
     """An ISO stamp `seconds` in the past, in the script's own format."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
@@ -2972,6 +3019,7 @@ def main() -> int:
     _guarded(check_reserve_respects_the_register)
     _guarded(check_reserve_is_race_free)
     _guarded(check_renew_extends_the_lease)
+    _guarded(check_acquire_refreshes_its_own_lease)
     _guarded(check_config_round_trip)
     _guarded(check_no_success_on_failed_publish)
     _guarded(check_guard_denial_names_only_what_it_knows)

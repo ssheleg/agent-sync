@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.19.0"
+VERSION = "1.19.1"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -1646,6 +1646,21 @@ class Sync:
             except (json.JSONDecodeError, OSError):
                 held = {}
             if held.get("run") == self.rid:
+                # MOVE THE LOCK'S OWN `ts`, not just the throttle marker. This branch did
+                # exactly what `_refresh_lease`'s docstring describes as the bug it exists
+                # to have fixed — touch the throttle file and leave the timestamp the lease
+                # is arbitrated by — and the repair landed in `renew` and not here, in the
+                # same file, four minor versions ago.
+                #
+                # Two harms, and the second is the one that bites. The lock stayed expired,
+                # so `classify_lock` read it as spent and another run's `acquire` took it
+                # over while this one believed it held (measured 2026-09-01: a foreign
+                # expired lock IS taken over, timestamp and host rewritten). And
+                # `_touch_renew` resets the marker `renew()` throttles on — so a re-acquire
+                # actively SUPPRESSED the next real refresh, refreshing nothing itself.
+                # That is the mechanism behind a lease expiring three times in one run
+                # against a 450-step CI job on 2026-09-01.
+                self._refresh_lease(key)
                 self._touch_renew()
                 return True, self.rid
             if time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
