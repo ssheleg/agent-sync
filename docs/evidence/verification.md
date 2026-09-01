@@ -8,6 +8,20 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.19.1 — re-acquiring your own lease refreshes it
+
+**Release candidate v1.19.1.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| ASY-11 | `acquire` on a lease this run already holds moves the lock's own `ts`, not just the throttle marker | Scratch project, `leaseTtlSeconds=600`; the held lock aged to `2026-08-29T20:59:04Z` (well past TTL) and re-acquired. Before: `won mykey` and `ts` unchanged at `2026-08-29T20:59:04Z` — still expired. After: `ts` = `2026-09-01T12:38:48Z` | 2026-09-01 |
+| ASY-11 | The suppression half is named, because it is the half that bites | `_touch_renew` resets the marker `renew()` throttles on, so a re-acquire made the next real refresh return early while refreshing nothing itself — the mechanism behind a lease expiring three times in one run against a 450-step CI job | 2026-09-01 |
+| ASY-11 | An expired lock really is taken over by another run, so the harm is not hypothetical | A lock 3 days past TTL, written by `r-someoneelse` on `other-machine.local`, was acquired by this run with `run`, `host` and `ts` all rewritten | 2026-09-01 |
+| ASY-11 | The check fails against the code it was written for | `check_acquire_refreshes_its_own_lease` beside `check_renew_extends_the_lease`; against the previous commit both of its assertions fire — *"the lease timestamp did not move"* and *"still older than a minute after re-acquiring"* | 2026-09-01 |
+| ASY-11 | A neighbouring claim was RETRACTED rather than shipped | `reap` refusing a lock 3 days past a 45-minute TTL reads like a deadlock and is not: the row above shows `acquire` takes over an expired lock regardless of who wrote it, so the lock blocks nothing and `reap`'s stricter bar for a tidying operation is correct as designed | 2026-09-01 |
+| ASY-11 | The ledger's newest section must quote the gate line, and the self-test enforces it | The first draft of this section carried a placeholder instead of the real output, and `SELF-TEST FAILED — undetected: ['the ledger names a version that did not ship']`: the plant anchors on the first `PASS: agent-sync v` after a `## `, the check reads only the newest section, so a newest section with no such string sends the plant into an older one where nothing looks. It failed LOUDLY rather than passing quietly, which is the coupling working — the placeholder was the defect | 2026-09-01 |
+| Gate | The whole suite, on this tree | `npm test` → validator `PASS: agent-sync v1.19.1 — all checks green`, self-test 60/60 detected (60 fixtures, 8 at a time), `claim cell`, `hooks session` and `installer` suites green | 2026-09-01 |
+
 ## v1.19.0 — the skill promises the finish it performs
 
 **Release candidate v1.19.0.** This section was written before the tag.

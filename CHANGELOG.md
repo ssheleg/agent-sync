@@ -1,3 +1,38 @@
+## v1.19.1 — re-acquiring your own lease now refreshes it
+
+**`renew` was fixed for exactly this and `acquire` was not, in the same file.**
+`_refresh_lease`'s docstring records the bug it exists to have fixed: *"`renew`
+appended `op=renew` to the RECORD plane — which has not decided a lease since 1.0.0 —
+and touched a throttle file. The lock's own `ts` was written once, by `acquire`. So a
+run holding a lease lost it at TTL while still working."* The repair landed in `renew`.
+The own-lock branch of `acquire` kept doing precisely what that paragraph describes.
+
+**Two harms, and the second is the one that bites.** The lock stayed expired, so
+`classify_lock` read it as spent and another run's `acquire` took it over while this one
+believed it held — measured 2026-09-01: a foreign expired lock IS taken over, timestamp
+and host rewritten. And `_touch_renew` resets the marker `renew()` throttles on, so a
+re-acquire **actively suppressed the next real refresh** while refreshing nothing
+itself. That is the mechanism behind a lease expiring three times in one run against a
+450-step CI job.
+
+Measured before and after, on a lock aged past its own TTL:
+
+```
+old: won mykey (…)   ts after re-acquire: 2026-08-29T20:59:04Z   still expired
+new: won mykey (…)   ts after re-acquire: 2026-09-01T12:38:48Z
+```
+
+`check_acquire_refreshes_its_own_lease` is beside `check_renew_extends_the_lease`,
+watched failing against the previous commit with both of its assertions.
+
+**One finding retracted in the same run, and it belongs here.** `reap` refuses to clear
+a lock three days past a forty-five-minute TTL when this run's identity is the shared
+fallback, and that reads like a deadlock. It is not: `acquire` takes over an expired
+lock regardless of who wrote it — measured, timestamp and host rewritten — so the
+expired lock blocks nothing, and `reap`'s stricter bar for a *tidying* operation is
+correct as designed. The claim that expiry alone should license a delete was wrong
+about which operation matters.
+
 ## v1.19.0 — the skill now promises the finish it has always performed
 
 Wave-4 close-out of the 2026-08-29 family audit (ASY-10), filed by this
