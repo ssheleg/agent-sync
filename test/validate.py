@@ -2331,6 +2331,50 @@ def check_status_reports_expired_locks_as_residue() -> None:
                 "directory it just read")
 
 
+def check_old_residue_collapses_but_still_names_its_keys() -> None:
+    """A block reprinted verbatim every session stops being read, including its new lines.
+
+    Measured on the machine that filed this: sixteen expired leases, none newer than two
+    days, the oldest thirteen — printed identically at every SessionStart for a fortnight,
+    six in full and "… and 11 more". Nothing there was actionable; the operator could not
+    clear a foreign lease, and the block sat above the lines that WOULD have mattered.
+
+    So age splits the list. A lease expired inside a day may still mean a run is in
+    trouble and keeps its own line; older ones collapse into one summary — which still
+    NAMES them, because a summary that hides which keys are stuck replaces noise with a
+    different uselessness.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — residue collapse check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        _git_project(project)
+        if _run_script(project, "init", "--backend", "fs").returncode != 0:
+            err("residue/collapse: init failed")
+            return
+        rid = _rid_of(project, "resident")
+        ancient = "2026-01-01T00:00:00Z"
+        for n in range(9):
+            _plant_lock(project, f"OLD-{n}", run="r-somebodyelse", ts=ancient, ttl=60)
+        out = _run_script(project, "status", run_id="resident").stdout
+        detail = [ln for ln in out.splitlines() if ln.strip().startswith("· OLD-")]
+        if detail:
+            err(f"residue/collapse: {len(detail)} ancient lease(s) still print a line each "
+                "— the whole point is that a fortnight-old lease is not news")
+        summary = [ln for ln in out.splitlines() if "expired over" in ln]
+        if not summary:
+            err("residue/collapse: nine ancient leases produced no summary line at all, "
+                "so they vanished — collapsing is not the same as hiding")
+            return
+        for key in ("OLD-0", "OLD-7"):
+            if key not in summary[0]:
+                err(f"residue/collapse: the summary does not name {key}; a summary that "
+                    "hides which keys are stuck is a different uselessness")
+        if "+1 more" not in summary[0]:
+            err("residue/collapse: nine keys with an eight-key cap printed no overflow "
+                "count, so the line under-reports without saying so")
+
+
 def check_residue_ownership_must_be_provable() -> None:
     """Reapable means PROVABLY this run's and PROVABLY spent. Everything else is reported.
 
@@ -3052,6 +3096,7 @@ def main() -> int:
     _guarded(check_the_tarball_carries_no_bytecode)
 
     _guarded(check_status_reports_expired_locks_as_residue)
+    _guarded(check_old_residue_collapses_but_still_names_its_keys)
     _guarded(check_residue_ownership_must_be_provable)
     _guarded(check_reap_verifies_teardown_by_re_reading)
     _guarded(check_finish_reports_what_the_run_leaves_behind)

@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.19.2 — old residue collapses, and still names its keys
+
+**Release candidate v1.19.2.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| RC-1 | An expired lease older than 24h collapses into one summary line | `check_old_residue_collapses_but_still_names_its_keys` plants nine leases dated 2026-01-01 and asserts no per-key detail line survives; on this machine sixteen lines became one | yes |
+| RC-2 | Collapsing is not hiding — the summary names the keys and counts the overflow | the same check asserts `OLD-0` and `OLD-7` appear in the summary and that a nine-key list past the eight-key cap prints `+1 more` | yes |
+| RC-3 | A lease expired inside 24h keeps its own line | `STALE_DETAIL_SECONDS` splits the list; the existing residue check still finds both its planted keys named | yes |
+| RC-4 | The check was watched failing against the pre-fix behaviour | removing the split gives `6 ancient lease(s) still print a line each` and `nine ancient leases produced no summary line at all, so they vanished` — two assertions, because collapsing and hiding are one edit apart | yes |
+| RC-5 | The gate is green at HEAD | `python3 test/validate.py` → `PASS: agent-sync v1.19.2 — all checks green`; then `PASS: claim cell, id registers, lease reaping and orphaned claim tags — 24 cases`, `PASS: SessionStart identity — 6 cases`, `PASS: installer — 11 case(s)`, and the validator's own self-test detects every planted defect | yes |
+
 ## v1.19.1 — re-acquiring your own lease refreshes it
 
 **Release candidate v1.19.1.** This section was written before the tag.

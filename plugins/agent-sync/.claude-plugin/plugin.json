@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "agent-sync",
   "displayName": "Agent Sync",
-  "version": "1.19.1",
+  "version": "1.19.2",
   "description": "Coordination layer for multi-agent repositories — leases with TTL, race-free ID reservation, a run journal, a cross-repo signal feed and a generated board, over a pluggable knowledge cloud.",
   "author": {
     "name": "ssheleg",
