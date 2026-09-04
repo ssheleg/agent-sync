@@ -1,3 +1,25 @@
+## [1.19.2] - 2026-09-04
+
+### Fixed
+
+- **An expired foreign lease printed at every SessionStart for ever, and the block it sat
+  in stopped being read.** Measured on the machine that filed the issue: sixteen expired
+  leases, none newer than two days, the oldest **thirteen days old** — six printed in full
+  plus *"… and 11 more"*, identically, every session for a fortnight. None of it was
+  actionable: a foreign lease is reported and deliberately never touched, so the operator
+  could not clear a single line of it. A block reprinted verbatim is a block an operator
+  learns to skim, **including the lines that would have mattered**.
+
+  Age splits the list now. A lease expired inside `STALE_DETAIL_SECONDS` (24h) may still
+  mean a run is in trouble and keeps its own line; anything older collapses into **one**
+  summary — which still **names the keys**, because a summary that hides which leases are
+  stuck replaces noise with a different uselessness. Sixteen lines became one.
+
+  Watched failing before it shipped: with the split removed the new check reports
+  *"6 ancient lease(s) still print a line each"* and *"nine ancient leases produced no
+  summary line at all, so they vanished"* — the second assertion exists because collapsing
+  and hiding are one edit apart.
+
 ## v1.19.1 — re-acquiring your own lease now refreshes it
 
 **`renew` was fixed for exactly this and `acquire` was not, in the same file.**

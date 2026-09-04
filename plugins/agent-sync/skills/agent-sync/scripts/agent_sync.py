@@ -33,11 +33,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.19.1"
+VERSION = "1.19.2"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
 STATE_DIR = Path(".agent-sync")
+# How recent an expired lease has to be to earn a line of its own. Anything older
+# collapses into one summary that still names the keys. Twenty-four hours is chosen
+# because it is the span in which an expired lease can still mean "a run is in
+# trouble"; beyond it, it means "somebody's machine was closed".
+STALE_DETAIL_SECONDS = 24 * 60 * 60
 GENERATED_MARKER = "<!-- agent-sync:generated"
 MERGE_LOG_MARKER = "<!-- agent-sync:merge-log -->"
 DEFAULT_MERGE_LOG = "docs/MERGES.md"
@@ -3392,10 +3397,29 @@ def cmd_status(_args: argparse.Namespace) -> int:
               f"{len(left_alone)} left alone")
         print("\n  Expired leases still on disk. Nobody holds these: the TTL ended the "
               "lease\n  and left the file.")
-        for e in stale[:6]:
+        # Age splits the list, because age is what decides whether a line is news.
+        # A lease that expired an hour ago may still be a run in trouble; one that
+        # expired thirteen days ago is residue nobody will ever clear, and printing
+        # it in full at every SessionStart is how an operator learns to skim the
+        # whole block — including the recent lines that mattered. Measured on the
+        # machine that filed this: sixteen entries, none newer than two days, the
+        # oldest thirteen days old, printed identically every session for a fortnight.
+        fresh = [e for e in stale
+                 if e.get("expired_for") is not None and e["expired_for"] < STALE_DETAIL_SECONDS]
+        old_ones = [e for e in stale if e not in fresh]
+        for e in fresh[:6]:
             print(f"    · {e['key']}  [{e['state']}] {e['why']} ({spent(e)})")
-        if len(stale) > 6:
-            print(f"    · … and {len(stale) - 6} more — agent_sync.py residue")
+        if len(fresh) > 6:
+            print(f"    · … and {len(fresh) - 6} more expired in the last "
+                  f"{since(STALE_DETAIL_SECONDS)}")
+        if old_ones:
+            # One line, and it still names them: a summary that hides WHICH keys
+            # cannot be acted on, and the point of collapsing is to keep the block
+            # readable rather than to stop reporting.
+            keys = ", ".join(e["key"] for e in old_ones[:8])
+            more = f", +{len(old_ones) - 8} more" if len(old_ones) > 8 else ""
+            print(f"    · {len(old_ones)} expired over {since(STALE_DETAIL_SECONDS)} ago "
+                  f"— {keys}{more}")
         if reapable:
             print("    Clear what this run owns:  agent_sync.py reap")
         if left_alone:
