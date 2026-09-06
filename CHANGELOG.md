@@ -1,3 +1,34 @@
+## v1.19.3 — the boundary ships with the skill, and two descriptions stop looking like drift
+
+Close-out of the 2026-09-06 family audit (wave AUDIT-WAVE-0906). One bullet
+enters the skill body, one decision gets a written home; no behaviour changes.
+
+- **The refusal the operator's routing block promises now travels with the
+  skill.** The routing doctrine names this router's boundary — a file in a
+  project where coordination is on — and a waiver, **"no coordination" /
+  «без координации»**, and neither phrase appeared anywhere in the shipped
+  `SKILL.md`: a standalone install advertised no refusal at all. One bullet in
+  Non-negotiables now carries both. The body had **3 tokens of headroom**
+  (~4747/4750 against the house working limit), so the line displaced prose
+  rather than joining it — standing instruction 7 — and the auditor was watched
+  refusing both oversteps on the way: a first draft measured 4753
+  (`GAP BODY_HEADROOM`), the second exactly 4750 and still refused, the shipped
+  text ~4746/4750 after trimming one motivational sentence from the `status`
+  section and three words from the `$SKILL_DIR` paragraph. `audit_skill.py
+  --house`: **0 GAP, 15 PASS**.
+- **`plugin.json` and `marketplace.json` describe this plugin in two entirely
+  different texts — now recorded as deliberate, which is what makes it
+  distinguishable from drift.** The audit's finding was not that the texts
+  differ but that nothing RECORDED whether they should, and a sibling shipped
+  accidental manifest drift this same week. They should: the marketplace entry
+  is the storefront read before install and carries the lease doctrine in full —
+  that surface is where the 1.5.2 audit caught this repo selling the refuted
+  no-CAS design, and `check_doctrine_is_current` still watches it — while
+  `plugin.json` is the installed listing's one-line layer summary. JSON takes no
+  comment, so the decision lives where this board's decisions live
+  (`docs/evidence/backlog.md`, beside B-002 and B-004), naming both texts and
+  which surface reads which.
+
 ## [1.19.2] - 2026-09-04
 
 ### Fixed
