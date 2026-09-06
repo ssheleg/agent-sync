@@ -8,6 +8,17 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.19.3 — the boundary ships with the skill
+
+**Release candidate v1.19.3.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| AW-0906-refusal | The skill body names this router's boundary and the operator's waiver — "no coordination" / «без координации» — so a standalone install advertises the refusal the routing block promises | `grep -c 'без координации' plugins/agent-sync/skills/agent-sync/SKILL.md` → 1, in the Non-negotiables bullet that also names `.claude/agent-sync.json` as the boundary; the phrase appeared nowhere in the shipped text before this change | 2026-09-06 |
+| AW-0906-refusal | The addition displaced prose instead of breaching the body budget — the body had ~3 tokens of headroom | The pinned family auditor was watched refusing both oversteps in this session: first draft `~4753 tokens — … past the 4750 working limit` (`GAP BODY_HEADROOM`), second draft `~4750` and still refused, shipped text `body is ~4746/4750 tokens, inside the working limit` — `0 GAP, 15 PASS` from `audit_skill.py --house` | 2026-09-06 |
+| AW-0906-desc | The two manifest description texts are DECIDED, not drifting: marketplace entry = storefront with the full lease doctrine, plugin.json = installed listing's one-liner | Decision row `AW-0906-desc` on the board (`docs/evidence/backlog.md`), beside B-002 and B-004, naming both texts and which surface reads which; `check_doctrine_is_current` still reads both files for the refuted no-CAS phrases, so the storefront cannot quietly regress to the design 1.0.0 refuted | 2026-09-06 |
+| Gate | The whole suite, on this tree | `npm test` → validator `PASS: agent-sync v1.19.3 — all checks green`; then `PASS: claim cell, id registers, lease reaping and orphaned claim tags — 24 cases`, `PASS: SessionStart identity — 6 cases`, `PASS: installer — 11 case(s)`, and the validator's own self-test detects every planted defect | 2026-09-06 |
+
 ## v1.19.2 — old residue collapses, and still names its keys
 
 **Release candidate v1.19.2.** This section was written before the tag.

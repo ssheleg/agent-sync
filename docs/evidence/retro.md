@@ -15,6 +15,7 @@
 | 2026-08-30 | *(this run)* | Wave 2: ASY-07 fail-closed without python3, ASY-08 `clear` in the matcher, ASY-06 remedy, ASY-01 bytecode; ASY-04 found already shipped in 1.18.5 — 1.18.6 |
 | 2026-08-31 | *(this run)* | Wave 3: ASY-03 evals executed and dated (11/12 triggers on haiku AND sonnet, the one miss q06 stable at 0/3 each, filed as ASY-10; scenarios driven on disk), ASY-09 `$schema` in both manifests + `json.schemastore.org` allowlisted after the host check refused it correctly — 1.18.7 |
 | 2026-08-31 | *(this run)* | Wave 4: ASY-10 — the description now advertises the multi-repository finish, and the fix is a controlled before/after rather than a claim: q06 0/3 → 3/3 on haiku AND on sonnet across two corpora differing in one line, all twelve queries re-probed for a stolen neighbour (12/12 both models, up from 11/12); the local gate's 1024 cap turned out to be looser than the 970 CI enforces, filed as AS-10 — 1.19.0 |
+| 2026-09-06 | *(this run)* | AUDIT-WAVE-0906: the routing block's refusal phrase now ships in the skill body, fitted by displacement against ~3 tokens of headroom (auditor watched refusing at 4753 and 4750, shipped at ~4746); the two manifest descriptions recorded as deliberate on the board (AW-0906-desc) — 1.19.3 |
 
 ## Standing instructions
 

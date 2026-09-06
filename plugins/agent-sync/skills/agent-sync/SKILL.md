@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.19.2"
+  version: "1.19.3"
   author: ssheleg
 ---
 
@@ -145,9 +145,6 @@ cannot give two answers about one project.
   away — watermarked per run, so it stays quiet until something changes. A dependency that
   moved may unblock what you planned, or invalidate it.
 
-An agent that skips this block will re-derive work someone else is doing and act on a
-dependency state that changed an hour ago.
-
 What else `status` decides: no credentials → degraded mode, reported, and it continues;
 `task-pipeline` absent → it prints the install line and stops. Do not improvise a substitute
 flow — without those stages there is nothing to bind to.
@@ -187,7 +184,7 @@ npx sshlg-skills install
 
 `$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` under
 the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once per session
-and reuse it — do not guess. Every command reads `.claude/agent-sync.json` from the project
+and reuse it. Every command reads `.claude/agent-sync.json` from the project
 root and needs no arguments beyond those listed.
 
 ## One identity per session, and how it is decided
@@ -326,6 +323,8 @@ the parent; a service repo listing the parent's decision register is a config de
 - Two agents in one checkout are two identities, or the lease is decoration.
 - A submodule commit is unfinished until the parent points at it — run `finish`.
 - Everything the cloud holds about a durable fact is a link to git, never a substitute.
+- Boundary: `.claude/agent-sync.json`. None, or one agent alone — route past. The
+  operator's waiver: "no coordination" / «без координации».
 
 ## References
 
