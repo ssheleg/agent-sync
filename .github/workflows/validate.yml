@@ -28,6 +28,14 @@ jobs:
       - name: SessionStart identity (the real hook, as a process)
         run: python3 test/hooks_session_test.py
 
+      - name: Audit regressions (sherlock plan, one file per closed finding)
+        run: |
+          set -e
+          for t in test/audit_regressions/*.py; do
+            echo "== $t"
+            python3 "$t"
+          done
+
       - name: Installers settle the Claude channel (11 cases, 10 watched failing pre-fix)
         run: node test/installer_test.js
 

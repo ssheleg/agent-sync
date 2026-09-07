@@ -92,6 +92,10 @@ MAX_UNPARSEABLE = 0.02
 DEFAULT_SETTLE = 3.0
 DEFAULT_TTL = 2700
 DEFAULT_RENEW = 300
+# How many times an id allocation may lose its race before the tool reports the
+# contention instead of spinning. Each loss means another allocator moved the state
+# between our read and our write — a bounded number of honest retries, never a loop.
+RESERVE_RETRIES = 6
 # How long a steal section may be held before it is treated as abandoned. It covers two
 # filesystem calls, so anything longer than this is a crashed process, not slow work.
 STEAL_GRACE = 30
@@ -1314,11 +1318,25 @@ def spent(entry: dict[str, Any]) -> str:
 
 
 def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, list[int], list[tuple[str, int]]]:
-    """Positional allocation over the log. Returns (base, free_list, assignments)."""
+    """Allocation over the log. Returns (base, free_list, assignments).
+
+    Two kinds of reserve line coexist:
+
+    - `op=reserve` **with a `value=`** — a *receipt*: the number was allocated before
+      the line was written (a git ref compare-and-swap, or a confirmed optimistic
+      append), and replay never renumbers it. Shards arriving late, bases appended
+      afterwards, permuted merge orders — none of them move a value that is already
+      on its line. A receipt whose value is already live lost its race and gets no
+      assignment: its run saw the loss on read-back and appended another line.
+    - **bare** `op=reserve` — the legacy positional claim: free-list head, else
+      `base + served`. Its value is a function of the merged order, which is exactly
+      why every new writer stamps the value instead of leaving it to be computed.
+    """
     base = None
     free: list[int] = []
     served = 0
     assignments: list[tuple[str, int]] = []
+    live: set[int] = set()
     for ev in events:
         if ev["key"] != reg:
             continue
@@ -1341,19 +1359,42 @@ def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, l
             # re-base exists to prevent, arriving through the other door.
             free = [f for f in free if f >= base]
             continue
+        if ev["op"] == "reserve" and (ev.get("value") or ""):
+            # A receipt is honoured even before any base line: the number is issued,
+            # and ignoring it would let the positional path hand it out again.
+            try:
+                value = int(ev["value"])
+            except ValueError:
+                continue
+            if value in live:
+                continue
+            live.add(value)
+            assignments.append((ev["run"], value))
+            if value in free:
+                free.remove(value)
+            elif base is not None and value >= base + served:
+                # The positional count follows the receipt forward, so the next bare
+                # reserve lands past it instead of on top of it.
+                served = value - base + 1
+            continue
         if base is None:
             continue
         if ev["op"] == "release_id":
             try:
-                free.append(int(ev.get("value") or 0))
+                freed = int(ev.get("value") or 0)
             except ValueError:
                 pass
+            else:
+                free.append(freed)
+                live.discard(freed)
         elif ev["op"] == "reserve":
             if free:
-                assignments.append((ev["run"], free.pop(0)))
+                value = free.pop(0)
             else:
-                assignments.append((ev["run"], base + served))
+                value = base + served
                 served += 1
+            live.add(value)
+            assignments.append((ev["run"], value))
     return (base or 0), free, assignments
 
 
@@ -1549,6 +1590,76 @@ class Sync:
         if r.returncode != 0:
             print(f"note: could not release {key} on the remote: {r.stderr.strip()[:160]}",
                   file=sys.stderr)
+
+    # -- git id allocation: the same compare-and-swap, pointed at a counter -----
+
+    @staticmethod
+    def _id_ref(reg: str) -> str:
+        return "refs/agent-sync/ids/" + re.sub(r"[^A-Za-z0-9._-]+", "-", reg).strip("-")
+
+    def _git_reserve_id(self, reg: str, floor: int) -> int:
+        """Allocate the next id for `reg` by compare-and-swap on a remote ref.
+
+        The ref's tip commit body records the next free number. Winning the push IS
+        the allocation: the remote accepts exactly one successor per tip, so two
+        concurrent reserves cannot both take one number — the loser is rejected,
+        re-reads the moved tip and takes the next. The value returned is immutable
+        from that moment: no replay recomputes it, and the log line the caller
+        writes afterwards is a receipt, never a claim.
+
+        Retry is bounded by RESERVE_RETRIES: a remote that keeps moving under us is
+        reported as contention, not spun on.
+        """
+        remote, ref = self._git_remote(), self._id_ref(reg)
+        last_err = "push rejected"
+        for _attempt in range(RESERVE_RETRIES):
+            out = git("ls-remote", remote, ref)
+            sha: str | None = None
+            recorded = 0
+            if out:
+                sha = out.split()[0]
+                git("fetch", "-q", remote, f"{ref}:refs/agent-sync/fetched-id")
+                body = git("log", "-1", "--format=%B", sha) or git(
+                    "log", "-1", "--format=%B", "refs/agent-sync/fetched-id")
+                try:
+                    recorded = int(json.loads(body.strip()).get("next", 0))
+                except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+                    # An unreadable counter never resets allocation: the floor and the
+                    # issued receipts below still push it forward.
+                    recorded = 0
+            # The register file and the log are floors, for the same reason the log
+            # path consults the register: they know what was issued or written by
+            # every path — including receipts from before this counter existed, and
+            # a person's hand in the file. A floor only ever moves allocation forward.
+            events, _ = self.events("reservations")
+            _b, _f, assignments = resolve_reservations(events, reg)
+            issued_next = max((v for _r, v in assignments), default=-1) + 1
+            value = max(floor, recorded, issued_next)
+            payload = json.dumps({"reg": reg, "next": value + 1, "run": self.rid,
+                                  "ts": now_iso(), "repo": repo_name(),
+                                  "host": platform.node()})
+            empty_tree = git("hash-object", "-t", "tree", os.devnull)
+            made = subprocess.run(
+                ["git", "-c", "user.name=agent-sync", "-c",
+                 "user.email=agent-sync@localhost", "commit-tree", empty_tree],
+                input=payload, capture_output=True, text=True)
+            commit = made.stdout.strip()
+            if not commit:
+                detail = (made.stderr or "").strip().splitlines()
+                why = detail[-1] if detail else "no output from git commit-tree"
+                raise Fail(f"could not create the id object — is this a git repository? ({why})")
+            args = ["git", "push", remote, f"{commit}:{ref}"]
+            if sha:                        # moving an existing counter, and only that
+                args.insert(2, f"--force-with-lease={ref}:{sha}")
+            r = subprocess.run(args, capture_output=True, text=True)
+            if r.returncode == 0:
+                return value
+            err_lines = (r.stderr or "").strip().splitlines()
+            last_err = err_lines[-1][:160] if err_lines else "push rejected"
+            time.sleep(0.1 + random.random() * 0.2)
+        raise Fail(
+            f"reserve {reg}: the id ref on '{remote}' moved {RESERVE_RETRIES} times in a "
+            f"row — another allocator is racing; retry ({last_err})")
 
     @property
     def lease_mode(self) -> str:
@@ -2159,52 +2270,75 @@ class Sync:
     # -- ids ---------------------------------------------------------------
 
     def reserve(self, reg: str) -> int:
-        if not self.adapter.is_lease_authority:
+        if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
             raise Fail(
                 f"backend '{self.adapter.name}' cannot reserve ids safely "
-                "(atomicAppend is false). Allocate by hand and record it, or configure a "
-                "cloud backend. Pretending would hand two agents the same id.")
-        # Every shard, not just this run's. `log_id` returns the document THIS run writes,
-        # and reading it alone was the whole defect: three runs each replayed a log
-        # containing only their own lines, each seeded a base from the register, and each
-        # was handed the same number — while `_leaks` on the same data, read merged,
-        # reported the truth. Allocation is positional over the WHOLE log or it is nothing.
+                "(atomicAppend is false and the lease backend is not git). Allocate by "
+                "hand and record it, set `leaseBackend: \"git\"`, or configure a cloud "
+                "backend. Pretending would hand two agents the same id.")
+        # The register knows what is actually written, by every path including the ones
+        # that never touch this tool — a person editing the file, another session's Doc
+        # Loop, a merge. It is a **floor**, never a ceiling: it can only push allocation
+        # forward, so honouring it never revokes a live reservation.
+        floor = self._seed_base(reg)
         oid = self.log_id("reservations")
-        events, _ = self.events("reservations")
-        base, _free, _assign = resolve_reservations(events, reg)
-        if not base:
-            base = self._seed_base(reg)
-            self.adapter.log_append(oid, fmt_line("base", reg, self.rid, value=f"{base:04d}"))
+        if self.lease_is_cross_machine:
+            # Across machines the shards are git files, and a shard another machine has
+            # not pushed yet is invisible here — positional replay over what IS visible
+            # handed two machines the same number. The remote id ref is the one piece of
+            # state both sides must move through, so the compare-and-swap on it is the
+            # allocator; the line below is a receipt of a number already won.
+            value = self._git_reserve_id(reg, floor)
+            self.adapter.log_append(
+                oid, fmt_line("reserve", reg, self.rid, value=f"{value:04d}"))
+            return value
+        # Total-order backends (atomicAppend): optimistic claim. Every shard, not just
+        # this run's — `log_id` returns the document THIS run writes, and reading it
+        # alone was the whole defect: three runs each replayed a log containing only
+        # their own lines, and each was handed the same number. The claim carries its
+        # value, so once it wins the read-back it can never be renumbered by a shard
+        # that arrives later or a base appended afterwards.
+        for _attempt in range(RESERVE_RETRIES):
             events, _ = self.events("reservations")
-        else:
-            # The log knows what *this tool* handed out. The register knows what is actually
-            # written, by every path including the ones that never touch this tool — a person
-            # editing the file, another session's Doc Loop, a merge. The log alone therefore drifts
-            # behind, silently and permanently, and hands out ids that already have a heading.
-            #
-            # This is the failure mode the whole mechanism exists to prevent, so the register is
-            # consulted on every reserve and treated as a **floor**, never as a ceiling: it can only
-            # push the allocation forward. Ids this tool reserved but nobody has written yet are not
-            # in the register, so honouring it as a floor never revokes a live reservation.
-            #
-            # Probed rather than computed: the allocator is asked what it *would* hand out next, by
-            # resolving a synthetic reserve. That keeps one implementation of the allocation rule
-            # instead of a second copy here that can disagree with it.
-            floor = self._seed_base(reg)
-            probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe", "value": ""}]
-            _b, _f, probed = resolve_reservations(probe, reg)
-            if probed and probed[-1][1] < floor:
+            base, _free, _assign = resolve_reservations(events, reg)
+            if not base:
                 self.adapter.log_append(
                     oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
                 events, _ = self.events("reservations")
-        self.adapter.log_append(oid, fmt_line("reserve", reg, self.rid))
-        time.sleep(0.25 + random.random() * 0.15)
-        events, _ = self.events("reservations")
-        _b, _f, assignments = resolve_reservations(events, reg)
-        mine = [v for r, v in assignments if r == self.rid]
-        if not mine:
-            raise Fail(f"reserve {reg}: the append did not read back — retry")
-        return mine[-1]
+            else:
+                # Probed rather than computed: the allocator is asked what it *would*
+                # hand out next, by resolving a synthetic reserve. That keeps one
+                # implementation of the allocation rule instead of a second copy here
+                # that can disagree with it.
+                probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe",
+                                   "value": ""}]
+                _b, _f, probed = resolve_reservations(probe, reg)
+                if probed and probed[-1][1] < floor:
+                    self.adapter.log_append(
+                        oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
+                    events, _ = self.events("reservations")
+            probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe",
+                               "value": ""}]
+            _b, _f, probed = resolve_reservations(probe, reg)
+            if not probed:
+                raise Fail(f"reserve {reg}: could not resolve a candidate — the "
+                           "reservations log has no usable base; retry")
+            candidate = probed[-1][1]
+            self.adapter.log_append(
+                oid, fmt_line("reserve", reg, self.rid, value=f"{candidate:04d}"))
+            time.sleep(0.25 + random.random() * 0.15)
+            events, _ = self.events("reservations")
+            _b, _f, assignments = resolve_reservations(events, reg)
+            winners = [r for r, v in assignments if v == candidate]
+            if winners and winners[-1] == self.rid:
+                return candidate
+            if not any(r == self.rid and v == candidate for r, v in assignments) and \
+                    not winners:
+                raise Fail(f"reserve {reg}: the append did not read back — retry")
+            # Somebody's receipt for the same number sits earlier in the merged order.
+            # That run keeps it; this one re-reads and takes the next number.
+        raise Fail(f"reserve {reg}: lost the allocation race {RESERVE_RETRIES} times "
+                   "in a row — another allocator is racing; retry")
 
     def _seed_base(self, reg: str) -> int:
         spec = (self.cfg.get("idRegisters") or {}).get(reg)
@@ -2229,11 +2363,12 @@ class Sync:
         On a backend that cannot order writes this used to do nothing and print
         "released" anyway. The id stayed a hole the board reports as a leak, and the only
         party who could have fixed that had been told it was handled."""
-        if not self.adapter.is_lease_authority:
+        if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
             raise Fail(
                 f"backend '{self.adapter.name}' cannot record a released id "
-                "(atomicAppend is false), so nothing was returned to the pool. Note it in "
-                f"the register by hand, or configure a backend that can: {reg}-{value}")
+                "(atomicAppend is false and the lease backend is not git), so nothing "
+                "was returned to the pool. Note it in the register by hand, or "
+                f"configure a backend that can: {reg}-{value}")
         self.adapter.log_append(self.log_id("reservations"),
                                 fmt_line("release_id", reg, self.rid, value=value))
 

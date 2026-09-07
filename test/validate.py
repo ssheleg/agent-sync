@@ -3257,12 +3257,20 @@ def self_test() -> int:
         # separates three runs, which is why the second was easy to miss.
         "reserve reads only its own shard": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
-            lambda t: t.replace('        events, _ = self.events("reservations")\n'
-                                '        base, _free, _assign',
-                                '        events, _ = parse_log(self.adapter.log_read(oid))\n'
-                                '        base, _free, _assign')
-                       .replace("            if base is not None and value <= base + served:\n"
-                                "                continue\n", "")),
+            # Both reads: the candidate probe AND the read-back that confirms the
+            # receipt. Diverting only the probe is survivable by design now — the
+            # merged confirm sees the duplicate and retries — so the mutation must
+            # blind the confirm too, which is the original defect in full.
+            lambda t: t.replace('            events, _ = self.events("reservations")\n'
+                                '            base, _free, _assign',
+                                '            events, _ = parse_log(self.adapter.log_read(oid))\n'
+                                '            base, _free, _assign')
+                       .replace('            events, _ = self.events("reservations")\n'
+                                '            _b, _f, assignments = resolve_reservations(events, reg)',
+                                '            events, _ = parse_log(self.adapter.log_read(oid))\n'
+                                '            _b, _f, assignments = resolve_reservations(events, reg)')
+                       .replace('                events, _ = self.events("reservations")',
+                                '                events, _ = parse_log(self.adapter.log_read(oid))')),
         # `renew` back to logging a renewal it never performed.
         "renew moves no timestamp": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",

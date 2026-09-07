@@ -248,29 +248,51 @@ contracts on purpose. Do not "align" them by widening `reap`.
 
 ## Id reservation
 
-Reading a "next free id" line from a file is not reserving it. Allocation is
-**positional over the log**, so no agent has to trust another's arithmetic.
-
-A register is opened once:
+Reading a "next free id" line from a file is not reserving it. An issued id is
+**immutable**: once `reserve` has printed a number, no replay, late-arriving shard or
+appended base may move it. The line that records it carries the value —
 
 ```
-- `…` `op=base` `key=DEC` `value=0216` `run=r-bootstrap`
+- `…` `op=reserve` `key=DEC` `value=0042` `run=r-7f3a91`
 ```
 
-Then, replaying in order and maintaining a free list:
+— a **receipt** of an allocation that already happened, never a claim to be computed
+later. A receipt whose value is already live lost its race and gets no assignment; the
+run that wrote it saw the loss on read-back and appended another line. Where the value
+comes from depends on the mode:
 
+- **`leaseBackend: "git"`** — the allocator is a compare-and-swap on a remote ref,
+  `refs/agent-sync/ids/<REG>`, whose tip commit records the next free number. Winning
+  the push IS the allocation: the remote accepts exactly one successor per tip, so two
+  concurrent reserves cannot take one number — the loser re-reads the moved tip and
+  takes the next, bounded at `RESERVE_RETRIES` attempts before reporting contention.
+  This is the same push semantics the lease itself rides on, and it is why positional
+  replay could never be safe across machines: a shard another machine has not pushed
+  yet is invisible, and two machines replaying different logs were both "correct" about
+  histories nobody shared. A released id is recorded for the leak report but never
+  reissued automatically here — the counter only moves forward.
+- **Total-order backends** (Outline, Notion) — the value is probed positionally over
+  the merged log, then claimed by appending the receipt and confirmed on read-back;
+  a lost race retries with the next number, bounded the same way.
+
+Legacy bare `op=reserve` lines (no `value=`) still resolve positionally, replaying in
+order and maintaining a free list:
+
+- `op=base key=DEC value=0216` opens a register; a `base` only ever moves allocation
+  **forward** — two runs opening a register in the same minute cannot restart each
+  other's count.
 - `op=release_id key=DEC value=NNNN` pushes `NNNN` onto the free list.
-- `op=reserve key=DEC` takes the free-list head if it is non-empty; otherwise it
-  takes `base + (count of prior reserves not served from the free list)`.
+- bare `op=reserve key=DEC` takes the free-list head if it is non-empty; otherwise
+  `base + (count of prior reserves not served from the free list)`.
 
 Every reader computes the same assignment for every reserve line, including its own —
 **and "the log" means every shard merged, never the one this run writes.** Reading only
 its own document is how `reserve` handed three runs `DEC-0007` three times (fixed in
 1.5.3): each replayed a log containing only its own lines, each seeded its own `base`
-from the register, and each was correct about a history nobody else shared. The failure
-is the same one that disqualified per-writer documents as a *lease* store, arriving in
-the allocator — so a `base` now only ever moves allocation **forward**, and two runs
-opening a register in the same minute cannot restart each other's count.
+from the register, and each was correct about a history nobody else shared. The
+value-carrying receipt closes the remaining half of that defect: the merged order
+itself could still renumber an already-issued id when a shard arrived late, and now it
+cannot (`test/audit_regressions/fix-sy-01.01.py`, finding SY-01).
 
 **An id you reserved and did not write to git must be released** with
 `release_id`. An id that is reserved, unreleased and absent from git after its run
