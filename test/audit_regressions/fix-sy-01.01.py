@@ -273,7 +273,7 @@ def t_cas_loss_is_retried_and_bounded():
 
     A.subprocess.run = racing_run
     try:
-        value = sync._git_reserve_id("DEC", 42)
+        value, _rev = sync._git_reserve_id("DEC", 42)
     finally:
         A.subprocess.run = real_run
     assert state["pushes"] >= 2, "the CAS loss was never exercised"

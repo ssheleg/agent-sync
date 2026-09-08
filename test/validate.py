@@ -946,6 +946,20 @@ def check_reserve_is_race_free() -> None:
             if handed and min(handed) < 7:
                 err(f"reserve: handed {min(handed)}, below the register's next free id (7) — "
                     "an id that already has a heading")
+
+            # FIX-SY-01.02: a RETRY of one reservation key is the same reservation.
+            # A crash between allocation and the caller recording the number is a
+            # retry, and a retry that allocates again costs one crash two ids.
+            os.environ["AGENT_SYNC_RUN_ID"] = "delta"
+            first = mod.Sync().reserve("DEC", rkey="rk-idem")
+            second = mod.Sync().reserve("DEC", rkey="rk-idem")
+            if first != second:
+                err(f"reserve: one reservation key was handed two numbers ({first}, "
+                    f"{second}) — a retry allocated instead of answering")
+            moved_on = mod.Sync().reserve("DEC", rkey="rk-next")
+            if moved_on == first:
+                err("reserve: a FRESH reservation key was handed an already-issued "
+                    "number — the idempotency short-circuit is matching too widely")
     finally:
         os.chdir(cwd)
         os.environ.pop("AGENT_SYNC_RUN_ID", None)

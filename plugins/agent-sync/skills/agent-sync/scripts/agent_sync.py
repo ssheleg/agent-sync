@@ -1597,8 +1597,9 @@ class Sync:
     def _id_ref(reg: str) -> str:
         return "refs/agent-sync/ids/" + re.sub(r"[^A-Za-z0-9._-]+", "-", reg).strip("-")
 
-    def _git_reserve_id(self, reg: str, floor: int) -> int:
+    def _git_reserve_id(self, reg: str, floor: int, rkey: str | None = None) -> tuple[int, str]:
         """Allocate the next id for `reg` by compare-and-swap on a remote ref.
+        Returns (value, winning commit sha) — the sha is the receipt's revision.
 
         The ref's tip commit body records the next free number. Winning the push IS
         the allocation: the remote accepts exactly one successor per tip, so two
@@ -1606,6 +1607,12 @@ class Sync:
         re-reads the moved tip and takes the next. The value returned is immutable
         from that moment: no replay recomputes it, and the log line the caller
         writes afterwards is a receipt, never a claim.
+
+        `rkey` closes the crash window between winning the CAS and writing the
+        receipt: each counter commit carries the reservation key it served and is
+        parented on the tip it replaced, so a retry of the SAME reservation finds
+        its own allocation in the ref's history and returns it — one key, one
+        number, however many times the caller had to come back.
 
         Retry is bounded by RESERVE_RETRIES: a remote that keeps moving under us is
         reported as contention, not spun on.
@@ -1619,6 +1626,24 @@ class Sync:
             if out:
                 sha = out.split()[0]
                 git("fetch", "-q", remote, f"{ref}:refs/agent-sync/fetched-id")
+                if rkey:
+                    # The crash window: allocation won, receipt never written. The
+                    # chain remembers which key each number was served to; a bounded
+                    # walk suffices, because a retry follows its crash closely.
+                    history = git("log", "-50", "--format=%H%x1f%B%x1e",
+                                  "refs/agent-sync/fetched-id")
+                    for entry in history.split("\x1e"):
+                        entry = entry.strip()
+                        if not entry:
+                            continue
+                        commit_sha, _, body_text = entry.partition("\x1f")
+                        try:
+                            served = json.loads(body_text.strip())
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        if served.get("rkey") == rkey and served.get("reg") == reg \
+                                and served.get("run") == self.rid:
+                            return int(served["next"]) - 1, commit_sha.strip()
                 body = git("log", "-1", "--format=%B", sha) or git(
                     "log", "-1", "--format=%B", "refs/agent-sync/fetched-id")
                 try:
@@ -1635,14 +1660,20 @@ class Sync:
             _b, _f, assignments = resolve_reservations(events, reg)
             issued_next = max((v for _r, v in assignments), default=-1) + 1
             value = max(floor, recorded, issued_next)
-            payload = json.dumps({"reg": reg, "next": value + 1, "run": self.rid,
-                                  "ts": now_iso(), "repo": repo_name(),
-                                  "host": platform.node()})
+            body_fields = {"reg": reg, "next": value + 1, "run": self.rid,
+                           "ts": now_iso(), "repo": repo_name(),
+                           "host": platform.node()}
+            if rkey:
+                body_fields["rkey"] = rkey
+            payload = json.dumps(body_fields)
             empty_tree = git("hash-object", "-t", "tree", os.devnull)
-            made = subprocess.run(
-                ["git", "-c", "user.name=agent-sync", "-c",
-                 "user.email=agent-sync@localhost", "commit-tree", empty_tree],
-                input=payload, capture_output=True, text=True)
+            # Parented on the tip it replaces, so the ref keeps the chain a crashed
+            # retry reads its own allocation back out of.
+            tree_args = ["git", "-c", "user.name=agent-sync", "-c",
+                         "user.email=agent-sync@localhost", "commit-tree", empty_tree]
+            if sha:
+                tree_args += ["-p", "refs/agent-sync/fetched-id"]
+            made = subprocess.run(tree_args, input=payload, capture_output=True, text=True)
             commit = made.stdout.strip()
             if not commit:
                 detail = (made.stderr or "").strip().splitlines()
@@ -1653,7 +1684,7 @@ class Sync:
                 args.insert(2, f"--force-with-lease={ref}:{sha}")
             r = subprocess.run(args, capture_output=True, text=True)
             if r.returncode == 0:
-                return value
+                return value, commit
             err_lines = (r.stderr or "").strip().splitlines()
             last_err = err_lines[-1][:160] if err_lines else "push rejected"
             time.sleep(0.1 + random.random() * 0.2)
@@ -2269,13 +2300,24 @@ class Sync:
 
     # -- ids ---------------------------------------------------------------
 
-    def reserve(self, reg: str) -> int:
+    def reserve(self, reg: str, rkey: str | None = None) -> int:
         if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
             raise Fail(
                 f"backend '{self.adapter.name}' cannot reserve ids safely "
                 "(atomicAppend is false and the lease backend is not git). Allocate by "
-                "hand and record it, set `leaseBackend: \"git\"`, or configure a cloud "
-                "backend. Pretending would hand two agents the same id.")
+                "hand and record it, set `leaseBackend: \"git\"`, use `reserve --offline` "
+                "for a namespaced offline id, or configure a cloud backend. Pretending "
+                "would hand two agents the same id.")
+        # A named reservation retried is the SAME reservation. If this run's receipt
+        # for the key is already in the merged log, hand its number back — a retry
+        # that allocates again is how one crash costs two ids.
+        if rkey:
+            events, _ = self.events("reservations")
+            for ev in events:
+                if ev.get("op") == "reserve" and ev.get("key") == reg \
+                        and ev.get("run") == self.rid and ev.get("rkey") == rkey \
+                        and (ev.get("value") or ""):
+                    return int(ev["value"])
         # The register knows what is actually written, by every path including the ones
         # that never touch this tool — a person editing the file, another session's Doc
         # Loop, a merge. It is a **floor**, never a ceiling: it can only push allocation
@@ -2288,9 +2330,13 @@ class Sync:
             # handed two machines the same number. The remote id ref is the one piece of
             # state both sides must move through, so the compare-and-swap on it is the
             # allocator; the line below is a receipt of a number already won.
-            value = self._git_reserve_id(reg, floor)
+            value, rev = self._git_reserve_id(reg, floor, rkey)
+            # The receipt names its authority: which backend allocated, at which
+            # revision, for which reservation key. A number nobody can trace to an
+            # authority is a rumour with digits.
             self.adapter.log_append(
-                oid, fmt_line("reserve", reg, self.rid, value=f"{value:04d}"))
+                oid, fmt_line("reserve", reg, self.rid, value=f"{value:04d}",
+                              backend="git", rev=rev[:12], rkey=rkey))
             return value
         # Total-order backends (atomicAppend): optimistic claim. Every shard, not just
         # this run's — `log_id` returns the document THIS run writes, and reading it
@@ -2325,7 +2371,8 @@ class Sync:
                            "reservations log has no usable base; retry")
             candidate = probed[-1][1]
             self.adapter.log_append(
-                oid, fmt_line("reserve", reg, self.rid, value=f"{candidate:04d}"))
+                oid, fmt_line("reserve", reg, self.rid, value=f"{candidate:04d}",
+                              backend="log", rkey=rkey))
             time.sleep(0.25 + random.random() * 0.15)
             events, _ = self.events("reservations")
             _b, _f, assignments = resolve_reservations(events, reg)
@@ -2371,6 +2418,52 @@ class Sync:
                 f"configure a backend that can: {reg}-{value}")
         self.adapter.log_append(self.log_id("reservations"),
                                 fmt_line("release_id", reg, self.rid, value=value))
+
+    def reserve_offline(self, reg: str) -> str:
+        """A namespaced id issued with NO global authority — `<REG>-o-<run>-<seq>`.
+
+        Deliberately SHAPED so it cannot collide with the numeric sequence: the
+        global allocator hands out digits, this hands out an `o-` composite keyed
+        by run identity. There is no fake global counter behind it, which is the
+        point — an offline allocator that pretends to know the next number is the
+        two-agents-one-id defect with extra steps. Map it onto a real number later
+        with `map_offline`, append-only."""
+        if (self.cfg.get("idRegisters") or {}).get(reg) is None:
+            raise Fail(f"register '{reg}' is not declared in .claude/agent-sync.json")
+        oid = self.log_id("reservations")
+        events, _ = self.events("reservations")
+        mine = sum(1 for ev in events if ev.get("op") == "reserve_offline"
+                   and ev.get("key") == reg and ev.get("run") == self.rid)
+        suffix = re.sub(r"[^a-z0-9]", "", self.rid.lower())[-8:] or "anon"
+        token = f"o-{suffix}-{mine + 1:03d}"
+        self.adapter.log_append(oid, fmt_line("reserve_offline", reg, self.rid, value=token))
+        return f"{reg}-{token}"
+
+    def map_offline(self, reg: str, offline_id: str, number: str) -> None:
+        """Bind an offline id to a real, properly reserved number — append-only.
+
+        The same fact twice is one fact; a DIFFERENT number for a mapped id is
+        refused, never rewritten — the documents already carrying the offline id
+        were written against the first answer."""
+        token = offline_id[len(reg) + 1:] if offline_id.startswith(f"{reg}-") else offline_id
+        if not re.fullmatch(r"\d+", number):
+            raise Fail(f"map_offline binds a NUMBER from `reserve` — {number!r} is not one")
+        events, _ = self.events("reservations")
+        issued = any(ev.get("op") == "reserve_offline" and ev.get("key") == reg
+                     and ev.get("value") == token for ev in events)
+        if not issued:
+            raise Fail(f"{reg}-{token} was never issued by reserve_offline — nothing to map")
+        for ev in events:
+            if ev.get("op") == "map_offline" and ev.get("key") == reg \
+                    and ev.get("value") == token:
+                if ev.get("mapped") == number:
+                    return
+                raise Fail(
+                    f"{reg}-{token} is already mapped to {reg}-{ev.get('mapped')} — the "
+                    "mapping is append-only; reserve a new number instead of rebinding")
+        self.adapter.log_append(self.log_id("reservations"),
+                                fmt_line("map_offline", reg, self.rid,
+                                         value=token, mapped=number))
 
     # -- journal / signals -------------------------------------------------
 
@@ -3740,8 +3833,18 @@ def cmd_release(args: argparse.Namespace) -> int:
 
 
 def cmd_reserve(args: argparse.Namespace) -> int:
-    value = Sync().reserve(args.register)
+    s = Sync()
+    if getattr(args, "offline", False):
+        print(s.reserve_offline(args.register))
+        return 0
+    value = s.reserve(args.register, rkey=getattr(args, "rkey", None))
     print(f"{args.register}-{value:04d}")
+    return 0
+
+
+def cmd_map_offline(args: argparse.Namespace) -> int:
+    Sync().map_offline(args.register, args.offline_id, args.number)
+    print(f"mapped {args.offline_id} -> {args.register}-{args.number}")
     return 0
 
 
@@ -5038,7 +5141,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     rv = sub.add_parser("reserve", help="reserve the next id in a register")
     rv.add_argument("register")
+    rv.add_argument("--key", dest="rkey", default=None,
+                    help="reservation key: a retry with the same key returns the SAME id")
+    rv.add_argument("--offline", action="store_true",
+                    help="issue a namespaced offline id (no global authority; map it later)")
     rv.set_defaults(fn=cmd_reserve)
+    mo = sub.add_parser("map-offline",
+                        help="bind an offline id to a reserved number, append-only")
+    mo.add_argument("register")
+    mo.add_argument("offline_id")
+    mo.add_argument("number")
+    mo.set_defaults(fn=cmd_map_offline)
 
     ri = sub.add_parser("release-id", help="return an id you did not write to git")
     ri.add_argument("register")

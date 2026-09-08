@@ -42,7 +42,8 @@ so a parser anchored to the character you wrote rejects every line the server ha
 back. Observed live, and it presented as a lost race rather than a parse failure.
 
 Required on every line: `op`, `key`, `run`. `op` is one of
-`acquire` · `release` · `renew` · `base` · `reserve` · `release_id` · `signal` · `journal`.
+`acquire` · `release` · `renew` · `base` · `reserve` · `release_id` ·
+`reserve_offline` · `map_offline` · `signal` · `journal`.
 
 Unparseable lines are **counted and reported**, never guessed at. Anything
 entry-shaped (`^[-*+] \``) that fails the full pattern counts as unparseable; blank
@@ -274,6 +275,19 @@ comes from depends on the mode:
 - **Total-order backends** (Outline, Notion) — the value is probed positionally over
   the merged log, then claimed by appending the receipt and confirmed on read-back;
   a lost race retries with the next number, bounded the same way.
+
+A receipt also **names its authority**: `backend=` (git or log), `rev=` (the
+counter commit that served it, in git mode) and `rkey=` (the reservation key).
+A retry with the same `--key` is the SAME reservation — answered from the
+merged log, or, when the run died between winning the compare-and-swap and
+writing its receipt, from the counter ref's own chain, which remembers which
+key each number was served to. One key, one number, however many retries.
+
+**Offline, there is no global sequence to pretend at.** `reserve --offline`
+issues a namespaced composite — `REG-o-<run>-<seq>` — that cannot collide with
+the numeric sequence, and `map-offline` later binds it to a properly reserved
+number, append-only: the same fact twice is one fact, a different number is
+refused, and an id never issued cannot be mapped at all.
 
 Legacy bare `op=reserve` lines (no `value=`) still resolve positionally, replaying in
 order and maintaining a free list:

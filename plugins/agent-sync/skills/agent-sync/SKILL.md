@@ -163,7 +163,8 @@ npx sshlg-skills install
 | `acquire <KEY>` | Take the lease on a task id. Prints `won` or `lost <holder>` |
 | `renew <KEY>` | Extend the lease. The `PostToolUse` hook does this for you |
 | `release <KEY>` | Give the lease back. Always do this, including on failure |
-| `reserve <REG>` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id |
+| `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
+| `map-offline <REG> <ID> <N>` | Bind an offline id to a properly reserved number — append-only, never rebound |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |
 | `journal <text>` | Append one line to this run's journal |
 | `record <text>` | Append what you **actually built** — `--decision DEC-…`, `--files a,b` |
