@@ -18,6 +18,7 @@ Standard library only; real project directories.
 import importlib.util
 import json
 import os
+import time
 import subprocess
 import sys
 import tempfile
@@ -112,8 +113,15 @@ def t_partial_read_never_yields_two_owners():
     d = project()
     lockdir = os.path.join(d, ".agent-sync", "leases")
     os.makedirs(lockdir, exist_ok=True)
-    with open(os.path.join(lockdir, "K3.lock"), "w") as fh:
+    torn = os.path.join(lockdir, "K3.lock")
+    with open(torn, "w") as fh:
         fh.write('{"run": "r-half')          # a torn write
+    # SY-05: a torn lock YOUNGER than the creation grace is a creation-in-flight
+    # and is protected, not reaped. To test the reap of a genuinely abandoned
+    # torn lock, age it past the grace — otherwise this asserts SY-05's own
+    # protect-the-creator behaviour would be violated.
+    old_mtime = time.time() - (A.Sync.CREATE_GRACE_SECONDS + 5)
+    os.utime(torn, (old_mtime, old_mtime))
     a = sync_as(d, "r-reader")
     assert a._refresh_lease("K3") is False, "a torn lock was renewed as owned"
     assert a.acquire("K3")[0], "a torn lock could not be reaped and taken"
