@@ -3,6 +3,30 @@
 # Any other non-zero code is NON-blocking in Claude Code, so every internal
 # failure must also exit 2 — a crashing guard that fails open guards nothing.
 set -uo pipefail
+# --------------------------------------------------------------------------
+# THE PROTECTION BOUNDARY IS ADVISORY, AND STATED SO (FIX-SY-07.01).
+#
+# This guard is a best-effort PreToolUse check, not a sandbox. It covers the
+# mutation surfaces a Claude Code matcher can name; everything else is a write
+# vector it cannot see. The capability matrix, per write vector:
+#
+#   Write / Edit / MultiEdit / NotebookEdit   COVERED  (file_path matcher)
+#   Bash: git commit (incl. -C, env, compound) COVERED (parsed below)
+#   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
+#   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
+#   Bash: sed -i / perl -i                      UNSUPPORTED (in-place edit, no arg parse)
+#   Bash: > redirect / tee                      UNSUPPORTED (shell effect, not a tool arg)
+#   Bash: git -C <dir> commit                   COVERED (repo resolved from -C)
+#   Bash: env VAR=x git commit                  COVERED (env prefix skipped)
+#   Bash: compound (a && git commit)            COVERED (each segment parsed)
+#
+# An UNSUPPORTED vector is not silently trusted — it is DECLARED unenforced.
+# A caller that needs a hard guarantee routes file writes through a trusted
+# mutation API, an isolated worktree, or OS controls with resource locks; a
+# regex shell parser is not a universal sandbox and this guard never claims to
+# be one. The late staged-path check on a commit cannot recover a working tree
+# already overwritten by an unsupported vector before staging.
+# --------------------------------------------------------------------------
 . "${CLAUDE_PLUGIN_ROOT}/hooks/_lib.sh"
 S="$AGENT_SYNC_PY"
 agent_sync_configured || exit 0

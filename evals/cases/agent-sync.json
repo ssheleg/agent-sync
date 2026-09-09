@@ -1,0 +1,188 @@
+{
+ "contract": "outcome-case/1 (schemas/outcome-case.schema.json + test/outcome_harness.py in ssheleg/sshlg-skills)",
+ "note": "Outcome corpus for agent-sync (FIX-EV-01.12). Judged on ARTIFACTS via the family harness: the runner records the actual output oracle verdict AND the raw result per case; with/without-skill arms are the harness's baseline contract. The git-lease case is probe-gated on git — an absent git binary is NOT_RUN, never PASS. Nothing in the production skill was changed for grader convenience.",
+ "arms": {
+  "baseline": "same prompts, skill absent",
+  "current": "same prompts, skill installed"
+ },
+ "cases": [
+  {
+   "schema_version": "outcome-case/1",
+   "id": "AS-OUT-001-positive-exclusive-acquire",
+   "skill": "agent-sync",
+   "prompt": {
+    "text": "Two runs acquire the same lease key against a real fs-backed agent-sync project; report which run won and that exactly one did into acquire-report.md."
+   },
+   "environment": {
+    "model": "inherit",
+    "host": "any",
+    "case_digest": "3238b36c4a5caff0bffbb9c0d49f41d2ff4c0c06d6de1ddc665b354721f2aac8"
+   },
+   "checks": {
+    "tool": [
+     {
+      "name": "python3 present",
+      "command": "python3 -c 'pass'"
+     }
+    ],
+    "load_trace": {
+     "expect_loaded": [
+      "agent-sync"
+     ],
+     "expect_not_loaded": []
+    },
+    "outcome": [
+     {
+      "name": "report exists",
+      "kind": "artifact-exists",
+      "target": "acquire-report.md"
+     },
+     {
+      "name": "exactly one run won (SY-05)",
+      "kind": "artifact-contains",
+      "target": "acquire-report.md",
+      "expect": "exactly one"
+     }
+    ]
+   }
+  },
+  {
+   "schema_version": "outcome-case/1",
+   "id": "AS-OUT-002-negative-routing",
+   "skill": "agent-sync",
+   "prompt": {
+    "text": "Explain in two sentences what a webhook is."
+   },
+   "environment": {
+    "model": "inherit",
+    "host": "any",
+    "case_digest": "a5da94aa03520bb6226ea88328a75ab6d7e3985c73a0e90a1379bf168fead57e"
+   },
+   "checks": {
+    "tool": [
+     {
+      "name": "python3 present",
+      "command": "python3 -c 'pass'"
+     }
+    ],
+    "load_trace": {
+     "expect_loaded": [],
+     "expect_not_loaded": [
+      "agent-sync"
+     ]
+    },
+    "outcome": [
+     {
+      "name": "no coordination artifact appears",
+      "kind": "command-exit-0",
+      "target": "test ! -f acquire-report.md"
+     }
+    ]
+   }
+  },
+  {
+   "schema_version": "outcome-case/1",
+   "id": "AS-OUT-003-resource-claim-guards-the-file",
+   "skill": "agent-sync",
+   "prompt": {
+    "text": "Two different task leases try to write one shared registry file; show the second is refused on the FILE's resource claim while two independent files never serialize; write guard-report.md."
+   },
+   "environment": {
+    "model": "inherit",
+    "host": "any",
+    "case_digest": "1a113dd5fe4c8c8dcfdecbeab4805e91734a788d373e9e336c340958ab664bb2"
+   },
+   "checks": {
+    "tool": [
+     {
+      "name": "python3 present",
+      "command": "python3 -c 'pass'"
+     }
+    ],
+    "load_trace": {
+     "expect_loaded": [
+      "agent-sync"
+     ],
+     "expect_not_loaded": []
+    },
+    "outcome": [
+     {
+      "name": "the file's resource claim guards it (SY-04)",
+      "kind": "artifact-contains",
+      "target": "guard-report.md",
+      "expect": "resource claim"
+     }
+    ]
+   }
+  },
+  {
+   "schema_version": "outcome-case/1",
+   "id": "AS-OUT-004-noop-single-agent",
+   "skill": "agent-sync",
+   "prompt": {
+    "text": "I'm the only agent on this repo — do I need to take a lease to edit a normal code file? Just answer me here."
+   },
+   "environment": {
+    "model": "inherit",
+    "host": "any",
+    "case_digest": "8e1c2f8a6a8f2b14616019922198fbcbd630b39be9a4a1bede18449c4c73fb77"
+   },
+   "checks": {
+    "tool": [
+     {
+      "name": "python3 present",
+      "command": "python3 -c 'pass'"
+     }
+    ],
+    "load_trace": {
+     "expect_loaded": [],
+     "expect_not_loaded": [
+      "agent-sync"
+     ]
+    },
+    "outcome": [
+     {
+      "name": "a chat answer coordinates nothing",
+      "kind": "command-exit-0",
+      "target": "test ! -f acquire-report.md"
+     }
+    ]
+   }
+  },
+  {
+   "schema_version": "outcome-case/1",
+   "id": "AS-OUT-005-git-lease-cross-machine",
+   "skill": "agent-sync",
+   "prompt": {
+    "text": "Configure leaseBackend git and show an acquire is a real cross-machine compare-and-swap (a non-fast-forward push rejection on contention); write git-lease.md."
+   },
+   "environment": {
+    "model": "inherit",
+    "host": "git",
+    "case_digest": "982dc69fb8e2793ad443b2e0dd01546f537f01a71247623d8f6133fad4da4f33"
+   },
+   "checks": {
+    "tool": [
+     {
+      "name": "git is present (absent git is NOT_RUN, never PASS)",
+      "command": "git --version"
+     }
+    ],
+    "load_trace": {
+     "expect_loaded": [
+      "agent-sync"
+     ],
+     "expect_not_loaded": []
+    },
+    "outcome": [
+     {
+      "name": "the CAS is demonstrated",
+      "kind": "artifact-contains",
+      "target": "git-lease.md",
+      "expect": "compare-and-swap"
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -42,7 +42,8 @@ so a parser anchored to the character you wrote rejects every line the server ha
 back. Observed live, and it presented as a lost race rather than a parse failure.
 
 Required on every line: `op`, `key`, `run`. `op` is one of
-`acquire` · `release` · `renew` · `base` · `reserve` · `release_id` · `signal` · `journal`.
+`acquire` · `release` · `renew` · `base` · `reserve` · `release_id` ·
+`reserve_offline` · `map_offline` · `signal` · `journal`.
 
 Unparseable lines are **counted and reported**, never guessed at. Anything
 entry-shaped (`^[-*+] \``) that fails the full pattern counts as unparseable; blank
@@ -73,6 +74,15 @@ documents, and implemented nowhere except a warning line on the board that retur
 4. lost     FileExistsError, or the section is held -> read the holder and report it
 5. won      write {run, ts, ttl, repo}; publish op=acquire to the plane for visibility
 ```
+
+**Every local writer shares ONE critical section — and step 3 is it.** The
+`.steal` guard is not the stealer's private door any more: `renew` and the
+local release enter the same section, so a renewal arriving mid-steal DEFERS
+to the next heartbeat instead of rewriting a timestamp the stealer's expiry
+re-read already consumed. Ownership changes bump a `gen` counter a renewal
+preserves — a reader holding a stale generation is holding a stale ownership.
+And a host where the O_EXCL primitive itself fails gets an explicit
+`unsupported` refusal naming the remedy, never an unlocked fallback (SY-03).
 
 **Step 3 is one critical section, not two calls.** `unlink` followed by `O_EXCL create`
 leaves a gap, and a second stealer that has already read the lock as expired removes the
@@ -127,6 +137,32 @@ the second read is the state.
 identically to an operator and mean opposite things, so they are printed differently and
 `reap` exits non-zero on the first.
 
+## The lock is published FULL, never created empty (SY-05)
+
+A lock created empty by `O_EXCL` and filled by a later write has a window a
+competitor reads as `{}` — not live, therefore stealable — and steals while
+the creator writes on into a now-unlinked inode: two winners. So a lock is
+PUBLISHED already carrying its body — written to a temp inode, fsync'd, then
+`os.link`ed onto the final name (an atomic no-replace create of a FULL inode)
+— and no reader ever observes an empty lock. Any empty or partial lock that
+does appear is a creation IN FLIGHT, not an expired lease: it is left alone
+within a short creation grace and reclaimed only once its own file age proves
+it abandoned — arbitrated by age, never by the heuristic that empty JSON means
+free.
+
+## Resource identity — the file's own claim (SY-04)
+
+A task lease is ownership of the TASK, never of a file: two runs holding two
+different task ids used to both pass the guard and interleave writes to one
+shared registry. A guarded write now also takes the file's own claim — key
+`res--<repo>--<canonical path>` (realpath on both sides: a `/var` vs
+`/private/var` symlink split makes one file two names, and a guard that sees
+two names guards neither). The claim is auto-taken under the task lease, so a
+single agent feels nothing; two agents on one file serialize on the FILE;
+independent files carry independent keys and never serialize without cause.
+Releasing the run's last task key releases its resource claims with it — a
+file claim only ever rides under a task lease.
+
 ## Expiry and stealing
 
 A lock is expired when `now > ts + ttl` for the timestamp inside it.
@@ -135,6 +171,25 @@ A lock is expired when `now > ts + ttl` for the timestamp inside it.
 lock file in `local` mode, and re-pushes the ref with `--force-with-lease` against the
 exact object it read in `git` mode. The `op=renew` line it also appends to the record plane
 is visibility, not renewal.
+
+**And a renewal is FENCED, not unconditional (SY-03.02).** Three refusals stand
+between a heartbeat and the lock: the run id must match; the lease must still be
+LIVE — an expired lease is not renewed, it is acquired again, because a stealer
+may already have read it as up for grabs; and the lock's `gen` must equal the
+generation this session acquired under. The third is what the run id cannot do:
+a replacement session shares the run id and the checkout, so after its steal
+(gen bump) the old session's heartbeat matches on run and would resurrect the
+lease forever — only the in-memory generation, the one thing a zombie does not
+share with its replacement, tells the two apart. Re-taking one's own expired
+lease is therefore a steal with a generation bump, never a refresh.
+
+**The heartbeat's throttle is per (run, key), never shared.** It was one file per
+checkout, and one agent touching it every hundred seconds meant every OTHER run's
+heartbeat read "renewed recently" and refreshed nothing — a 45-minute lease expiring
+under live work because a neighbour was busy (SY-02). Each key of each run now ages
+against its own marker; an `acquire` stamps only the key it just took; and an
+**explicit `renew <key>` never hides behind the throttle** — it refreshes for real or
+answers with the precise per-key reason it could not.
 
 That distinction is the whole of the bug fixed in 1.5.3: `renew` wrote *only* the record
 line. The lock's `ts` was written once, by `acquire`, so a run holding a lease lost it at
@@ -248,29 +303,64 @@ contracts on purpose. Do not "align" them by widening `reap`.
 
 ## Id reservation
 
-Reading a "next free id" line from a file is not reserving it. Allocation is
-**positional over the log**, so no agent has to trust another's arithmetic.
-
-A register is opened once:
+Reading a "next free id" line from a file is not reserving it. An issued id is
+**immutable**: once `reserve` has printed a number, no replay, late-arriving shard or
+appended base may move it. The line that records it carries the value —
 
 ```
-- `…` `op=base` `key=DEC` `value=0216` `run=r-bootstrap`
+- `…` `op=reserve` `key=DEC` `value=0042` `run=r-7f3a91`
 ```
 
-Then, replaying in order and maintaining a free list:
+— a **receipt** of an allocation that already happened, never a claim to be computed
+later. A receipt whose value is already live lost its race and gets no assignment; the
+run that wrote it saw the loss on read-back and appended another line. Where the value
+comes from depends on the mode:
 
+- **`leaseBackend: "git"`** — the allocator is a compare-and-swap on a remote ref,
+  `refs/agent-sync/ids/<REG>`, whose tip commit records the next free number. Winning
+  the push IS the allocation: the remote accepts exactly one successor per tip, so two
+  concurrent reserves cannot take one number — the loser re-reads the moved tip and
+  takes the next, bounded at `RESERVE_RETRIES` attempts before reporting contention.
+  This is the same push semantics the lease itself rides on, and it is why positional
+  replay could never be safe across machines: a shard another machine has not pushed
+  yet is invisible, and two machines replaying different logs were both "correct" about
+  histories nobody shared. A released id is recorded for the leak report but never
+  reissued automatically here — the counter only moves forward.
+- **Total-order backends** (Outline, Notion) — the value is probed positionally over
+  the merged log, then claimed by appending the receipt and confirmed on read-back;
+  a lost race retries with the next number, bounded the same way.
+
+A receipt also **names its authority**: `backend=` (git or log), `rev=` (the
+counter commit that served it, in git mode) and `rkey=` (the reservation key).
+A retry with the same `--key` is the SAME reservation — answered from the
+merged log, or, when the run died between winning the compare-and-swap and
+writing its receipt, from the counter ref's own chain, which remembers which
+key each number was served to. One key, one number, however many retries.
+
+**Offline, there is no global sequence to pretend at.** `reserve --offline`
+issues a namespaced composite — `REG-o-<run>-<seq>` — that cannot collide with
+the numeric sequence, and `map-offline` later binds it to a properly reserved
+number, append-only: the same fact twice is one fact, a different number is
+refused, and an id never issued cannot be mapped at all.
+
+Legacy bare `op=reserve` lines (no `value=`) still resolve positionally, replaying in
+order and maintaining a free list:
+
+- `op=base key=DEC value=0216` opens a register; a `base` only ever moves allocation
+  **forward** — two runs opening a register in the same minute cannot restart each
+  other's count.
 - `op=release_id key=DEC value=NNNN` pushes `NNNN` onto the free list.
-- `op=reserve key=DEC` takes the free-list head if it is non-empty; otherwise it
-  takes `base + (count of prior reserves not served from the free list)`.
+- bare `op=reserve key=DEC` takes the free-list head if it is non-empty; otherwise
+  `base + (count of prior reserves not served from the free list)`.
 
 Every reader computes the same assignment for every reserve line, including its own —
 **and "the log" means every shard merged, never the one this run writes.** Reading only
 its own document is how `reserve` handed three runs `DEC-0007` three times (fixed in
 1.5.3): each replayed a log containing only its own lines, each seeded its own `base`
-from the register, and each was correct about a history nobody else shared. The failure
-is the same one that disqualified per-writer documents as a *lease* store, arriving in
-the allocator — so a `base` now only ever moves allocation **forward**, and two runs
-opening a register in the same minute cannot restart each other's count.
+from the register, and each was correct about a history nobody else shared. The
+value-carrying receipt closes the remaining half of that defect: the merged order
+itself could still renumber an already-issued id when a shard arrived late, and now it
+cannot (`test/audit_regressions/fix-sy-01.01.py`, finding SY-01).
 
 **An id you reserved and did not write to git must be released** with
 `release_id`. An id that is reserved, unreleased and absent from git after its run

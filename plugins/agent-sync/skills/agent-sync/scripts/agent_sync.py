@@ -92,6 +92,10 @@ MAX_UNPARSEABLE = 0.02
 DEFAULT_SETTLE = 3.0
 DEFAULT_TTL = 2700
 DEFAULT_RENEW = 300
+# How many times an id allocation may lose its race before the tool reports the
+# contention instead of spinning. Each loss means another allocator moved the state
+# between our read and our write — a bounded number of honest retries, never a loop.
+RESERVE_RETRIES = 6
 # How long a steal section may be held before it is treated as abandoned. It covers two
 # filesystem calls, so anything longer than this is a crashed process, not slow work.
 STEAL_GRACE = 30
@@ -1314,11 +1318,25 @@ def spent(entry: dict[str, Any]) -> str:
 
 
 def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, list[int], list[tuple[str, int]]]:
-    """Positional allocation over the log. Returns (base, free_list, assignments)."""
+    """Allocation over the log. Returns (base, free_list, assignments).
+
+    Two kinds of reserve line coexist:
+
+    - `op=reserve` **with a `value=`** — a *receipt*: the number was allocated before
+      the line was written (a git ref compare-and-swap, or a confirmed optimistic
+      append), and replay never renumbers it. Shards arriving late, bases appended
+      afterwards, permuted merge orders — none of them move a value that is already
+      on its line. A receipt whose value is already live lost its race and gets no
+      assignment: its run saw the loss on read-back and appended another line.
+    - **bare** `op=reserve` — the legacy positional claim: free-list head, else
+      `base + served`. Its value is a function of the merged order, which is exactly
+      why every new writer stamps the value instead of leaving it to be computed.
+    """
     base = None
     free: list[int] = []
     served = 0
     assignments: list[tuple[str, int]] = []
+    live: set[int] = set()
     for ev in events:
         if ev["key"] != reg:
             continue
@@ -1341,19 +1359,42 @@ def resolve_reservations(events: list[dict[str, str]], reg: str) -> tuple[int, l
             # re-base exists to prevent, arriving through the other door.
             free = [f for f in free if f >= base]
             continue
+        if ev["op"] == "reserve" and (ev.get("value") or ""):
+            # A receipt is honoured even before any base line: the number is issued,
+            # and ignoring it would let the positional path hand it out again.
+            try:
+                value = int(ev["value"])
+            except ValueError:
+                continue
+            if value in live:
+                continue
+            live.add(value)
+            assignments.append((ev["run"], value))
+            if value in free:
+                free.remove(value)
+            elif base is not None and value >= base + served:
+                # The positional count follows the receipt forward, so the next bare
+                # reserve lands past it instead of on top of it.
+                served = value - base + 1
+            continue
         if base is None:
             continue
         if ev["op"] == "release_id":
             try:
-                free.append(int(ev.get("value") or 0))
+                freed = int(ev.get("value") or 0)
             except ValueError:
                 pass
+            else:
+                free.append(freed)
+                live.discard(freed)
         elif ev["op"] == "reserve":
             if free:
-                assignments.append((ev["run"], free.pop(0)))
+                value = free.pop(0)
             else:
-                assignments.append((ev["run"], base + served))
+                value = base + served
                 served += 1
+            live.add(value)
+            assignments.append((ev["run"], value))
     return (base or 0), free, assignments
 
 
@@ -1370,10 +1411,67 @@ class Sync:
         self.ttl = int(self.cfg.get("leaseTtlSeconds") or DEFAULT_TTL)
         self._identity: tuple[str, str] | None = None
         self._holders: dict[str, str | None] = {}
+        # The generation THIS OBJECT acquired each key under (FIX-SY-03.02).
+        # In-memory on purpose: a zombie session shares the run id and the
+        # checkout with its replacement — the only thing it does NOT share is
+        # this dict, which is exactly what makes it a fence.
+        self._lease_gen: dict[str, int] = {}
+
+    def capabilities(self) -> dict:
+        """Five SEPARATE capability fields — because `gated` was one boolean
+        answering three unrelated questions (FIX-SY-06.01).
+
+        `lease_scope`      where exclusion holds: cross-machine (git) vs
+                           machine-local (local). An advisory host must never
+                           read as enforced.
+        `enforcement_mode` whether exclusion is REAL here: enforced only when the
+                           operator asked for it (cfg gated) AND the lease mode
+                           actually guarantees it; advisory otherwise.
+        `awareness_scope`  whether other agents can SEE this project's state:
+                           shared when the record plane carries a total order,
+                           isolated when it does not (a pure-fs project has no
+                           shared awareness).
+        `identity_strength` how strongly a run identity is bound: strong when the
+                           lease is a cross-machine CAS, weak when it is a local
+                           advisory lock.
+        `backend_health`   `up` or `failed` — a backend that cannot be reached is
+                           NEVER reported active/green; its enforcement collapses
+                           to advisory and the failure is named.
+        """
+        # `preflight` is the one cheap live call that proves the backend is
+        # reachable (a local `fs` returns "" and never raises; a cloud adapter
+        # makes one request). A raise means the backend is unreachable RIGHT
+        # NOW, which must collapse enforcement to advisory rather than show
+        # green.
+        health = "up"
+        try:
+            self.adapter.preflight()
+        except Exception:
+            health = "failed"
+        asked = bool(self.cfg.get("gated", True))
+        cross = self.lease_mode == "git"
+        # ENFORCED means a real cross-machine compare-and-swap the operator
+        # asked for, on a reachable backend. A machine-local lock is genuine
+        # exclusion on THIS machine but advisory across machines, so it reports
+        # 'advisory' with lease_scope carrying the local nuance — a host that is
+        # only locally exclusive must never be described to a team as enforced.
+        # A failed backend cannot enforce anything, whatever the config says.
+        enforced = asked and cross and health == "up"
+        return {
+            "lease_scope": "cross-machine" if cross else "machine-local",
+            "enforcement_mode": "enforced" if enforced else "advisory",
+            "awareness_scope": "shared" if getattr(self.adapter, "is_lease_authority", False)
+                               else "isolated",
+            "identity_strength": "strong" if (cross and health == "up") else "weak",
+            "backend_health": health,
+        }
 
     @property
     def gated(self) -> bool:
-        """Whether exclusion is real — decided by the lease mode, never by the record.
+        """Legacy compatibility SUMMARY over the five capability fields
+        (FIX-SY-06.01). Kept so old callers keep working, but it is derived from
+        `capabilities()` now — it is true only when enforcement is real, so an
+        advisory host and a failed backend both read as NOT gated.
 
         Until 1.2.4 this read the record adapter's capabilities, which stopped deciding
         leases in 1.0.0. Both directions were wrong: `outline` with a local lock reported
@@ -1381,7 +1479,7 @@ class Sync:
         `ungated` while every lease was a genuine cross-machine compare-and-swap. The
         plane carries the record; `leaseBackend` decides the lease.
         """
-        return bool(self.cfg.get("gated", True)) and self.lease_mode in LEASE_GUARANTEE
+        return self.capabilities()["enforcement_mode"] == "enforced"
 
     def log_id(self, which: str) -> str:
         """This run's OWN shard. One writer per document, always.
@@ -1499,7 +1597,7 @@ class Sync:
         if held:
             if held.get("run") == self.rid:
                 self._note_local(key, json.dumps(held))
-                self._touch_renew()
+                self._touch_renew(key)
                 return True, self.rid
             alive = time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl))
             if alive:
@@ -1532,7 +1630,7 @@ class Sync:
             _s, now_held = self._git_read_lease(key)
             return False, now_held.get("run") or "another run"
         self._note_local(key, payload)
-        self._touch_renew()
+        self._touch_renew(key)
         return True, self.rid
 
     def _git_release(self, key: str) -> None:
@@ -1550,6 +1648,107 @@ class Sync:
             print(f"note: could not release {key} on the remote: {r.stderr.strip()[:160]}",
                   file=sys.stderr)
 
+    # -- git id allocation: the same compare-and-swap, pointed at a counter -----
+
+    @staticmethod
+    def _id_ref(reg: str) -> str:
+        return "refs/agent-sync/ids/" + re.sub(r"[^A-Za-z0-9._-]+", "-", reg).strip("-")
+
+    def _git_reserve_id(self, reg: str, floor: int, rkey: str | None = None) -> tuple[int, str]:
+        """Allocate the next id for `reg` by compare-and-swap on a remote ref.
+        Returns (value, winning commit sha) — the sha is the receipt's revision.
+
+        The ref's tip commit body records the next free number. Winning the push IS
+        the allocation: the remote accepts exactly one successor per tip, so two
+        concurrent reserves cannot both take one number — the loser is rejected,
+        re-reads the moved tip and takes the next. The value returned is immutable
+        from that moment: no replay recomputes it, and the log line the caller
+        writes afterwards is a receipt, never a claim.
+
+        `rkey` closes the crash window between winning the CAS and writing the
+        receipt: each counter commit carries the reservation key it served and is
+        parented on the tip it replaced, so a retry of the SAME reservation finds
+        its own allocation in the ref's history and returns it — one key, one
+        number, however many times the caller had to come back.
+
+        Retry is bounded by RESERVE_RETRIES: a remote that keeps moving under us is
+        reported as contention, not spun on.
+        """
+        remote, ref = self._git_remote(), self._id_ref(reg)
+        last_err = "push rejected"
+        for _attempt in range(RESERVE_RETRIES):
+            out = git("ls-remote", remote, ref)
+            sha: str | None = None
+            recorded = 0
+            if out:
+                sha = out.split()[0]
+                git("fetch", "-q", remote, f"{ref}:refs/agent-sync/fetched-id")
+                if rkey:
+                    # The crash window: allocation won, receipt never written. The
+                    # chain remembers which key each number was served to; a bounded
+                    # walk suffices, because a retry follows its crash closely.
+                    history = git("log", "-50", "--format=%H%x1f%B%x1e",
+                                  "refs/agent-sync/fetched-id")
+                    for entry in history.split("\x1e"):
+                        entry = entry.strip()
+                        if not entry:
+                            continue
+                        commit_sha, _, body_text = entry.partition("\x1f")
+                        try:
+                            served = json.loads(body_text.strip())
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        if served.get("rkey") == rkey and served.get("reg") == reg \
+                                and served.get("run") == self.rid:
+                            return int(served["next"]) - 1, commit_sha.strip()
+                body = git("log", "-1", "--format=%B", sha) or git(
+                    "log", "-1", "--format=%B", "refs/agent-sync/fetched-id")
+                try:
+                    recorded = int(json.loads(body.strip()).get("next", 0))
+                except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+                    # An unreadable counter never resets allocation: the floor and the
+                    # issued receipts below still push it forward.
+                    recorded = 0
+            # The register file and the log are floors, for the same reason the log
+            # path consults the register: they know what was issued or written by
+            # every path — including receipts from before this counter existed, and
+            # a person's hand in the file. A floor only ever moves allocation forward.
+            events, _ = self.events("reservations")
+            _b, _f, assignments = resolve_reservations(events, reg)
+            issued_next = max((v for _r, v in assignments), default=-1) + 1
+            value = max(floor, recorded, issued_next)
+            body_fields = {"reg": reg, "next": value + 1, "run": self.rid,
+                           "ts": now_iso(), "repo": repo_name(),
+                           "host": platform.node()}
+            if rkey:
+                body_fields["rkey"] = rkey
+            payload = json.dumps(body_fields)
+            empty_tree = git("hash-object", "-t", "tree", os.devnull)
+            # Parented on the tip it replaces, so the ref keeps the chain a crashed
+            # retry reads its own allocation back out of.
+            tree_args = ["git", "-c", "user.name=agent-sync", "-c",
+                         "user.email=agent-sync@localhost", "commit-tree", empty_tree]
+            if sha:
+                tree_args += ["-p", "refs/agent-sync/fetched-id"]
+            made = subprocess.run(tree_args, input=payload, capture_output=True, text=True)
+            commit = made.stdout.strip()
+            if not commit:
+                detail = (made.stderr or "").strip().splitlines()
+                why = detail[-1] if detail else "no output from git commit-tree"
+                raise Fail(f"could not create the id object — is this a git repository? ({why})")
+            args = ["git", "push", remote, f"{commit}:{ref}"]
+            if sha:                        # moving an existing counter, and only that
+                args.insert(2, f"--force-with-lease={ref}:{sha}")
+            r = subprocess.run(args, capture_output=True, text=True)
+            if r.returncode == 0:
+                return value, commit
+            err_lines = (r.stderr or "").strip().splitlines()
+            last_err = err_lines[-1][:160] if err_lines else "push rejected"
+            time.sleep(0.1 + random.random() * 0.2)
+        raise Fail(
+            f"reserve {reg}: the id ref on '{remote}' moved {RESERVE_RETRIES} times in a "
+            f"row — another allocator is racing; retry ({last_err})")
+
     @property
     def lease_mode(self) -> str:
         return self.cfg.get("leaseBackend") or "local"
@@ -1562,6 +1761,74 @@ class Sync:
         d = self.root / STATE_DIR / "leases"
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{re.sub(r'[^A-Za-z0-9_-]', '-', key)}.lock"
+
+    # A lock created empty by O_EXCL and filled by a LATER write has a window
+    # where a competitor reads it as `{}` — not live, therefore stealable — and
+    # steals it while the creator writes on into a now-unlinked inode: two
+    # winners (SY-05). The cure is to PUBLISH an already-filled inode atomically,
+    # so a reader never sees an empty lock, and to treat any empty/partial lock
+    # that does appear as a creation-in-flight (a short grace) rather than as
+    # expired.
+    CREATE_GRACE_SECONDS = 10
+
+    def _publish_lock(self, lock: Path, body: dict) -> bool:
+        """Atomically create `lock` already carrying `body`. Returns False if
+        the lock already exists (someone else won the create). The bytes are
+        written to a temp inode, fsync'd, then `os.link`ed onto the final name
+        — link is a no-replace atomic create of a FULL inode, so no reader ever
+        observes an empty lock."""
+        tmp = lock.with_name(f"{lock.name}.{os.getpid()}.new")
+        try:
+            fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(body))
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(str(tmp), str(lock))   # atomic no-replace publish
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            try:
+                os.unlink(str(tmp))
+            except OSError:
+                pass
+
+    def _enter_local_section(self, lock: Path):
+        """The ONE critical section for every LOCAL lease mutation — steal, renew,
+        release. O_EXCL on a second name is the OS-backed mutex between processes
+        on this machine, and one section for every writer is what turns
+        steal-vs-renew from a race into a sequence. Returns the guard path, or
+        None when another run is inside (the caller defers, it never barges). A
+        platform where the primitive itself fails raises `unsupported` out loud —
+        an unlocked fallback would be exclusion by luck (SY-03)."""
+        guard = lock.with_name(lock.name + ".steal")
+        try:
+            if guard.exists() and time.time() - guard.stat().st_mtime > STEAL_GRACE:
+                guard.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return None
+        except OSError as exc:
+            raise Fail(
+                "the local lease critical section is unsupported here "
+                f"({exc}) — an unlocked fallback would be exclusion by luck; set "
+                "leaseBackend: \"git\" or configure a cloud backend") from exc
+        os.close(fd)
+        return guard
+
+    @staticmethod
+    def _exit_local_section(guard) -> None:
+        if guard is not None:
+            guard.unlink(missing_ok=True)
+
+    @staticmethod
+    def _key_of(lock: Path) -> str:
+        return lock.name[:-len(".lock")] if lock.name.endswith(".lock") else lock.name
 
     def _steal_expired(self, lock: Path, payload: str) -> bool:
         """Replace an expired lock — reap and create as ONE critical section.
@@ -1579,34 +1846,43 @@ class Sync:
         filesystem calls, so its own abandonment grace is short; without one, a crash
         between them would cost the key until somebody deleted a file by hand.
         """
-        guard = lock.with_name(lock.name + ".steal")
+        guard = self._enter_local_section(lock)
+        if guard is None:
+            return False                      # another writer is inside the section
         try:
-            if guard.exists() and time.time() - guard.stat().st_mtime > STEAL_GRACE:
-                guard.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except OSError:
-            return False                      # another run is stealing this very lock
-        try:
-            os.close(fd)
+            raw = ""
             try:
-                held = json.loads(lock.read_text())
+                raw = lock.read_text()
+                held = json.loads(raw)
             except (json.JSONDecodeError, OSError):
                 held = {}
-            if held and time.time() <= parse_iso(held.get("ts", "")) + int(
+            if not held:
+                # Empty or unparseable: a creation in flight, not an expired
+                # lease. Only YIELD it once it is older than the creation grace
+                # — arbitrated by the file's own age, never by "the JSON is
+                # empty so it is free" (SY-05).
+                try:
+                    age = time.time() - os.stat(lock).st_mtime
+                except OSError:
+                    return False
+                if age < self.CREATE_GRACE_SECONDS:
+                    return False              # let the creator finish
+            elif time.time() <= parse_iso(held.get("ts", "")) + int(
                     held.get("ttl", self.ttl)):
                 return False                  # renewed, or already stolen and live again
+            # The GENERATION moves on every ownership change, never on a renewal —
+            # a reader holding a stale generation is holding a stale ownership.
+            body = json.loads(payload)
+            body["gen"] = int(held.get("gen", 0) or 0) + 1
+            self._lease_gen[self._key_of(lock)] = body["gen"]
             lock.unlink(missing_ok=True)
-            fd2 = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd2, "w") as fh:
-                fh.write(payload)
+            if not self._publish_lock(lock, body):
+                return False                  # someone published between unlink and link
             return True
         except OSError:
             return False
         finally:
-            guard.unlink(missing_ok=True)
+            self._exit_local_section(guard)
 
     def acquire(self, key: str) -> tuple[bool, str | None]:
         """Exclusion comes from an atomic file create; the cloud carries the record.
@@ -1651,6 +1927,21 @@ class Sync:
             except (json.JSONDecodeError, OSError):
                 held = {}
             if held.get("run") == self.rid:
+                # An EXPIRED own lease is not refreshed, it is re-taken: the run id
+                # matches, but a replacement session shares the run id — only the
+                # generation bump tells the two apart, and a refresh here would let
+                # the older session's heartbeat keep resurrecting it (FIX-SY-03.02).
+                if time.time() > parse_iso(held.get("ts", "")) + int(
+                        held.get("ttl", self.ttl)):
+                    if self._steal_expired(lock, payload):
+                        self._touch_renew(key)
+                        return True, self.rid
+                    try:
+                        other = json.loads(lock.read_text()).get("run")
+                    except (json.JSONDecodeError, OSError):
+                        other = None
+                    return False, other
+                self._lease_gen[key] = int(held.get("gen", 0) or 0)
                 # MOVE THE LOCK'S OWN `ts`, not just the throttle marker. This branch did
                 # exactly what `_refresh_lease`'s docstring describes as the bug it exists
                 # to have fixed — touch the throttle file and leave the timestamp the lease
@@ -1666,7 +1957,7 @@ class Sync:
                 # That is the mechanism behind a lease expiring three times in one run
                 # against a 450-step CI job on 2026-09-01.
                 self._refresh_lease(key)
-                self._touch_renew()
+                self._touch_renew(key)
                 return True, self.rid
             if time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
                 return False, held.get("run")
@@ -1677,18 +1968,17 @@ class Sync:
                     other = None
                 return False, other
         else:
-            try:
-                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError:
+            # Publish an already-filled lock atomically — no empty window a
+            # competitor could read as free (SY-05).
+            if not self._publish_lock(lock, {**json.loads(payload), "gen": 1}):
                 try:
                     other = json.loads(lock.read_text()).get("run")
                 except (json.JSONDecodeError, OSError):
                     other = None
                 return False, other
-            with os.fdopen(fd, "w") as fh:
-                fh.write(payload)
+            self._lease_gen[key] = 1
 
-        self._touch_renew()
+        self._touch_renew(key)
         for n in self.write_claim(key, self.rid):
             print(f"  {n}")
         # Record it for everyone else to see. A failure here costs visibility, never
@@ -1717,6 +2007,11 @@ class Sync:
             sha, held = self._git_read_lease(key)
             if not sha or held.get("run") != self.rid:
                 return False
+            if time.time() > parse_iso(held.get("ts", "")) + int(
+                    held.get("ttl", self.ttl)):
+                print(f"note: {key}: this lease expired — a renewal does not "
+                      "resurrect it; acquire it again", file=sys.stderr)
+                return False
             payload = json.dumps({**held, "ts": now_iso()})
             empty_tree = git("hash-object", "-t", "tree", os.devnull)
             made = subprocess.run(
@@ -1741,42 +2036,118 @@ class Sync:
         lock = self._local_lock(key)
         if not lock.exists():
             return False
-        try:
-            held = json.loads(lock.read_text())
-        except (json.JSONDecodeError, OSError):
+        guard = self._enter_local_section(lock)
+        if guard is None:
+            # A steal (or another writer) is inside the section. Deferring is the
+            # serialization: rewriting the timestamp NOW would race the stealer's
+            # own expiry re-read, and two writers on one lock file is the defect.
+            print(f"note: {key}: another writer holds the local section — "
+                  "renewal deferred to the next heartbeat", file=sys.stderr)
             return False
-        if held.get("run") != self.rid:
-            return False
-        held["ts"] = now_iso()
         tmp = lock.with_name(f"{lock.name}.{os.getpid()}.tmp")
         try:
+            try:
+                held = json.loads(lock.read_text())
+            except (json.JSONDecodeError, OSError):
+                return False
+            if held.get("run") != self.rid:
+                return False
+            # An expired lease is DEAD, whoever's name is on it. Renewing it here
+            # would resurrect what a stealer may already have decided is up for
+            # grabs; the owner of an expired lease acquires again (FIX-SY-03.02).
+            if time.time() > parse_iso(held.get("ts", "")) + int(
+                    held.get("ttl", self.ttl)):
+                print(f"note: {key}: this lease expired — a renewal does not "
+                      "resurrect it; acquire it again", file=sys.stderr)
+                return False
+            # The generation fence: a replacement session shares the run id, so
+            # the run check above cannot tell the old session from the new one —
+            # only the generation this OBJECT acquired under can. A recorded
+            # generation that no longer matches the lock's means a steal
+            # completed after this session's acquire; its renewal must lose.
+            lock_gen = int(held.get("gen", 0) or 0)
+            expected = self._lease_gen.get(key)
+            if expected is not None and lock_gen != expected:
+                print(f"note: {key}: held under generation {expected}, the lock "
+                      f"is at {lock_gen} — a newer owner took it; acquire it "
+                      "again", file=sys.stderr)
+                return False
+            held["ts"] = now_iso()            # the generation is OWNERSHIP's; a renewal keeps it
             tmp.write_text(json.dumps(held))
             tmp.replace(lock)
         except OSError as exc:
             tmp.unlink(missing_ok=True)
             print(f"note: could not renew {key} ({exc})", file=sys.stderr)
             return False
+        finally:
+            self._exit_local_section(guard)
         return True
 
     def renew(self, key: str | None = None) -> bool:
-        marker = self.root / STATE_DIR / "last-renew"
+        """Refresh leases — each against ITS OWN throttle, never a shared one.
+
+        The throttle used to be one file per checkout. Run A touching it every
+        hundred seconds meant run B's heartbeat read "renewed recently" for
+        forty-five minutes straight, refreshed nothing, and B's lease expired
+        under work in progress — one agent's activity suppressing every other
+        run's renewals in the same checkout. The marker is now per (run, key):
+        another agent's activity, and this run's OTHER keys, are invisible here,
+        which is the point.
+        """
         interval = int(self.cfg.get("renewIntervalSeconds") or DEFAULT_RENEW)
-        if marker.exists() and time.time() - marker.stat().st_mtime < interval:
+        if key is not None:
+            # An explicit renew answers for THIS key: a real refresh, or the
+            # precise per-key reason there was none. It never hides behind the
+            # heartbeat's throttle — the caller named the key on purpose.
+            if self._refresh_lease(key):
+                if self.adapter.is_lease_authority:
+                    self.adapter.log_append(self.log_id("claims"),
+                                            fmt_line("renew", key, self.rid))
+                self._touch_renew(key)
+                return True
+            age = self._renew_age(key)
+            why = (f"its renewal marker is {int(age)}s old" if age is not None
+                   else "no renewal of it is on record for this run")
+            print(f"note: could not renew {key} — this run does not hold it in the "
+                  f"lease plane ({why})", file=sys.stderr)
             return False
-        keys = [key] if key else self.held()
-        if not keys:
-            self._touch_renew()
+        due = []
+        for k in self.held():
+            age = self._renew_age(k)
+            if age is None or age >= interval:
+                due.append(k)
+        if not due:
             return False
-        renewed = [k for k in keys if self._refresh_lease(k)]
+        renewed = [k for k in due if self._refresh_lease(k)]
         if self.adapter.is_lease_authority and renewed:
             oid = self.log_id("claims")
             for k in renewed:
                 self.adapter.log_append(oid, fmt_line("renew", k, self.rid))
-        self._touch_renew()
+        for k in renewed:
+            self._touch_renew(k)
         return bool(renewed)
 
-    def _touch_renew(self) -> None:
-        marker = self.root / STATE_DIR / "last-renew"
+    def _renew_marker(self, key: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
+        return self.root / STATE_DIR / "renew" / f"{self.rid}--{safe}"
+
+    def _renew_age(self, key: str) -> float | None:
+        """Seconds since THIS run last renewed THIS key, or None when it never has.
+        The marker carries its timestamp in its bytes, not its mtime, so the same
+        clock the throttle compares against is the one that wrote it."""
+        try:
+            ts = parse_iso_or_none(self._renew_marker(key).read_text().strip())
+        except OSError:
+            return None
+        if ts is None:
+            return None
+        return time.time() - ts
+
+    def _touch_renew(self, key: str) -> None:
+        """Stamp the (run, key) marker. Called on a successful refresh — and on
+        acquire, whose fresh lease IS a renewal of exactly that key. Never a
+        by-product of unrelated activity: that by-product was the defect."""
+        marker = self._renew_marker(key)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(now_iso())
 
@@ -1835,6 +2206,17 @@ class Sync:
             print(f"note: {key} is held by {holder}, not this run — nothing released",
                   file=sys.stderr)
             return False
+
+        # Releasing the last TASK key releases this run's resource claims too:
+        # a file claim only ever rides under a task lease (FIX-SY-04.01), and
+        # an orphaned one would hold the registry for a task already finished.
+        if not key.startswith(self.RESOURCE_PREFIX):
+            remaining = [k for k in self.held()
+                         if not k.startswith(self.RESOURCE_PREFIX) and k != key]
+            if not remaining:
+                for res in [k for k in self.held()
+                            if k.startswith(self.RESOURCE_PREFIX)]:
+                    self.release(res)
 
         for n in self.write_claim(key, None):
             print(f"  {n}")
@@ -2158,53 +2540,92 @@ class Sync:
 
     # -- ids ---------------------------------------------------------------
 
-    def reserve(self, reg: str) -> int:
-        if not self.adapter.is_lease_authority:
+    def reserve(self, reg: str, rkey: str | None = None) -> int:
+        if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
             raise Fail(
                 f"backend '{self.adapter.name}' cannot reserve ids safely "
-                "(atomicAppend is false). Allocate by hand and record it, or configure a "
-                "cloud backend. Pretending would hand two agents the same id.")
-        # Every shard, not just this run's. `log_id` returns the document THIS run writes,
-        # and reading it alone was the whole defect: three runs each replayed a log
-        # containing only their own lines, each seeded a base from the register, and each
-        # was handed the same number — while `_leaks` on the same data, read merged,
-        # reported the truth. Allocation is positional over the WHOLE log or it is nothing.
-        oid = self.log_id("reservations")
-        events, _ = self.events("reservations")
-        base, _free, _assign = resolve_reservations(events, reg)
-        if not base:
-            base = self._seed_base(reg)
-            self.adapter.log_append(oid, fmt_line("base", reg, self.rid, value=f"{base:04d}"))
+                "(atomicAppend is false and the lease backend is not git). Allocate by "
+                "hand and record it, set `leaseBackend: \"git\"`, use `reserve --offline` "
+                "for a namespaced offline id, or configure a cloud backend. Pretending "
+                "would hand two agents the same id.")
+        # A named reservation retried is the SAME reservation. If this run's receipt
+        # for the key is already in the merged log, hand its number back — a retry
+        # that allocates again is how one crash costs two ids.
+        if rkey:
             events, _ = self.events("reservations")
-        else:
-            # The log knows what *this tool* handed out. The register knows what is actually
-            # written, by every path including the ones that never touch this tool — a person
-            # editing the file, another session's Doc Loop, a merge. The log alone therefore drifts
-            # behind, silently and permanently, and hands out ids that already have a heading.
-            #
-            # This is the failure mode the whole mechanism exists to prevent, so the register is
-            # consulted on every reserve and treated as a **floor**, never as a ceiling: it can only
-            # push the allocation forward. Ids this tool reserved but nobody has written yet are not
-            # in the register, so honouring it as a floor never revokes a live reservation.
-            #
-            # Probed rather than computed: the allocator is asked what it *would* hand out next, by
-            # resolving a synthetic reserve. That keeps one implementation of the allocation rule
-            # instead of a second copy here that can disagree with it.
-            floor = self._seed_base(reg)
-            probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe", "value": ""}]
-            _b, _f, probed = resolve_reservations(probe, reg)
-            if probed and probed[-1][1] < floor:
+            for ev in events:
+                if ev.get("op") == "reserve" and ev.get("key") == reg \
+                        and ev.get("run") == self.rid and ev.get("rkey") == rkey \
+                        and (ev.get("value") or ""):
+                    return int(ev["value"])
+        # The register knows what is actually written, by every path including the ones
+        # that never touch this tool — a person editing the file, another session's Doc
+        # Loop, a merge. It is a **floor**, never a ceiling: it can only push allocation
+        # forward, so honouring it never revokes a live reservation.
+        floor = self._seed_base(reg)
+        oid = self.log_id("reservations")
+        if self.lease_is_cross_machine:
+            # Across machines the shards are git files, and a shard another machine has
+            # not pushed yet is invisible here — positional replay over what IS visible
+            # handed two machines the same number. The remote id ref is the one piece of
+            # state both sides must move through, so the compare-and-swap on it is the
+            # allocator; the line below is a receipt of a number already won.
+            value, rev = self._git_reserve_id(reg, floor, rkey)
+            # The receipt names its authority: which backend allocated, at which
+            # revision, for which reservation key. A number nobody can trace to an
+            # authority is a rumour with digits.
+            self.adapter.log_append(
+                oid, fmt_line("reserve", reg, self.rid, value=f"{value:04d}",
+                              backend="git", rev=rev[:12], rkey=rkey))
+            return value
+        # Total-order backends (atomicAppend): optimistic claim. Every shard, not just
+        # this run's — `log_id` returns the document THIS run writes, and reading it
+        # alone was the whole defect: three runs each replayed a log containing only
+        # their own lines, and each was handed the same number. The claim carries its
+        # value, so once it wins the read-back it can never be renumbered by a shard
+        # that arrives later or a base appended afterwards.
+        for _attempt in range(RESERVE_RETRIES):
+            events, _ = self.events("reservations")
+            base, _free, _assign = resolve_reservations(events, reg)
+            if not base:
                 self.adapter.log_append(
                     oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
                 events, _ = self.events("reservations")
-        self.adapter.log_append(oid, fmt_line("reserve", reg, self.rid))
-        time.sleep(0.25 + random.random() * 0.15)
-        events, _ = self.events("reservations")
-        _b, _f, assignments = resolve_reservations(events, reg)
-        mine = [v for r, v in assignments if r == self.rid]
-        if not mine:
-            raise Fail(f"reserve {reg}: the append did not read back — retry")
-        return mine[-1]
+            else:
+                # Probed rather than computed: the allocator is asked what it *would*
+                # hand out next, by resolving a synthetic reserve. That keeps one
+                # implementation of the allocation rule instead of a second copy here
+                # that can disagree with it.
+                probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe",
+                                   "value": ""}]
+                _b, _f, probed = resolve_reservations(probe, reg)
+                if probed and probed[-1][1] < floor:
+                    self.adapter.log_append(
+                        oid, fmt_line("base", reg, self.rid, value=f"{floor:04d}"))
+                    events, _ = self.events("reservations")
+            probe = events + [{"op": "reserve", "key": reg, "run": "\x00probe",
+                               "value": ""}]
+            _b, _f, probed = resolve_reservations(probe, reg)
+            if not probed:
+                raise Fail(f"reserve {reg}: could not resolve a candidate — the "
+                           "reservations log has no usable base; retry")
+            candidate = probed[-1][1]
+            self.adapter.log_append(
+                oid, fmt_line("reserve", reg, self.rid, value=f"{candidate:04d}",
+                              backend="log", rkey=rkey))
+            time.sleep(0.25 + random.random() * 0.15)
+            events, _ = self.events("reservations")
+            _b, _f, assignments = resolve_reservations(events, reg)
+            winners = [r for r, v in assignments if v == candidate]
+            if winners and winners[-1] == self.rid:
+                return candidate
+            if not any(r == self.rid and v == candidate for r, v in assignments) and \
+                    not winners:
+                raise Fail(f"reserve {reg}: the append did not read back — retry")
+            # Somebody's receipt for the same number sits earlier in the merged order.
+            # That run keeps it; this one re-reads and takes the next number.
+        raise Fail(f"reserve {reg}: lost the allocation race {RESERVE_RETRIES} times "
+                   "in a row — another allocator is racing; retry")
 
     def _seed_base(self, reg: str) -> int:
         spec = (self.cfg.get("idRegisters") or {}).get(reg)
@@ -2229,13 +2650,60 @@ class Sync:
         On a backend that cannot order writes this used to do nothing and print
         "released" anyway. The id stayed a hole the board reports as a leak, and the only
         party who could have fixed that had been told it was handled."""
-        if not self.adapter.is_lease_authority:
+        if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
             raise Fail(
                 f"backend '{self.adapter.name}' cannot record a released id "
-                "(atomicAppend is false), so nothing was returned to the pool. Note it in "
-                f"the register by hand, or configure a backend that can: {reg}-{value}")
+                "(atomicAppend is false and the lease backend is not git), so nothing "
+                "was returned to the pool. Note it in the register by hand, or "
+                f"configure a backend that can: {reg}-{value}")
         self.adapter.log_append(self.log_id("reservations"),
                                 fmt_line("release_id", reg, self.rid, value=value))
+
+    def reserve_offline(self, reg: str) -> str:
+        """A namespaced id issued with NO global authority — `<REG>-o-<run>-<seq>`.
+
+        Deliberately SHAPED so it cannot collide with the numeric sequence: the
+        global allocator hands out digits, this hands out an `o-` composite keyed
+        by run identity. There is no fake global counter behind it, which is the
+        point — an offline allocator that pretends to know the next number is the
+        two-agents-one-id defect with extra steps. Map it onto a real number later
+        with `map_offline`, append-only."""
+        if (self.cfg.get("idRegisters") or {}).get(reg) is None:
+            raise Fail(f"register '{reg}' is not declared in .claude/agent-sync.json")
+        oid = self.log_id("reservations")
+        events, _ = self.events("reservations")
+        mine = sum(1 for ev in events if ev.get("op") == "reserve_offline"
+                   and ev.get("key") == reg and ev.get("run") == self.rid)
+        suffix = re.sub(r"[^a-z0-9]", "", self.rid.lower())[-8:] or "anon"
+        token = f"o-{suffix}-{mine + 1:03d}"
+        self.adapter.log_append(oid, fmt_line("reserve_offline", reg, self.rid, value=token))
+        return f"{reg}-{token}"
+
+    def map_offline(self, reg: str, offline_id: str, number: str) -> None:
+        """Bind an offline id to a real, properly reserved number — append-only.
+
+        The same fact twice is one fact; a DIFFERENT number for a mapped id is
+        refused, never rewritten — the documents already carrying the offline id
+        were written against the first answer."""
+        token = offline_id[len(reg) + 1:] if offline_id.startswith(f"{reg}-") else offline_id
+        if not re.fullmatch(r"\d+", number):
+            raise Fail(f"map_offline binds a NUMBER from `reserve` — {number!r} is not one")
+        events, _ = self.events("reservations")
+        issued = any(ev.get("op") == "reserve_offline" and ev.get("key") == reg
+                     and ev.get("value") == token for ev in events)
+        if not issued:
+            raise Fail(f"{reg}-{token} was never issued by reserve_offline — nothing to map")
+        for ev in events:
+            if ev.get("op") == "map_offline" and ev.get("key") == reg \
+                    and ev.get("value") == token:
+                if ev.get("mapped") == number:
+                    return
+                raise Fail(
+                    f"{reg}-{token} is already mapped to {reg}-{ev.get('mapped')} — the "
+                    "mapping is append-only; reserve a new number instead of rebinding")
+        self.adapter.log_append(self.log_id("reservations"),
+                                fmt_line("map_offline", reg, self.rid,
+                                         value=token, mapped=number))
 
     # -- journal / signals -------------------------------------------------
 
@@ -2845,8 +3313,25 @@ class Sync:
 
     # -- guard -------------------------------------------------------------
 
+    RESOURCE_PREFIX = "res--"
+
+    def resource_key(self, path: str) -> str:
+        """Canonical repo identity + canonical path — the FILE's own key
+        (FIX-SY-04.01). A task id names work; this names the thing two tasks
+        would collide on, so two runs editing one register serialize on the
+        register, not on whoever's task id sorts first."""
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(str(self.root)))
+        # No dots: the local lock filename sanitizes them, and the key must
+        # round-trip through `held()` byte-identical to its lock's stem.
+        canon = re.sub(r"[^A-Za-z0-9_-]+", "-", rel).strip("-")
+        repo = re.sub(r"[^A-Za-z0-9_-]+", "-", repo_name() or "repo")
+        return f"{self.RESOURCE_PREFIX}{repo}--{canon}"[:120]
+
     def guard(self, path: str) -> tuple[bool, str]:
-        rel = os.path.relpath(os.path.abspath(path), str(self.root))
+        # realpath on BOTH sides: canonical identity is the point (SY-04) — a
+        # /var vs /private/var symlink split makes one file two names, and a
+        # guard that sees two names guards neither.
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(str(self.root)))
         patterns = self.cfg.get("guardedFiles") or []
         if not any(matches_glob(rel, p) for p in patterns):
             return True, "not a guarded file"
@@ -2855,10 +3340,30 @@ class Sync:
         # strongly it is arbitrated, and that is what `gated` reports — not whether
         # the check runs. A local lock file is genuine mutual exclusion between
         # agents on one machine; it is only across machines that fs cannot arbitrate.
+        #
+        # And a TASK lease is ownership of the task, never of the file
+        # (FIX-SY-04.01): two runs holding two different task ids used to both
+        # pass here and interleave writes to one shared registry. A guarded
+        # file now also takes the file's OWN claim — resource identity =
+        # canonical repo + canonical path — auto-claimed under the task lease,
+        # so a single agent feels nothing while two agents on one file
+        # serialize. Independent files carry independent keys and never
+        # serialize without cause.
         held = self.held()
-        if held:
+        task_keys = [k for k in held if not k.startswith(self.RESOURCE_PREFIX)]
+        res = self.resource_key(path)
+        if res in held:
+            return True, f"resource claim held for {rel} ({res})"
+        if task_keys:
+            won, holder = self.acquire(res)
             note = "" if self.gated else " (advisory: arbitrated locally only)"
-            return True, f"held by this run ({', '.join(held)}){note}"
+            if won:
+                return True, (f"held by this run ({', '.join(task_keys)}); resource "
+                              f"claim taken for {rel}{note}")
+            return False, (f"{rel}: another run ({holder}) holds this FILE's "
+                           f"resource claim ({res}) — a task lease authorizes the "
+                           f"task, not the file. Wait for the claim to release or "
+                           f"expire, then retry.")
 
         # Name the OTHER key, never just the other run. "r-x holds a lease right now"
         # beside a path reads as "r-x holds this file" — which is not what was checked,
@@ -3528,7 +4033,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("  agent_sync.py check")
         return 1
 
-    if not pipeline_installed():
+    if not pipeline_installed(cfg=s.cfg):
         print("\n✗ task-pipeline is not installed. agent-sync binds to its stages and")
         print("  will not improvise a substitute flow.")
         print("\nNEXT:\n  npx sshlg-skills install")
@@ -3539,13 +4044,41 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def pipeline_installed() -> bool:
-    home = Path.home()
-    if list(home.glob(".claude/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md")):
-        return True
-    if (home / ".agents/skills/task-pipeline/SKILL.md").exists():
-        return True
-    return (home / ".claude/skills/task-pipeline/SKILL.md").exists()
+# Every host layout task-pipeline can be installed under — NOT just Claude's.
+# A detector that proves absence from ONE host's layout is wrong on a machine
+# whose task-pipeline lives in another host's cache (FIX-SY-08.01). The plugin
+# CACHE glob and the plain-skills path are listed per host; the shared hub is
+# host-agnostic. New host? add its two lines here, not a branch elsewhere.
+PIPELINE_HOST_LAYOUTS = (
+    (".claude/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md", None),
+    (".codex/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md", None),
+    (".gemini/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md", None),
+    (None, ".claude/skills/task-pipeline/SKILL.md"),
+    (None, ".codex/skills/task-pipeline/SKILL.md"),
+    (None, ".gemini/skills/task-pipeline/SKILL.md"),
+    (None, ".agents/skills/task-pipeline/SKILL.md"),   # the shared hub, host-agnostic
+)
+
+
+def pipeline_installed(home: "Path | None" = None, cfg: "dict | None" = None) -> bool:
+    """Whether task-pipeline is reachable to THIS machine, across every host
+    layout — or at an explicit path the operator configured (FIX-SY-08.01).
+
+    `home` is injectable so a test can point at a synthetic HOME with no side
+    effects. An explicit `pipelinePath` in the config wins over discovery: a
+    machine that resolved the skill some other way says so, and the detector
+    does not overrule a stated fact with a filesystem guess.
+    """
+    home = home or Path.home()
+    explicit = (cfg or {}).get("pipelinePath")
+    if explicit:
+        return (Path(explicit) if os.path.isabs(explicit) else home / explicit).exists()
+    for glob_pat, direct in PIPELINE_HOST_LAYOUTS:
+        if glob_pat and list(home.glob(glob_pat)):
+            return True
+        if direct and (home / direct).exists():
+            return True
+    return False
 
 
 def cmd_bootstrap(_args: argparse.Namespace) -> int:
@@ -3605,8 +4138,18 @@ def cmd_release(args: argparse.Namespace) -> int:
 
 
 def cmd_reserve(args: argparse.Namespace) -> int:
-    value = Sync().reserve(args.register)
+    s = Sync()
+    if getattr(args, "offline", False):
+        print(s.reserve_offline(args.register))
+        return 0
+    value = s.reserve(args.register, rkey=getattr(args, "rkey", None))
     print(f"{args.register}-{value:04d}")
+    return 0
+
+
+def cmd_map_offline(args: argparse.Namespace) -> int:
+    Sync().map_offline(args.register, args.offline_id, args.number)
+    print(f"mapped {args.offline_id} -> {args.register}-{args.number}")
     return 0
 
 
@@ -4903,7 +5446,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     rv = sub.add_parser("reserve", help="reserve the next id in a register")
     rv.add_argument("register")
+    rv.add_argument("--key", dest="rkey", default=None,
+                    help="reservation key: a retry with the same key returns the SAME id")
+    rv.add_argument("--offline", action="store_true",
+                    help="issue a namespaced offline id (no global authority; map it later)")
     rv.set_defaults(fn=cmd_reserve)
+    mo = sub.add_parser("map-offline",
+                        help="bind an offline id to a reserved number, append-only")
+    mo.add_argument("register")
+    mo.add_argument("offline_id")
+    mo.add_argument("number")
+    mo.set_defaults(fn=cmd_map_offline)
 
     ri = sub.add_parser("release-id", help="return an id you did not write to git")
     ri.add_argument("register")

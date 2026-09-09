@@ -45,8 +45,9 @@ recorded in `docs/MERGES.md`, the `--key` lease released; `merges` says what lan
 you were away. **Read `references/branching.md`** before merging.
 
 **3. Hooks exist only in Claude Code.** Elsewhere nothing blocks a guarded edit: run
-`guard` yourself and record the run as `ungated`. Do not describe a project as protected
-when it is not.
+`guard` yourself and record the run as `ungated`. A mode's five capability fields
+live in ONE place — `references/adapter-contract.md` → *The status capability
+contract*, never restated here. Do not describe a project as protected when it is not.
 
 **4. Parse liberally, and never call an unreadable log a lost race.** The store rewrites
 what you wrote — Outline turns a `- ` bullet into `* `. Emit `- `, accept `-`/`*`/`+`,
@@ -93,21 +94,19 @@ registers — decisions belong to the parent. Then take the chain above from `in
 
 ## First command in a project: `init`
 
-**Never run anything else against an uninitialised project.** `init` is where the storage
-question gets asked and answered, once, and written down.
+**Never run anything else against an uninitialised project.** `init` asks and answers
+the storage question once, and writes it down.
 
 **Ask the operator these two things in chat — do not guess, do not pick a default:**
 
 1. **Where should coordination state live?**
    - a knowledge cloud — `outline`, hosted or self-hosted, or `notion` — the shared
-     record, awareness and board across machines. **Neither decides leases**; nothing
-     in either can (trap 1);
+     record, awareness and board across machines — **neither decides leases** (trap 1);
    - or local files (`fs`) — no credentials, and no visibility to an agent on another
-     machine: no shared awareness, no cross-repo signals, no shared board.
+     machine — no shared awareness, cross-repo signal or board.
 
    The lease is decided separately by `leaseBackend` (trap 2), and **`gated` follows that
-   choice, never the record plane**. Report the guarantee you actually have, not the
-   stronger one the record plane suggests.
+   choice, never the record plane** — report the guarantee you actually have.
 2. **If cloud: where.** Outline needs its instance URL; Notion needs the id of the page
    the container goes under. Both are configuration, not secrets, so you may write them.
    The **token is not** — you never ask for it in chat, never read it back, and never
@@ -145,9 +144,10 @@ cannot give two answers about one project.
   away — watermarked per run, so it stays quiet until something changes. A dependency that
   moved may unblock what you planned, or invalidate it.
 
-What else `status` decides: no credentials → degraded mode, reported, and it continues;
-`task-pipeline` absent → it prints the install line and stops. Do not improvise a substitute
-flow — without those stages there is nothing to bind to.
+`status` also decides: no credentials → degraded mode; `task-pipeline` absent → it
+prints the install line and stops. Absence is checked across every host layout or an
+explicit `pipelinePath` — no host's copy masks or is missed. The lease core
+(`acquire`/`renew`/`release`) needs a backend + lease, not the binding.
 
 ```bash
 npx sshlg-skills install
@@ -163,7 +163,8 @@ npx sshlg-skills install
 | `acquire <KEY>` | Take the lease on a task id. Prints `won` or `lost <holder>` |
 | `renew <KEY>` | Extend the lease. The `PostToolUse` hook does this for you |
 | `release <KEY>` | Give the lease back. Always do this, including on failure |
-| `reserve <REG>` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id |
+| `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …); prints it. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
+| `map-offline <REG> <ID> <N>` | Bind an offline id to a properly reserved number — append-only, never rebound |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |
 | `journal <text>` | Append one line to this run's journal |
 | `record <text>` | Append what you **actually built** — `--decision DEC-…`, `--files a,b` |
@@ -232,10 +233,19 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" guard docs/DECISIONS.md
 ```
 
 **Exit 2 is about *this run*: it holds no lease** — not that somebody else holds that file.
-One lease covers every guarded file; hold one or write none. A denial names the other run
-**and its key**, because "r-x holds a lease" beside a path gets repeated as "r-x holds this
-file". Do not edit anyway, and do not "just fix one line" — a clobbered decision looks exactly
-like a decision.
+A denial names the other run **and its key**, because "r-x holds a lease" beside a path gets
+repeated as "r-x holds this file". Do not edit anyway, and do not "just fix one line" — a
+clobbered decision looks exactly like a decision.
+
+**Two write modes, and the tool does not promise the wrong one.** A task lease authorizes
+the TASK, never the file — so a guarded write also takes the FILE's own **resource claim**
+(`res--<repo>--<canonical path>`, SY-04). That is the **short transaction lock**: two agents
+on one shared registry serialize on it, independent files never serialize, honest
+cross-machine only under `leaseBackend: "git"` (advisory otherwise). The other mode is
+**isolated worktree + merge** — each agent a private checkout, a merge policy reconciling
+them — for when writes overlap so heavily a lock would just queue everyone. What the guard
+does NOT promise is enforcement from a single task owner: holding *a* lease was never
+holding *this* file.
 
 Claude Code's `PreToolUse` hook runs this for you. Elsewhere nothing does.
 
@@ -262,32 +272,24 @@ the generated-object contract: `references/two-sources.md`.
 ## Two documentation sources, and the duty to reconcile them
 
 Git docs answer **how it should be**; the as-built record answers **how it actually is**.
-Neither outranks the other, and **the gap between them is the finding**, not a defect.
+Neither outranks the other, and **the gap between them is the finding**, not a defect. The
+duty runs at both ends of a task: `reconcile` before starting, `record` and `reconcile`
+after finishing — and `reconcile` is mechanical, so treating its green as agreement is how
+a divergence survives both ends.
 
-The duty runs at both ends of a task: `reconcile` and resolve every divergence before
-starting, then `record` and `reconcile` again after finishing. Building on an unresolved
-divergence is writing code against a system that does not exist.
-
-**The trap: `reconcile` is mechanical and refuses to judge** whether the built thing matches
-the document — it compares ids, commits, presence and claim tags. That reading is yours, and
-treating its green as agreement is how a divergence survives both ends.
-
-Every project also carries a **generated snapshot** of its own wiring (`setup`) — commit it
-and link it from the agent instructions, so agents read the pipeline instead of inferring it.
-
-**Read `references/two-sources.md`** before the first reconcile, and whenever deciding which
-side a document belongs on.
+**Read `references/two-sources.md`** before the first reconcile: it holds the full duty,
+what `reconcile` refuses to judge, the generated `setup` snapshot, where a document
+belongs, and why nothing is deleted.
 
 ## Binding to task-pipeline
 
-This skill supplies stages; the names are `task-pipeline`'s own. Five of the eleven stages
-carry an ordering rule: **0** `acquire` before the brief is committed; **1** `reconcile` before
-writing code; **3** `reserve` every id before it reaches git; **9** the main write point;
-**10** `merge` or `release` every lease.
+This skill supplies stages; the names are `task-pipeline`'s own.
+Five of the eleven stages carry an ordering rule: **0** `acquire` before the brief
+commits; **1** `reconcile` before code; **3** `reserve` ids before git; **9** the main
+write; **10** `merge`/`release` every lease.
 
-**Read `references/pipeline-binding.md`** when wiring `pipeline.json` — it holds the
-per-stage reasoning, the `skills[]` entries, what must be guarded, and the gate
-expressions.
+**Read `references/pipeline-binding.md`** when wiring `pipeline.json` — per-stage
+reasoning, `skills[]` entries, what to guard, and the gate expressions.
 
 ## Configuration
 

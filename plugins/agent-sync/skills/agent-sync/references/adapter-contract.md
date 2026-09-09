@@ -14,6 +14,16 @@ candidate backend can be trusted with leases.
 A backend is an adapter that implements six primitives and declares three
 capabilities. Nothing else about it is the coordinator's business.
 
+## Contents
+
+- [Primitives](#primitives)
+- [Capabilities](#capabilities)
+- [The status capability contract — one source, five fields](#the-status-capability-contract--one-source-five-fields)
+- [Degradation — non-negotiable](#degradation--non-negotiable)
+- [Errors and retries](#errors-and-retries)
+- [Credentials](#credentials)
+- [Adding a backend — checklist](#adding-a-backend--checklist)
+
 ## Primitives
 
 | Primitive | Signature | Semantics |
@@ -43,6 +53,28 @@ capabilities. Nothing else about it is the coordinator's business.
   always **false**: it requires compare-and-swap, and none of the document stores has
   it. Declaring it true without one is the most damaging lie an adapter can tell, so
   the default is false and the burden of proof is on the adapter.
+
+## The status capability contract — one source, five fields
+
+The RECORD-plane capabilities above (`atomicAppend`/`totalOrderRead`/…) are not
+the same axis as the STATUS the coordinator reports about a run. The status is
+`Sync.capabilities()` in `scripts/agent_sync.py` (FIX-SY-06.01), and it is the
+ONE source every doc describes a mode from — SKILL.md and `backend-fs.md` point
+here rather than restating it, so a single mode can never be described three
+different ways. The five fields:
+
+| field | values | meaning |
+|---|---|---|
+| `lease_scope` | cross-machine \| machine-local | where exclusion holds |
+| `enforcement_mode` | enforced \| advisory | enforced only for a cross-machine CAS the operator asked for on a reachable backend |
+| `awareness_scope` | shared \| isolated | whether other agents can see this project's state |
+| `identity_strength` | strong \| weak | how strongly a run identity is bound |
+| `backend_health` | up \| failed | an unreachable backend is `failed`, never reported active |
+
+**Legacy `gated` is a DERIVED summary** of `enforcement_mode`, kept for old
+callers. **An unavailable observation is `unknown`/`failed`, never asserted**:
+a backend the coordinator cannot reach collapses `enforcement_mode` to advisory
+and `backend_health` to failed rather than showing green.
 
 ## Degradation — non-negotiable
 

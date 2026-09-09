@@ -28,6 +28,14 @@ jobs:
       - name: SessionStart identity (the real hook, as a process)
         run: python3 test/hooks_session_test.py
 
+      - name: Audit regressions (sherlock plan, one file per closed finding)
+        run: |
+          set -e
+          for t in test/audit_regressions/*.py; do
+            echo "== $t"
+            python3 "$t"
+          done
+
       - name: Installers settle the Claude channel (11 cases, 10 watched failing pre-fix)
         run: node test/installer_test.js
 
@@ -74,9 +82,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ssheleg/make-skill
-          ref: 991cbb415be3e856f05c974e631423df552883e3
+          ref: 5ca5c367ba24295d4dd99ff670dbef97234140e7
           path: .skill-auditor
           persist-credentials: false
+
+      - name: Install a real tokenizer (the budget is MEASURED, never estimated)
+        run: python3 -m pip install --quiet tiktoken
 
       - name: Audit every shipped Agent Skill
         run: |

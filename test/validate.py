@@ -946,6 +946,20 @@ def check_reserve_is_race_free() -> None:
             if handed and min(handed) < 7:
                 err(f"reserve: handed {min(handed)}, below the register's next free id (7) — "
                     "an id that already has a heading")
+
+            # FIX-SY-01.02: a RETRY of one reservation key is the same reservation.
+            # A crash between allocation and the caller recording the number is a
+            # retry, and a retry that allocates again costs one crash two ids.
+            os.environ["AGENT_SYNC_RUN_ID"] = "delta"
+            first = mod.Sync().reserve("DEC", rkey="rk-idem")
+            second = mod.Sync().reserve("DEC", rkey="rk-idem")
+            if first != second:
+                err(f"reserve: one reservation key was handed two numbers ({first}, "
+                    f"{second}) — a retry allocated instead of answering")
+            moved_on = mod.Sync().reserve("DEC", rkey="rk-next")
+            if moved_on == first:
+                err("reserve: a FRESH reservation key was handed an already-issued "
+                    "number — the idempotency short-circuit is matching too widely")
     finally:
         os.chdir(cwd)
         os.environ.pop("AGENT_SYNC_RUN_ID", None)
@@ -991,6 +1005,7 @@ def check_renew_extends_the_lease() -> None:
         held["ts"] = aged
         lock.write_text(json.dumps(held))
         (Path(project) / ".agent-sync" / "last-renew").unlink(missing_ok=True)
+        shutil.rmtree(Path(project) / ".agent-sync" / "renew", ignore_errors=True)
 
         _run_script(project, "renew", "REN-1")
 
@@ -3257,17 +3272,28 @@ def self_test() -> int:
         # separates three runs, which is why the second was easy to miss.
         "reserve reads only its own shard": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
-            lambda t: t.replace('        events, _ = self.events("reservations")\n'
-                                '        base, _free, _assign',
-                                '        events, _ = parse_log(self.adapter.log_read(oid))\n'
-                                '        base, _free, _assign')
-                       .replace("            if base is not None and value <= base + served:\n"
-                                "                continue\n", "")),
-        # `renew` back to logging a renewal it never performed.
+            # Both reads: the candidate probe AND the read-back that confirms the
+            # receipt. Diverting only the probe is survivable by design now — the
+            # merged confirm sees the duplicate and retries — so the mutation must
+            # blind the confirm too, which is the original defect in full.
+            lambda t: t.replace('            events, _ = self.events("reservations")\n'
+                                '            base, _free, _assign',
+                                '            events, _ = parse_log(self.adapter.log_read(oid))\n'
+                                '            base, _free, _assign')
+                       .replace('            events, _ = self.events("reservations")\n'
+                                '            _b, _f, assignments = resolve_reservations(events, reg)',
+                                '            events, _ = parse_log(self.adapter.log_read(oid))\n'
+                                '            _b, _f, assignments = resolve_reservations(events, reg)')
+                       .replace('                events, _ = self.events("reservations")',
+                                '                events, _ = parse_log(self.adapter.log_read(oid))')),
+        # `renew` back to logging a renewal it never performed — both paths: the
+        # explicit per-key renew the check drives, and the heartbeat sweep.
         "renew moves no timestamp": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
-            lambda t: t.replace("        renewed = [k for k in keys if self._refresh_lease(k)]",
-                                "        renewed = list(keys)")),
+            lambda t: t.replace("            if self._refresh_lease(key):",
+                                "            if True:")
+                       .replace("        renewed = [k for k in due if self._refresh_lease(k)]",
+                                "        renewed = list(due)")),
         # One key dropped from the legal list is the whole `mergeLog` defect.
         "config key list drifts from the schema": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
@@ -3396,10 +3422,10 @@ def self_test() -> int:
                 "            if False:\n"
                 '                return False, held.get("run")')
              .replace(
-                '            if held and time.time() <= parse_iso(held.get("ts", "")) + int(\n'
+                '            elif time.time() <= parse_iso(held.get("ts", "")) + int(\n'
                 '                    held.get("ttl", self.ttl)):\n'
                 "                return False",
-                "            if False:\n"
+                "            elif False:\n"
                 "                return False")),
         # The setup verdict back behind the machine gate — invisible on every runner.
         "the project verdict hides behind the machine gate": (
