@@ -1417,9 +1417,61 @@ class Sync:
         # this dict, which is exactly what makes it a fence.
         self._lease_gen: dict[str, int] = {}
 
+    def capabilities(self) -> dict:
+        """Five SEPARATE capability fields — because `gated` was one boolean
+        answering three unrelated questions (FIX-SY-06.01).
+
+        `lease_scope`      where exclusion holds: cross-machine (git) vs
+                           machine-local (local). An advisory host must never
+                           read as enforced.
+        `enforcement_mode` whether exclusion is REAL here: enforced only when the
+                           operator asked for it (cfg gated) AND the lease mode
+                           actually guarantees it; advisory otherwise.
+        `awareness_scope`  whether other agents can SEE this project's state:
+                           shared when the record plane carries a total order,
+                           isolated when it does not (a pure-fs project has no
+                           shared awareness).
+        `identity_strength` how strongly a run identity is bound: strong when the
+                           lease is a cross-machine CAS, weak when it is a local
+                           advisory lock.
+        `backend_health`   `up` or `failed` — a backend that cannot be reached is
+                           NEVER reported active/green; its enforcement collapses
+                           to advisory and the failure is named.
+        """
+        # `preflight` is the one cheap live call that proves the backend is
+        # reachable (a local `fs` returns "" and never raises; a cloud adapter
+        # makes one request). A raise means the backend is unreachable RIGHT
+        # NOW, which must collapse enforcement to advisory rather than show
+        # green.
+        health = "up"
+        try:
+            self.adapter.preflight()
+        except Exception:
+            health = "failed"
+        asked = bool(self.cfg.get("gated", True))
+        cross = self.lease_mode == "git"
+        # ENFORCED means a real cross-machine compare-and-swap the operator
+        # asked for, on a reachable backend. A machine-local lock is genuine
+        # exclusion on THIS machine but advisory across machines, so it reports
+        # 'advisory' with lease_scope carrying the local nuance — a host that is
+        # only locally exclusive must never be described to a team as enforced.
+        # A failed backend cannot enforce anything, whatever the config says.
+        enforced = asked and cross and health == "up"
+        return {
+            "lease_scope": "cross-machine" if cross else "machine-local",
+            "enforcement_mode": "enforced" if enforced else "advisory",
+            "awareness_scope": "shared" if getattr(self.adapter, "is_lease_authority", False)
+                               else "isolated",
+            "identity_strength": "strong" if (cross and health == "up") else "weak",
+            "backend_health": health,
+        }
+
     @property
     def gated(self) -> bool:
-        """Whether exclusion is real — decided by the lease mode, never by the record.
+        """Legacy compatibility SUMMARY over the five capability fields
+        (FIX-SY-06.01). Kept so old callers keep working, but it is derived from
+        `capabilities()` now — it is true only when enforcement is real, so an
+        advisory host and a failed backend both read as NOT gated.
 
         Until 1.2.4 this read the record adapter's capabilities, which stopped deciding
         leases in 1.0.0. Both directions were wrong: `outline` with a local lock reported
@@ -1427,7 +1479,7 @@ class Sync:
         `ungated` while every lease was a genuine cross-machine compare-and-swap. The
         plane carries the record; `leaseBackend` decides the lease.
         """
-        return bool(self.cfg.get("gated", True)) and self.lease_mode in LEASE_GUARANTEE
+        return self.capabilities()["enforcement_mode"] == "enforced"
 
     def log_id(self, which: str) -> str:
         """This run's OWN shard. One writer per document, always.
