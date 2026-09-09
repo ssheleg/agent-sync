@@ -2112,6 +2112,17 @@ class Sync:
                   file=sys.stderr)
             return False
 
+        # Releasing the last TASK key releases this run's resource claims too:
+        # a file claim only ever rides under a task lease (FIX-SY-04.01), and
+        # an orphaned one would hold the registry for a task already finished.
+        if not key.startswith(self.RESOURCE_PREFIX):
+            remaining = [k for k in self.held()
+                         if not k.startswith(self.RESOURCE_PREFIX) and k != key]
+            if not remaining:
+                for res in [k for k in self.held()
+                            if k.startswith(self.RESOURCE_PREFIX)]:
+                    self.release(res)
+
         for n in self.write_claim(key, None):
             print(f"  {n}")
         if self.lease_mode == "git":
@@ -3207,8 +3218,25 @@ class Sync:
 
     # -- guard -------------------------------------------------------------
 
+    RESOURCE_PREFIX = "res--"
+
+    def resource_key(self, path: str) -> str:
+        """Canonical repo identity + canonical path — the FILE's own key
+        (FIX-SY-04.01). A task id names work; this names the thing two tasks
+        would collide on, so two runs editing one register serialize on the
+        register, not on whoever's task id sorts first."""
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(str(self.root)))
+        # No dots: the local lock filename sanitizes them, and the key must
+        # round-trip through `held()` byte-identical to its lock's stem.
+        canon = re.sub(r"[^A-Za-z0-9_-]+", "-", rel).strip("-")
+        repo = re.sub(r"[^A-Za-z0-9_-]+", "-", repo_name() or "repo")
+        return f"{self.RESOURCE_PREFIX}{repo}--{canon}"[:120]
+
     def guard(self, path: str) -> tuple[bool, str]:
-        rel = os.path.relpath(os.path.abspath(path), str(self.root))
+        # realpath on BOTH sides: canonical identity is the point (SY-04) — a
+        # /var vs /private/var symlink split makes one file two names, and a
+        # guard that sees two names guards neither.
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(str(self.root)))
         patterns = self.cfg.get("guardedFiles") or []
         if not any(matches_glob(rel, p) for p in patterns):
             return True, "not a guarded file"
@@ -3217,10 +3245,30 @@ class Sync:
         # strongly it is arbitrated, and that is what `gated` reports — not whether
         # the check runs. A local lock file is genuine mutual exclusion between
         # agents on one machine; it is only across machines that fs cannot arbitrate.
+        #
+        # And a TASK lease is ownership of the task, never of the file
+        # (FIX-SY-04.01): two runs holding two different task ids used to both
+        # pass here and interleave writes to one shared registry. A guarded
+        # file now also takes the file's OWN claim — resource identity =
+        # canonical repo + canonical path — auto-claimed under the task lease,
+        # so a single agent feels nothing while two agents on one file
+        # serialize. Independent files carry independent keys and never
+        # serialize without cause.
         held = self.held()
-        if held:
+        task_keys = [k for k in held if not k.startswith(self.RESOURCE_PREFIX)]
+        res = self.resource_key(path)
+        if res in held:
+            return True, f"resource claim held for {rel} ({res})"
+        if task_keys:
+            won, holder = self.acquire(res)
             note = "" if self.gated else " (advisory: arbitrated locally only)"
-            return True, f"held by this run ({', '.join(held)}){note}"
+            if won:
+                return True, (f"held by this run ({', '.join(task_keys)}); resource "
+                              f"claim taken for {rel}{note}")
+            return False, (f"{rel}: another run ({holder}) holds this FILE's "
+                           f"resource claim ({res}) — a task lease authorizes the "
+                           f"task, not the file. Wait for the claim to release or "
+                           f"expire, then retry.")
 
         # Name the OTHER key, never just the other run. "r-x holds a lease right now"
         # beside a path reads as "r-x holds this file" — which is not what was checked,

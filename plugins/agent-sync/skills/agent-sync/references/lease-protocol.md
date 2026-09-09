@@ -137,6 +137,19 @@ the second read is the state.
 identically to an operator and mean opposite things, so they are printed differently and
 `reap` exits non-zero on the first.
 
+## Resource identity — the file's own claim (SY-04)
+
+A task lease is ownership of the TASK, never of a file: two runs holding two
+different task ids used to both pass the guard and interleave writes to one
+shared registry. A guarded write now also takes the file's own claim — key
+`res--<repo>--<canonical path>` (realpath on both sides: a `/var` vs
+`/private/var` symlink split makes one file two names, and a guard that sees
+two names guards neither). The claim is auto-taken under the task lease, so a
+single agent feels nothing; two agents on one file serialize on the FILE;
+independent files carry independent keys and never serialize without cause.
+Releasing the run's last task key releases its resource claims with it — a
+file claim only ever rides under a task lease.
+
 ## Expiry and stealing
 
 A lock is expired when `now > ts + ttl` for the timestamp inside it.
