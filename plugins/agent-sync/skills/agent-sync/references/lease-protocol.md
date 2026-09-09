@@ -75,6 +75,15 @@ documents, and implemented nowhere except a warning line on the board that retur
 5. won      write {run, ts, ttl, repo}; publish op=acquire to the plane for visibility
 ```
 
+**Every local writer shares ONE critical section — and step 3 is it.** The
+`.steal` guard is not the stealer's private door any more: `renew` and the
+local release enter the same section, so a renewal arriving mid-steal DEFERS
+to the next heartbeat instead of rewriting a timestamp the stealer's expiry
+re-read already consumed. Ownership changes bump a `gen` counter a renewal
+preserves — a reader holding a stale generation is holding a stale ownership.
+And a host where the O_EXCL primitive itself fails gets an explicit
+`unsupported` refusal naming the remedy, never an unlocked fallback (SY-03).
+
 **Step 3 is one critical section, not two calls.** `unlink` followed by `O_EXCL create`
 leaves a gap, and a second stealer that has already read the lock as expired removes the
 lock the first one just created — both then hold what each believes is exclusive. Twelve

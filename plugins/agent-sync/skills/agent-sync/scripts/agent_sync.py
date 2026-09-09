@@ -1705,6 +1705,37 @@ class Sync:
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{re.sub(r'[^A-Za-z0-9_-]', '-', key)}.lock"
 
+    def _enter_local_section(self, lock: Path):
+        """The ONE critical section for every LOCAL lease mutation — steal, renew,
+        release. O_EXCL on a second name is the OS-backed mutex between processes
+        on this machine, and one section for every writer is what turns
+        steal-vs-renew from a race into a sequence. Returns the guard path, or
+        None when another run is inside (the caller defers, it never barges). A
+        platform where the primitive itself fails raises `unsupported` out loud —
+        an unlocked fallback would be exclusion by luck (SY-03)."""
+        guard = lock.with_name(lock.name + ".steal")
+        try:
+            if guard.exists() and time.time() - guard.stat().st_mtime > STEAL_GRACE:
+                guard.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return None
+        except OSError as exc:
+            raise Fail(
+                "the local lease critical section is unsupported here "
+                f"({exc}) — an unlocked fallback would be exclusion by luck; set "
+                "leaseBackend: \"git\" or configure a cloud backend") from exc
+        os.close(fd)
+        return guard
+
+    @staticmethod
+    def _exit_local_section(guard) -> None:
+        if guard is not None:
+            guard.unlink(missing_ok=True)
+
     def _steal_expired(self, lock: Path, payload: str) -> bool:
         """Replace an expired lock — reap and create as ONE critical section.
 
@@ -1721,18 +1752,10 @@ class Sync:
         filesystem calls, so its own abandonment grace is short; without one, a crash
         between them would cost the key until somebody deleted a file by hand.
         """
-        guard = lock.with_name(lock.name + ".steal")
+        guard = self._enter_local_section(lock)
+        if guard is None:
+            return False                      # another writer is inside the section
         try:
-            if guard.exists() and time.time() - guard.stat().st_mtime > STEAL_GRACE:
-                guard.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except OSError:
-            return False                      # another run is stealing this very lock
-        try:
-            os.close(fd)
             try:
                 held = json.loads(lock.read_text())
             except (json.JSONDecodeError, OSError):
@@ -1740,15 +1763,19 @@ class Sync:
             if held and time.time() <= parse_iso(held.get("ts", "")) + int(
                     held.get("ttl", self.ttl)):
                 return False                  # renewed, or already stolen and live again
+            # The GENERATION moves on every ownership change, never on a renewal —
+            # a reader holding a stale generation is holding a stale ownership.
+            body = json.loads(payload)
+            body["gen"] = int(held.get("gen", 0) or 0) + 1
             lock.unlink(missing_ok=True)
             fd2 = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd2, "w") as fh:
-                fh.write(payload)
+                fh.write(json.dumps(body))
             return True
         except OSError:
             return False
         finally:
-            guard.unlink(missing_ok=True)
+            self._exit_local_section(guard)
 
     def acquire(self, key: str) -> tuple[bool, str | None]:
         """Exclusion comes from an atomic file create; the cloud carries the record.
@@ -1828,7 +1855,7 @@ class Sync:
                     other = None
                 return False, other
             with os.fdopen(fd, "w") as fh:
-                fh.write(payload)
+                fh.write(json.dumps({**json.loads(payload), "gen": 1}))
 
         self._touch_renew(key)
         for n in self.write_claim(key, self.rid):
@@ -1883,21 +1910,31 @@ class Sync:
         lock = self._local_lock(key)
         if not lock.exists():
             return False
-        try:
-            held = json.loads(lock.read_text())
-        except (json.JSONDecodeError, OSError):
+        guard = self._enter_local_section(lock)
+        if guard is None:
+            # A steal (or another writer) is inside the section. Deferring is the
+            # serialization: rewriting the timestamp NOW would race the stealer's
+            # own expiry re-read, and two writers on one lock file is the defect.
+            print(f"note: {key}: another writer holds the local section — "
+                  "renewal deferred to the next heartbeat", file=sys.stderr)
             return False
-        if held.get("run") != self.rid:
-            return False
-        held["ts"] = now_iso()
         tmp = lock.with_name(f"{lock.name}.{os.getpid()}.tmp")
         try:
+            try:
+                held = json.loads(lock.read_text())
+            except (json.JSONDecodeError, OSError):
+                return False
+            if held.get("run") != self.rid:
+                return False
+            held["ts"] = now_iso()            # the generation is OWNERSHIP's; a renewal keeps it
             tmp.write_text(json.dumps(held))
             tmp.replace(lock)
         except OSError as exc:
             tmp.unlink(missing_ok=True)
             print(f"note: could not renew {key} ({exc})", file=sys.stderr)
             return False
+        finally:
+            self._exit_local_section(guard)
         return True
 
     def renew(self, key: str | None = None) -> bool:
