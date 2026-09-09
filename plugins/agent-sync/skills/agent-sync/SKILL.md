@@ -233,10 +233,19 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" guard docs/DECISIONS.md
 ```
 
 **Exit 2 is about *this run*: it holds no lease** — not that somebody else holds that file.
-One lease covers every guarded file; hold one or write none. A denial names the other run
-**and its key**, because "r-x holds a lease" beside a path gets repeated as "r-x holds this
-file". Do not edit anyway, and do not "just fix one line" — a clobbered decision looks exactly
-like a decision.
+A denial names the other run **and its key**, because "r-x holds a lease" beside a path gets
+repeated as "r-x holds this file". Do not edit anyway, and do not "just fix one line" — a
+clobbered decision looks exactly like a decision.
+
+**Two write modes, and the tool does not promise the wrong one.** A task lease authorizes
+the TASK, never the file — so a guarded write also takes the FILE's own **resource claim**
+(`res--<repo>--<canonical path>`, SY-04). That is the **short transaction lock**: two agents
+on one shared registry serialize on it, independent files never serialize, honest
+cross-machine only under `leaseBackend: "git"` (advisory otherwise). The other mode is
+**isolated worktree + merge** — each agent a private checkout, a merge policy reconciling
+them — for when writes overlap so heavily a lock would just queue everyone. What the guard
+does NOT promise is enforcement from a single task owner: holding *a* lease was never
+holding *this* file.
 
 Claude Code's `PreToolUse` hook runs this for you. Elsewhere nothing does.
 
