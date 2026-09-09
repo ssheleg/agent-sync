@@ -146,6 +146,17 @@ lock file in `local` mode, and re-pushes the ref with `--force-with-lease` again
 exact object it read in `git` mode. The `op=renew` line it also appends to the record plane
 is visibility, not renewal.
 
+**And a renewal is FENCED, not unconditional (SY-03.02).** Three refusals stand
+between a heartbeat and the lock: the run id must match; the lease must still be
+LIVE — an expired lease is not renewed, it is acquired again, because a stealer
+may already have read it as up for grabs; and the lock's `gen` must equal the
+generation this session acquired under. The third is what the run id cannot do:
+a replacement session shares the run id and the checkout, so after its steal
+(gen bump) the old session's heartbeat matches on run and would resurrect the
+lease forever — only the in-memory generation, the one thing a zombie does not
+share with its replacement, tells the two apart. Re-taking one's own expired
+lease is therefore a steal with a generation bump, never a refresh.
+
 **The heartbeat's throttle is per (run, key), never shared.** It was one file per
 checkout, and one agent touching it every hundred seconds meant every OTHER run's
 heartbeat read "renewed recently" and refreshed nothing — a 45-minute lease expiring

@@ -1411,6 +1411,11 @@ class Sync:
         self.ttl = int(self.cfg.get("leaseTtlSeconds") or DEFAULT_TTL)
         self._identity: tuple[str, str] | None = None
         self._holders: dict[str, str | None] = {}
+        # The generation THIS OBJECT acquired each key under (FIX-SY-03.02).
+        # In-memory on purpose: a zombie session shares the run id and the
+        # checkout with its replacement — the only thing it does NOT share is
+        # this dict, which is exactly what makes it a fence.
+        self._lease_gen: dict[str, int] = {}
 
     @property
     def gated(self) -> bool:
@@ -1736,6 +1741,10 @@ class Sync:
         if guard is not None:
             guard.unlink(missing_ok=True)
 
+    @staticmethod
+    def _key_of(lock: Path) -> str:
+        return lock.name[:-len(".lock")] if lock.name.endswith(".lock") else lock.name
+
     def _steal_expired(self, lock: Path, payload: str) -> bool:
         """Replace an expired lock — reap and create as ONE critical section.
 
@@ -1767,6 +1776,7 @@ class Sync:
             # a reader holding a stale generation is holding a stale ownership.
             body = json.loads(payload)
             body["gen"] = int(held.get("gen", 0) or 0) + 1
+            self._lease_gen[self._key_of(lock)] = body["gen"]
             lock.unlink(missing_ok=True)
             fd2 = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd2, "w") as fh:
@@ -1820,6 +1830,21 @@ class Sync:
             except (json.JSONDecodeError, OSError):
                 held = {}
             if held.get("run") == self.rid:
+                # An EXPIRED own lease is not refreshed, it is re-taken: the run id
+                # matches, but a replacement session shares the run id — only the
+                # generation bump tells the two apart, and a refresh here would let
+                # the older session's heartbeat keep resurrecting it (FIX-SY-03.02).
+                if time.time() > parse_iso(held.get("ts", "")) + int(
+                        held.get("ttl", self.ttl)):
+                    if self._steal_expired(lock, payload):
+                        self._touch_renew(key)
+                        return True, self.rid
+                    try:
+                        other = json.loads(lock.read_text()).get("run")
+                    except (json.JSONDecodeError, OSError):
+                        other = None
+                    return False, other
+                self._lease_gen[key] = int(held.get("gen", 0) or 0)
                 # MOVE THE LOCK'S OWN `ts`, not just the throttle marker. This branch did
                 # exactly what `_refresh_lease`'s docstring describes as the bug it exists
                 # to have fixed — touch the throttle file and leave the timestamp the lease
@@ -1856,6 +1881,7 @@ class Sync:
                 return False, other
             with os.fdopen(fd, "w") as fh:
                 fh.write(json.dumps({**json.loads(payload), "gen": 1}))
+            self._lease_gen[key] = 1
 
         self._touch_renew(key)
         for n in self.write_claim(key, self.rid):
@@ -1885,6 +1911,11 @@ class Sync:
         if self.lease_mode == "git":
             sha, held = self._git_read_lease(key)
             if not sha or held.get("run") != self.rid:
+                return False
+            if time.time() > parse_iso(held.get("ts", "")) + int(
+                    held.get("ttl", self.ttl)):
+                print(f"note: {key}: this lease expired — a renewal does not "
+                      "resurrect it; acquire it again", file=sys.stderr)
                 return False
             payload = json.dumps({**held, "ts": now_iso()})
             empty_tree = git("hash-object", "-t", "tree", os.devnull)
@@ -1925,6 +1956,26 @@ class Sync:
             except (json.JSONDecodeError, OSError):
                 return False
             if held.get("run") != self.rid:
+                return False
+            # An expired lease is DEAD, whoever's name is on it. Renewing it here
+            # would resurrect what a stealer may already have decided is up for
+            # grabs; the owner of an expired lease acquires again (FIX-SY-03.02).
+            if time.time() > parse_iso(held.get("ts", "")) + int(
+                    held.get("ttl", self.ttl)):
+                print(f"note: {key}: this lease expired — a renewal does not "
+                      "resurrect it; acquire it again", file=sys.stderr)
+                return False
+            # The generation fence: a replacement session shares the run id, so
+            # the run check above cannot tell the old session from the new one —
+            # only the generation this OBJECT acquired under can. A recorded
+            # generation that no longer matches the lock's means a steal
+            # completed after this session's acquire; its renewal must lose.
+            lock_gen = int(held.get("gen", 0) or 0)
+            expected = self._lease_gen.get(key)
+            if expected is not None and lock_gen != expected:
+                print(f"note: {key}: held under generation {expected}, the lock "
+                      f"is at {lock_gen} — a newer owner took it; acquire it "
+                      "again", file=sys.stderr)
                 return False
             held["ts"] = now_iso()            # the generation is OWNERSHIP's; a renewal keeps it
             tmp.write_text(json.dumps(held))
