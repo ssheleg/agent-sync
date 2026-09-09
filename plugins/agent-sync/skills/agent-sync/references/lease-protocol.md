@@ -137,6 +137,14 @@ lock file in `local` mode, and re-pushes the ref with `--force-with-lease` again
 exact object it read in `git` mode. The `op=renew` line it also appends to the record plane
 is visibility, not renewal.
 
+**The heartbeat's throttle is per (run, key), never shared.** It was one file per
+checkout, and one agent touching it every hundred seconds meant every OTHER run's
+heartbeat read "renewed recently" and refreshed nothing — a 45-minute lease expiring
+under live work because a neighbour was busy (SY-02). Each key of each run now ages
+against its own marker; an `acquire` stamps only the key it just took; and an
+**explicit `renew <key>` never hides behind the throttle** — it refreshes for real or
+answers with the precise per-key reason it could not.
+
 That distinction is the whole of the bug fixed in 1.5.3: `renew` wrote *only* the record
 line. The lock's `ts` was written once, by `acquire`, so a run holding a lease lost it at
 TTL while still working — its own guard began denying it, and another run acquired the task

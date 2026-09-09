@@ -1540,7 +1540,7 @@ class Sync:
         if held:
             if held.get("run") == self.rid:
                 self._note_local(key, json.dumps(held))
-                self._touch_renew()
+                self._touch_renew(key)
                 return True, self.rid
             alive = time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl))
             if alive:
@@ -1573,7 +1573,7 @@ class Sync:
             _s, now_held = self._git_read_lease(key)
             return False, now_held.get("run") or "another run"
         self._note_local(key, payload)
-        self._touch_renew()
+        self._touch_renew(key)
         return True, self.rid
 
     def _git_release(self, key: str) -> None:
@@ -1808,7 +1808,7 @@ class Sync:
                 # That is the mechanism behind a lease expiring three times in one run
                 # against a 450-step CI job on 2026-09-01.
                 self._refresh_lease(key)
-                self._touch_renew()
+                self._touch_renew(key)
                 return True, self.rid
             if time.time() <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
                 return False, held.get("run")
@@ -1830,7 +1830,7 @@ class Sync:
             with os.fdopen(fd, "w") as fh:
                 fh.write(payload)
 
-        self._touch_renew()
+        self._touch_renew(key)
         for n in self.write_claim(key, self.rid):
             print(f"  {n}")
         # Record it for everyone else to see. A failure here costs visibility, never
@@ -1901,24 +1901,70 @@ class Sync:
         return True
 
     def renew(self, key: str | None = None) -> bool:
-        marker = self.root / STATE_DIR / "last-renew"
+        """Refresh leases — each against ITS OWN throttle, never a shared one.
+
+        The throttle used to be one file per checkout. Run A touching it every
+        hundred seconds meant run B's heartbeat read "renewed recently" for
+        forty-five minutes straight, refreshed nothing, and B's lease expired
+        under work in progress — one agent's activity suppressing every other
+        run's renewals in the same checkout. The marker is now per (run, key):
+        another agent's activity, and this run's OTHER keys, are invisible here,
+        which is the point.
+        """
         interval = int(self.cfg.get("renewIntervalSeconds") or DEFAULT_RENEW)
-        if marker.exists() and time.time() - marker.stat().st_mtime < interval:
+        if key is not None:
+            # An explicit renew answers for THIS key: a real refresh, or the
+            # precise per-key reason there was none. It never hides behind the
+            # heartbeat's throttle — the caller named the key on purpose.
+            if self._refresh_lease(key):
+                if self.adapter.is_lease_authority:
+                    self.adapter.log_append(self.log_id("claims"),
+                                            fmt_line("renew", key, self.rid))
+                self._touch_renew(key)
+                return True
+            age = self._renew_age(key)
+            why = (f"its renewal marker is {int(age)}s old" if age is not None
+                   else "no renewal of it is on record for this run")
+            print(f"note: could not renew {key} — this run does not hold it in the "
+                  f"lease plane ({why})", file=sys.stderr)
             return False
-        keys = [key] if key else self.held()
-        if not keys:
-            self._touch_renew()
+        due = []
+        for k in self.held():
+            age = self._renew_age(k)
+            if age is None or age >= interval:
+                due.append(k)
+        if not due:
             return False
-        renewed = [k for k in keys if self._refresh_lease(k)]
+        renewed = [k for k in due if self._refresh_lease(k)]
         if self.adapter.is_lease_authority and renewed:
             oid = self.log_id("claims")
             for k in renewed:
                 self.adapter.log_append(oid, fmt_line("renew", k, self.rid))
-        self._touch_renew()
+        for k in renewed:
+            self._touch_renew(k)
         return bool(renewed)
 
-    def _touch_renew(self) -> None:
-        marker = self.root / STATE_DIR / "last-renew"
+    def _renew_marker(self, key: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
+        return self.root / STATE_DIR / "renew" / f"{self.rid}--{safe}"
+
+    def _renew_age(self, key: str) -> float | None:
+        """Seconds since THIS run last renewed THIS key, or None when it never has.
+        The marker carries its timestamp in its bytes, not its mtime, so the same
+        clock the throttle compares against is the one that wrote it."""
+        try:
+            ts = parse_iso_or_none(self._renew_marker(key).read_text().strip())
+        except OSError:
+            return None
+        if ts is None:
+            return None
+        return time.time() - ts
+
+    def _touch_renew(self, key: str) -> None:
+        """Stamp the (run, key) marker. Called on a successful refresh — and on
+        acquire, whose fresh lease IS a renewal of exactly that key. Never a
+        by-product of unrelated activity: that by-product was the defect."""
+        marker = self._renew_marker(key)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(now_iso())
 

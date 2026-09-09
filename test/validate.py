@@ -1005,6 +1005,7 @@ def check_renew_extends_the_lease() -> None:
         held["ts"] = aged
         lock.write_text(json.dumps(held))
         (Path(project) / ".agent-sync" / "last-renew").unlink(missing_ok=True)
+        shutil.rmtree(Path(project) / ".agent-sync" / "renew", ignore_errors=True)
 
         _run_script(project, "renew", "REN-1")
 
@@ -3285,11 +3286,14 @@ def self_test() -> int:
                                 '            _b, _f, assignments = resolve_reservations(events, reg)')
                        .replace('                events, _ = self.events("reservations")',
                                 '                events, _ = parse_log(self.adapter.log_read(oid))')),
-        # `renew` back to logging a renewal it never performed.
+        # `renew` back to logging a renewal it never performed — both paths: the
+        # explicit per-key renew the check drives, and the heartbeat sweep.
         "renew moves no timestamp": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
-            lambda t: t.replace("        renewed = [k for k in keys if self._refresh_lease(k)]",
-                                "        renewed = list(keys)")),
+            lambda t: t.replace("            if self._refresh_lease(key):",
+                                "            if True:")
+                       .replace("        renewed = [k for k in due if self._refresh_lease(k)]",
+                                "        renewed = list(due)")),
         # One key dropped from the legal list is the whole `mergeLog` defect.
         "config key list drifts from the schema": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
