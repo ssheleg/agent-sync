@@ -137,6 +137,19 @@ the second read is the state.
 identically to an operator and mean opposite things, so they are printed differently and
 `reap` exits non-zero on the first.
 
+## The lock is published FULL, never created empty (SY-05)
+
+A lock created empty by `O_EXCL` and filled by a later write has a window a
+competitor reads as `{}` — not live, therefore stealable — and steals while
+the creator writes on into a now-unlinked inode: two winners. So a lock is
+PUBLISHED already carrying its body — written to a temp inode, fsync'd, then
+`os.link`ed onto the final name (an atomic no-replace create of a FULL inode)
+— and no reader ever observes an empty lock. Any empty or partial lock that
+does appear is a creation IN FLIGHT, not an expired lease: it is left alone
+within a short creation grace and reclaimed only once its own file age proves
+it abandoned — arbitrated by age, never by the heuristic that empty JSON means
+free.
+
 ## Resource identity — the file's own claim (SY-04)
 
 A task lease is ownership of the TASK, never of a file: two runs holding two

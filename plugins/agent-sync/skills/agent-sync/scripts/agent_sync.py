@@ -1710,6 +1710,39 @@ class Sync:
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{re.sub(r'[^A-Za-z0-9_-]', '-', key)}.lock"
 
+    # A lock created empty by O_EXCL and filled by a LATER write has a window
+    # where a competitor reads it as `{}` — not live, therefore stealable — and
+    # steals it while the creator writes on into a now-unlinked inode: two
+    # winners (SY-05). The cure is to PUBLISH an already-filled inode atomically,
+    # so a reader never sees an empty lock, and to treat any empty/partial lock
+    # that does appear as a creation-in-flight (a short grace) rather than as
+    # expired.
+    CREATE_GRACE_SECONDS = 10
+
+    def _publish_lock(self, lock: Path, body: dict) -> bool:
+        """Atomically create `lock` already carrying `body`. Returns False if
+        the lock already exists (someone else won the create). The bytes are
+        written to a temp inode, fsync'd, then `os.link`ed onto the final name
+        — link is a no-replace atomic create of a FULL inode, so no reader ever
+        observes an empty lock."""
+        tmp = lock.with_name(f"{lock.name}.{os.getpid()}.new")
+        try:
+            fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(body))
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(str(tmp), str(lock))   # atomic no-replace publish
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            try:
+                os.unlink(str(tmp))
+            except OSError:
+                pass
+
     def _enter_local_section(self, lock: Path):
         """The ONE critical section for every LOCAL lease mutation — steal, renew,
         release. O_EXCL on a second name is the OS-backed mutex between processes
@@ -1765,11 +1798,24 @@ class Sync:
         if guard is None:
             return False                      # another writer is inside the section
         try:
+            raw = ""
             try:
-                held = json.loads(lock.read_text())
+                raw = lock.read_text()
+                held = json.loads(raw)
             except (json.JSONDecodeError, OSError):
                 held = {}
-            if held and time.time() <= parse_iso(held.get("ts", "")) + int(
+            if not held:
+                # Empty or unparseable: a creation in flight, not an expired
+                # lease. Only YIELD it once it is older than the creation grace
+                # — arbitrated by the file's own age, never by "the JSON is
+                # empty so it is free" (SY-05).
+                try:
+                    age = time.time() - os.stat(lock).st_mtime
+                except OSError:
+                    return False
+                if age < self.CREATE_GRACE_SECONDS:
+                    return False              # let the creator finish
+            elif time.time() <= parse_iso(held.get("ts", "")) + int(
                     held.get("ttl", self.ttl)):
                 return False                  # renewed, or already stolen and live again
             # The GENERATION moves on every ownership change, never on a renewal —
@@ -1778,9 +1824,8 @@ class Sync:
             body["gen"] = int(held.get("gen", 0) or 0) + 1
             self._lease_gen[self._key_of(lock)] = body["gen"]
             lock.unlink(missing_ok=True)
-            fd2 = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd2, "w") as fh:
-                fh.write(json.dumps(body))
+            if not self._publish_lock(lock, body):
+                return False                  # someone published between unlink and link
             return True
         except OSError:
             return False
@@ -1871,16 +1916,14 @@ class Sync:
                     other = None
                 return False, other
         else:
-            try:
-                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError:
+            # Publish an already-filled lock atomically — no empty window a
+            # competitor could read as free (SY-05).
+            if not self._publish_lock(lock, {**json.loads(payload), "gen": 1}):
                 try:
                     other = json.loads(lock.read_text()).get("run")
                 except (json.JSONDecodeError, OSError):
                     other = None
                 return False, other
-            with os.fdopen(fd, "w") as fh:
-                fh.write(json.dumps({**json.loads(payload), "gen": 1}))
             self._lease_gen[key] = 1
 
         self._touch_renew(key)

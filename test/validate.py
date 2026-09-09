@@ -3422,10 +3422,10 @@ def self_test() -> int:
                 "            if False:\n"
                 '                return False, held.get("run")')
              .replace(
-                '            if held and time.time() <= parse_iso(held.get("ts", "")) + int(\n'
+                '            elif time.time() <= parse_iso(held.get("ts", "")) + int(\n'
                 '                    held.get("ttl", self.ttl)):\n'
                 "                return False",
-                "            if False:\n"
+                "            elif False:\n"
                 "                return False")),
         # The setup verdict back behind the machine gate — invisible on every runner.
         "the project verdict hides behind the machine gate": (
