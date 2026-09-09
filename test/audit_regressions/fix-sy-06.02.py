@@ -91,7 +91,7 @@ def t_fields_match_the_code():
 def t_skill_and_fs_point_at_contract():
     s = flat(SKILL)
     assert "references/adapter-contract.md` → *The status capability contract*" in s
-    assert "never restates enforced/advisory in its own words and cannot contradict" in s
+    assert "never restated here" in s, "SKILL does not say it never restates the contract"
     fs = flat(FS)
     assert "adapter-contract.md` → *The status capability\n   contract*".replace("\n   ", " ") in fs \
         or "the one source this file describes the mode from" in fs

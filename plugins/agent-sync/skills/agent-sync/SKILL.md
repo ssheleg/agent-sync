@@ -144,9 +144,10 @@ cannot give two answers about one project.
   away — watermarked per run, so it stays quiet until something changes. A dependency that
   moved may unblock what you planned, or invalidate it.
 
-What else `status` decides: no credentials → degraded mode, reported, and it continues;
-`task-pipeline` absent → it prints the install line and stops. Do not improvise a substitute
-flow — without those stages there is nothing to bind to.
+`status` also decides: no credentials → degraded mode; `task-pipeline` absent → it
+prints the install line and stops. Absence is checked across every host layout or an
+explicit `pipelinePath` — no host's copy masks or is missed. The lease core
+(`acquire`/`renew`/`release`) needs a backend + lease, not the binding.
 
 ```bash
 npx sshlg-skills install
@@ -162,7 +163,7 @@ npx sshlg-skills install
 | `acquire <KEY>` | Take the lease on a task id. Prints `won` or `lost <holder>` |
 | `renew <KEY>` | Extend the lease. The `PostToolUse` hook does this for you |
 | `release <KEY>` | Give the lease back. Always do this, including on failure |
-| `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
+| `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …); prints it. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
 | `map-offline <REG> <ID> <N>` | Bind an offline id to a properly reserved number — append-only, never rebound |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |
 | `journal <text>` | Append one line to this run's journal |
@@ -289,14 +290,13 @@ side a document belongs on.
 
 ## Binding to task-pipeline
 
-This skill supplies stages; the names are `task-pipeline`'s own. Five of the eleven stages
-carry an ordering rule: **0** `acquire` before the brief is committed; **1** `reconcile` before
-writing code; **3** `reserve` every id before it reaches git; **9** the main write point;
-**10** `merge` or `release` every lease.
+This skill supplies stages; the names are `task-pipeline`'s own.
+Five of the eleven stages carry an ordering rule: **0** `acquire` before the brief
+commits; **1** `reconcile` before code; **3** `reserve` ids before git; **9** the main
+write; **10** `merge`/`release` every lease.
 
-**Read `references/pipeline-binding.md`** when wiring `pipeline.json` — it holds the
-per-stage reasoning, the `skills[]` entries, what must be guarded, and the gate
-expressions.
+**Read `references/pipeline-binding.md`** when wiring `pipeline.json` — per-stage
+reasoning, `skills[]` entries, what to guard, and the gate expressions.
 
 ## Configuration
 

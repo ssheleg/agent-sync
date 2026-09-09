@@ -4033,7 +4033,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("  agent_sync.py check")
         return 1
 
-    if not pipeline_installed():
+    if not pipeline_installed(cfg=s.cfg):
         print("\n✗ task-pipeline is not installed. agent-sync binds to its stages and")
         print("  will not improvise a substitute flow.")
         print("\nNEXT:\n  npx sshlg-skills install")
@@ -4044,13 +4044,41 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def pipeline_installed() -> bool:
-    home = Path.home()
-    if list(home.glob(".claude/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md")):
-        return True
-    if (home / ".agents/skills/task-pipeline/SKILL.md").exists():
-        return True
-    return (home / ".claude/skills/task-pipeline/SKILL.md").exists()
+# Every host layout task-pipeline can be installed under — NOT just Claude's.
+# A detector that proves absence from ONE host's layout is wrong on a machine
+# whose task-pipeline lives in another host's cache (FIX-SY-08.01). The plugin
+# CACHE glob and the plain-skills path are listed per host; the shared hub is
+# host-agnostic. New host? add its two lines here, not a branch elsewhere.
+PIPELINE_HOST_LAYOUTS = (
+    (".claude/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md", None),
+    (".codex/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md", None),
+    (".gemini/plugins/cache/task-pipeline/**/skills/task-pipeline/SKILL.md", None),
+    (None, ".claude/skills/task-pipeline/SKILL.md"),
+    (None, ".codex/skills/task-pipeline/SKILL.md"),
+    (None, ".gemini/skills/task-pipeline/SKILL.md"),
+    (None, ".agents/skills/task-pipeline/SKILL.md"),   # the shared hub, host-agnostic
+)
+
+
+def pipeline_installed(home: "Path | None" = None, cfg: "dict | None" = None) -> bool:
+    """Whether task-pipeline is reachable to THIS machine, across every host
+    layout — or at an explicit path the operator configured (FIX-SY-08.01).
+
+    `home` is injectable so a test can point at a synthetic HOME with no side
+    effects. An explicit `pipelinePath` in the config wins over discovery: a
+    machine that resolved the skill some other way says so, and the detector
+    does not overrule a stated fact with a filesystem guess.
+    """
+    home = home or Path.home()
+    explicit = (cfg or {}).get("pipelinePath")
+    if explicit:
+        return (Path(explicit) if os.path.isabs(explicit) else home / explicit).exists()
+    for glob_pat, direct in PIPELINE_HOST_LAYOUTS:
+        if glob_pat and list(home.glob(glob_pat)):
+            return True
+        if direct and (home / direct).exists():
+            return True
+    return False
 
 
 def cmd_bootstrap(_args: argparse.Namespace) -> int:
