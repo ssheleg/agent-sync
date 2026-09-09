@@ -1,5 +1,5 @@
 {
-  "description": "agent-sync — lease enforcement and run lifecycle. Every hook exits 0 immediately when the project has no .claude/agent-sync.json, so installing the plugin globally changes nothing in projects that do not use it.",
+  "description": "agent-sync — ADVISORY lease guard and run lifecycle. The PreToolUse guard covers exactly the mutation surfaces a Claude Code matcher can name: Edit, Write, MultiEdit, NotebookEdit, and a Bash `git commit` (parsed for compound/`-C`/env forms). It is NOT a sandbox: a language-runtime write (Python write_text), a `sed -i`, or a shell redirect is OUTSIDE the boundary and is not enforced — see the capability matrix in guard.sh. Real enforcement needs a trusted mutation API, an isolated worktree, or OS controls with resource locks, not a regex shell parser. Every hook exits 0 immediately when the project has no .claude/agent-sync.json, so installing the plugin globally changes nothing in projects that do not use it.",
   "hooks": {
     "SessionStart": [
       {
