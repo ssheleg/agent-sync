@@ -45,8 +45,9 @@ recorded in `docs/MERGES.md`, the `--key` lease released; `merges` says what lan
 you were away. **Read `references/branching.md`** before merging.
 
 **3. Hooks exist only in Claude Code.** Elsewhere nothing blocks a guarded edit: run
-`guard` yourself and record the run as `ungated`. Do not describe a project as protected
-when it is not.
+`guard` yourself and record the run as `ungated`. A mode's five capability fields
+live in ONE place — `references/adapter-contract.md` → *The status capability
+contract*, never restated here. Do not describe a project as protected when it is not.
 
 **4. Parse liberally, and never call an unreadable log a lost race.** The store rewrites
 what you wrote — Outline turns a `- ` bullet into `* `. Emit `- `, accept `-`/`*`/`+`,
@@ -93,21 +94,19 @@ registers — decisions belong to the parent. Then take the chain above from `in
 
 ## First command in a project: `init`
 
-**Never run anything else against an uninitialised project.** `init` is where the storage
-question gets asked and answered, once, and written down.
+**Never run anything else against an uninitialised project.** `init` asks and answers
+the storage question once, and writes it down.
 
 **Ask the operator these two things in chat — do not guess, do not pick a default:**
 
 1. **Where should coordination state live?**
    - a knowledge cloud — `outline`, hosted or self-hosted, or `notion` — the shared
-     record, awareness and board across machines. **Neither decides leases**; nothing
-     in either can (trap 1);
+     record, awareness and board across machines — **neither decides leases** (trap 1);
    - or local files (`fs`) — no credentials, and no visibility to an agent on another
-     machine: no shared awareness, no cross-repo signals, no shared board.
+     machine — no shared awareness, cross-repo signal or board.
 
    The lease is decided separately by `leaseBackend` (trap 2), and **`gated` follows that
-   choice, never the record plane**. Report the guarantee you actually have, not the
-   stronger one the record plane suggests.
+   choice, never the record plane** — report the guarantee you actually have.
 2. **If cloud: where.** Outline needs its instance URL; Notion needs the id of the page
    the container goes under. Both are configuration, not secrets, so you may write them.
    The **token is not** — you never ask for it in chat, never read it back, and never

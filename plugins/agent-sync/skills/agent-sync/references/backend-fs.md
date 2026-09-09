@@ -34,6 +34,11 @@ from `leaseBackend` (`local` = `O_EXCL`, `git` = a pushed ref). What this backen
 1. says so at session start, in one plain sentence;
 2. keeps the lease exactly as configured — `leaseBackend` is independent of this choice;
 3. marks every run `ungated` on the board, because nobody else can read the state.
+   In the five-field contract (`adapter-contract.md` → *The status capability
+   contract*, the one source this file describes the mode from) that is
+   `awareness_scope: isolated`, `enforcement_mode: advisory` — and if the local
+   state cannot even be read, `backend_health: failed`, reported as `unknown`,
+   never as active green.
 
 ## The lease is not this backend's job
 
