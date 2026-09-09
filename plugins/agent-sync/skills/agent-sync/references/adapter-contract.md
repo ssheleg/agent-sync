@@ -14,6 +14,16 @@ candidate backend can be trusted with leases.
 A backend is an adapter that implements six primitives and declares three
 capabilities. Nothing else about it is the coordinator's business.
 
+## Contents
+
+- [Primitives](#primitives)
+- [Capabilities](#capabilities)
+- [The status capability contract — one source, five fields](#the-status-capability-contract--one-source-five-fields)
+- [Degradation — non-negotiable](#degradation--non-negotiable)
+- [Errors and retries](#errors-and-retries)
+- [Credentials](#credentials)
+- [Adding a backend — checklist](#adding-a-backend--checklist)
+
 ## Primitives
 
 | Primitive | Signature | Semantics |

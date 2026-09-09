@@ -272,21 +272,14 @@ the generated-object contract: `references/two-sources.md`.
 ## Two documentation sources, and the duty to reconcile them
 
 Git docs answer **how it should be**; the as-built record answers **how it actually is**.
-Neither outranks the other, and **the gap between them is the finding**, not a defect.
+Neither outranks the other, and **the gap between them is the finding**, not a defect. The
+duty runs at both ends of a task: `reconcile` before starting, `record` and `reconcile`
+after finishing — and `reconcile` is mechanical, so treating its green as agreement is how
+a divergence survives both ends.
 
-The duty runs at both ends of a task: `reconcile` and resolve every divergence before
-starting, then `record` and `reconcile` again after finishing. Building on an unresolved
-divergence is writing code against a system that does not exist.
-
-**The trap: `reconcile` is mechanical and refuses to judge** whether the built thing matches
-the document — it compares ids, commits, presence and claim tags. That reading is yours, and
-treating its green as agreement is how a divergence survives both ends.
-
-Every project also carries a **generated snapshot** of its own wiring (`setup`) — commit it
-and link it from the agent instructions, so agents read the pipeline instead of inferring it.
-
-**Read `references/two-sources.md`** before the first reconcile, and whenever deciding which
-side a document belongs on.
+**Read `references/two-sources.md`** before the first reconcile: it holds the full duty,
+what `reconcile` refuses to judge, the generated `setup` snapshot, where a document
+belongs, and why nothing is deleted.
 
 ## Binding to task-pipeline
 
