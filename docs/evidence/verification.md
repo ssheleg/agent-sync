@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.20.0 — the two-sources duty stops carrying its own elaboration
+
+**Release candidate v1.20.0.** This section was written before the tag.
+
+| REQ | What ships | How it was confirmed | Confirmed |
+|---|---|---|---|
+| SH-regressions | Every sherlock external-v3 finding assigned here closes with an executable regression | `test/audit_regressions/` holds 13 suites and `npm test` runs all of them; two were reconciled after being watched failing — fix-sy-03.01, whose torn lock is protected by SY-05's creation grace until the fixture ages it past `CREATE_GRACE_SECONDS`, and fix-sy-06.02, whose needle never matched the budget-trimmed body | **observed** — both were latent reds that `npm test` alone did not surface, because it does not run the audit regressions; CI does |
+| SH-split | The body is back inside the house working limit by a SPLIT, not a trim | the audit's own doctrine grew it to 4765 measured tokens. The `Two documentation sources` section keeps the two questions, the gap-IS-the-finding rule, the duty at both ends and the mechanical-`reconcile` trap; the elaboration goes to `references/two-sources.md`, which already held all of it. `audit_skill.py --house` → body 4693, and the only remaining hit is `scripts/__pycache__`, untracked | **planted** — the auditor refused the pre-split tree with `GAP BODY_HEADROOM … 4765` |
+| SH-toc | `references/adapter-contract.md` carries a `## Contents` over its seven sections | it passed 100 lines during the audit; `audit_skill.py --house` reported `REF_NO_TOC … 111 lines` before and does not after | **planted** |
+| SH-measure | The house audit MEASURES the token budget in CI rather than estimating it | the pinned auditor ran with no tokenizer and issued a token verdict from chars/3.9, gapping seven family skills that are all inside the limit when measured. Pin → make-skill@5ca5c36, and the job installs tiktoken | **observed** — the estimate and the measurement disagreed on this repository, in CI |
+| Gate | The whole suite, on this tree | `npm test` → validator `PASS: agent-sync v1.20.0 — all checks green`, then the claim-cell, SessionStart-identity and installer suites, and the validator's own self-test detecting every planted defect | 2026-09-10 |
+
 ## v1.19.3 — the boundary ships with the skill
 
 **Release candidate v1.19.3.** This section was written before the tag.
