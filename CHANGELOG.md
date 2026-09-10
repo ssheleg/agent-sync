@@ -1,3 +1,16 @@
+## v1.20.0 — the two-sources duty stops carrying its own elaboration
+
+Sherlock external-v3 (14 findings) plus the House audit gap they introduced.
+
+- The audit's doctrine grew SKILL.md past the house working limit, and the rule
+  for that is a SPLIT, not a trim. The `Two documentation sources` section keeps
+  what a reader needs before opening anything — the two questions, the gap IS the
+  finding, the duty at both ends, and that `reconcile` is mechanical so its green
+  is not agreement — and hands the rest to `references/two-sources.md`, which
+  already held every one of those points in full.
+- `references/adapter-contract.md` passed 100 lines and gained a `## Contents`.
+- CI now MEASURES the token budget with a real tokenizer instead of estimating it.
+
 ## v1.19.3 — the boundary ships with the skill, and two descriptions stop looking like drift
 
 Close-out of the 2026-09-06 family audit (wave AUDIT-WAVE-0906). One bullet
