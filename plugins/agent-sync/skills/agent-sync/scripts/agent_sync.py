@@ -219,6 +219,16 @@ class Fail(Exception):
     """A failure the caller must see. Never swallowed into a success."""
 
 
+class NotCoordinated(Fail):
+    """This repository has no coordination configured — an ANSWER, not a failure.
+
+    Every command that needs the config still refuses, because it cannot do its work.
+    The guard is the exception: with no coordination there is nothing for it to protect,
+    so it must allow rather than deny every path in the repository. A config that EXISTS
+    and cannot be read is an ordinary Fail and still denies.
+    """
+
+
 _GLOB_CACHE: dict[str, re.Pattern[str]] = {}
 
 
@@ -381,7 +391,7 @@ def load_env_file(root: Path) -> None:
 def load_config(root: Path) -> dict[str, Any]:
     path = root / CONFIG_PATH
     if not path.exists():
-        raise Fail(
+        raise NotCoordinated(
             "no .claude/agent-sync.json in this project.\n"
             "Run `init` first — it asks which backend to use and writes the config.\n"
             "  agent_sync.py init --backend outline --url <instance-url>\n"
@@ -4397,6 +4407,11 @@ def cmd_guard(args: argparse.Namespace) -> int:
     so internal failures must also exit 2 rather than fail open."""
     try:
         allowed, reason = Sync().guard(args.path)
+    except NotCoordinated:
+        # Nothing to protect here. Denying instead made every path in an uncoordinated
+        # repository uncommittable, with a message about a lease no lease could satisfy.
+        print("agent-sync: coordination is not configured in this repository; nothing to guard")
+        return 0
     except Fail as exc:
         print(f"agent-sync guard: {exc}", file=sys.stderr)
         return 2
