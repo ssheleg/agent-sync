@@ -403,7 +403,7 @@ never grants one that would otherwise be denied.
 | Hook | Runs | Effect |
 |---|---|---|
 | `SessionStart` | startup, resume | `status` — the board summary, other runs, one next action |
-| `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and `git commit` | Denies the edit (exit 2) when the path is guarded and this run holds no lease; a `git commit` is checked against every staged path |
+| `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and every `Bash` call — of which only a parsed `git commit` is acted on | Denies the edit (exit 2) when the path is guarded and this run holds no lease; a `git commit` is checked against every staged path |
 | `PostToolUse` | every tool call | Throttled `renew` — touches the network at most once per `renewIntervalSeconds` |
 | `SessionEnd` | session end | Releases every lease this run holds |
 

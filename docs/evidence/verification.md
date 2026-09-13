@@ -8,6 +8,16 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.20.1 — the filter that was never read
+
+**Release candidate v1.20.1.** This section was written before the tag.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| Gate | The whole suite on this tree | `npm test` → `PASS: agent-sync v1.20.1 — all checks green`, `SELF-TEST PASS`, claim cell, SessionStart identity, installer | 2026-09-13 |
+| REQ-29 | `hooks.json` carries only keys Claude Code evaluates (group `{matcher, hooks}`, handler set per 2.1.270 schema) | `check_hooks_manifest` + self-test `hooks.json key at the wrong level` — the plant is the exact file that shipped 0.1.0→1.20.0 | 2026-09-13 |
+| REQ-30 | `git commit` narrowing is the parser's, never a hooks.json `if` | `test/audit_regressions/fix-sy-07.01.py` `t_hooks_json_declares_the_boundary`: no `if` at either level, `Bash` matched, description names git commit | 2026-09-13 |
+
 ## v1.20.0 — the two-sources duty stops carrying its own elaboration
 
 **Release candidate v1.20.0.** This section was written before the tag.

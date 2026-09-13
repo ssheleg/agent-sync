@@ -62,9 +62,17 @@ def t_hooks_json_declares_the_boundary():
         "hooks.json does not name an unsupported vector and the enforceable path"
     # the matchers actually present still cover the declared surfaces
     pre = h["hooks"]["PreToolUse"]
-    matchers = " ".join(x.get("matcher", "") + x.get("if", "") for x in pre)
-    for m in ("Edit", "Write", "MultiEdit", "NotebookEdit", "git commit"):
+    matchers = " ".join(x.get("matcher", "") for x in pre)
+    for m in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"):
         assert m in matchers, f"the declared covered surface {m!r} lost its matcher"
+    # `git commit` is narrowed by guard.sh's parser, never by a hooks.json `if`: a group-level
+    # `if` is a key Claude Code ignores (v1.20.1), and a handler-level one would skip the
+    # `git -C`/env/compound forms the parser covers.
+    for x in pre:
+        assert "if" not in x, "a group-level `if` is back — Claude Code ignores it and warns"
+        for hk in x.get("hooks", []):
+            assert "if" not in hk, "a handler-level `if` narrows past the parser — see guard.sh"
+    assert "git commit" in desc, "hooks.json no longer says the Bash guard acts on git commit"
 
 
 # ---------------- the commit parser, extracted and run as behaviour
