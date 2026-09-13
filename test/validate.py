@@ -383,8 +383,24 @@ def check_hooks_manifest() -> None:
     for event in ("SessionStart", "PreToolUse", "PostToolUse", "SessionEnd"):
         if event not in hooks:
             err(f"hooks.json: no {event} entry")
+    # Claude Code's hooks schema, read out of the 2.1.270 binary: a matcher GROUP is
+    # `{matcher, hooks}` and nothing else; a command HANDLER is the set below. Anything
+    # outside is silently ignored — and from 2.1.270 announced at every session start as
+    # `hooks.json: unknown key "…" ignored`. The `if` this file carried at group level for
+    # its whole life was that case: declared, never evaluated (v1.20.1).
+    GROUP_KEYS = {"matcher", "hooks"}
+    HANDLER_KEYS = {"type", "command", "args", "if", "shell", "timeout", "statusMessage",
+                    "once", "async", "asyncRewake"}
     for event, entries in hooks.items():
-        for entry in entries:
+        for i, entry in enumerate(entries):
+            extra = sorted(set(entry) - GROUP_KEYS)
+            if extra:
+                err(f"hooks.json/{event}[{i}]: key(s) Claude Code does not know at group level: "
+                    f"{extra} — a matcher group is only matcher+hooks; a filter belongs on the handler")
+            for j, h in enumerate(entry.get("hooks", [])):
+                extra = sorted(set(h) - HANDLER_KEYS)
+                if extra:
+                    err(f"hooks.json/{event}[{i}].hooks[{j}]: key(s) Claude Code does not know: {extra}")
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
                 m = re.search(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\"']+)", cmd)
@@ -3148,6 +3164,11 @@ def self_test() -> int:
         "bytecode in the tarball": ("package.json",
                                     lambda t: t.replace('    "!plugins/**/__pycache__",\n', "")
                                                .replace('    "!plugins/**/*.pyc",\n', "")),
+        # The exact state that shipped from 0.1.0 to 1.20.0: a filter beside `matcher`, where
+        # Claude Code never read it. Passed every gate for six weeks; 2.1.270 started warning.
+        "hooks.json key at the wrong level": ("plugins/agent-sync/hooks/hooks.json",
+                                              lambda t: t.replace('"matcher": "Bash",',
+                                                                  '"matcher": "Bash", "if": "Bash(git commit *)",', 1)),
         "description over cap": ("plugins/agent-sync/skills/agent-sync/SKILL.md",
                                  lambda t: t.replace("description: \"Use when",
                                                      "description: \"" + "x" * 1100 + " Use when")),

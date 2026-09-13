@@ -32,8 +32,10 @@ S="$AGENT_SYNC_PY"
 agent_sync_configured || exit 0
 input=$(cat)
 
-# The parser IS the guard: hooks.json's `if` filter is best-effort and fails open by
-# doctrine, so nothing upstream compensates for a parser that cannot run. A python3
+# The parser IS the guard: hooks.json carries no `if` filter (the one it declared until
+# v1.20.1 sat at the group level, where Claude Code never evaluated it, and a handler-level
+# one would skip `git -C`/env/compound commits), so nothing upstream compensates for a
+# parser that cannot run. A python3
 # missing from PATH used to leave `path` empty, default `is_commit` to 0 and exit 0 —
 # the one machine state that disables the parser silently disabled the guard (ASY-07).
 parser_or_die() {

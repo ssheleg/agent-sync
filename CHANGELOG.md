@@ -1,3 +1,28 @@
+## v1.20.1 — the filter that was never read, and the check that would have said so
+
+Claude Code 2.1.270 prints `agent-sync: hooks.json: unknown key "if" in
+hooks.PreToolUse[1] ignored` at every session start. The key was there since 0.1.0.
+
+- **`"if": "Bash(git commit *)"` sat beside `matcher`, and a matcher group is only
+  `matcher` + `hooks`** — read out of the 2.1.270 binary's schema, where `if` exists on a
+  command HANDLER only. So the filter was declared and never evaluated: `guard.sh` has run on
+  every Bash call in a coordinated project for its whole life, narrowing to a commit with its
+  own parser. Nothing in behaviour changes with the key gone; the warning does.
+- **Removed rather than moved.** A handler-level `if` would be real, and a real
+  `Bash(git commit *)` skips `git -C <dir> commit`, `env X=1 git commit` and
+  `cd d && git commit` — the three forms the parser covers and the 2026-08-07 measurement was
+  about. hooks.json's description, `guard.sh`'s header, `references/hooks.md`, the README hook
+  table and the live AS-09 row now say the same thing. `CHANGELOG` v1.18.6 and the 2026-07-29
+  spec keep their wording: dated records.
+- **`check_hooks_manifest` now refuses any key Claude Code does not know** — at group level
+  `{matcher, hooks}`, on a handler `{type, command, args, if, shell, timeout, statusMessage,
+  once, async, asyncRewake}` — with a self-test plant that puts the old `if` back and watches
+  the check fire. `claude plugin validate --strict` passes the defective file, so a repo gate
+  is the only place this fails before a session start.
+- `test/audit_regressions/fix-sy-07.01.py` derived "git commit is covered" from the group's
+  `if` — a declaration that never filtered. It now asserts the matchers, the description and
+  the absence of `if` at both levels.
+
 ## v1.20.0 — the two-sources duty stops carrying its own elaboration
 
 Sherlock external-v3 (14 findings) plus the House audit gap they introduced.

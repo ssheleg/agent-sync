@@ -57,7 +57,7 @@ The hook receives JSON on stdin with `session_id`, `prompt_id`, `transcript_path
     "PreToolUse": [
       { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh" }] },
-      { "matcher": "Bash", "if": "Bash(git commit *)",
+      { "matcher": "Bash",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh" }] }
     ],
     "PostToolUse": [
@@ -70,6 +70,15 @@ The hook receives JSON on stdin with `session_id`, `prompt_id`, `transcript_path
   }
 }
 ```
+
+The `Bash` group has no `if` filter, and that is deliberate. Until v1.20.1 it declared
+`"if": "Bash(git commit *)"` beside `matcher` — a key Claude Code does not know at
+the group level, so it was never evaluated (and 2.1.270 started saying so at every
+session start). Moving it into the handler would make it real, and a real one skips
+`git -C <dir> commit`, `env X=1 git commit` and `cd d && git commit` — the forms the
+parser in `guard.sh` was written to cover. So `guard.sh` runs on every Bash call in a
+coordinated project, exits 0 in a few milliseconds when the command is not a commit,
+and the parser is the whole narrowing.
 
 | Hook | Job |
 |---|---|
