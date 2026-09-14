@@ -1,3 +1,32 @@
+## v1.20.2 — the override that could not reach the plane the state was on
+
+**161 expired lease refs on one remote, from two runs that ended five days earlier, and
+no command in this tool could clear any of them.** Measured on the operator's machine
+2026-09-14: `residue` listed every one, `reap` left them alone (correctly — a ref in a
+dead run's name is `foreign`), and `reap --i-own-this`, the one path a person has for
+exactly this, answered *there is no lock by that name in this checkout*. True, and
+useless: in git mode the authority is `refs/agent-sync/leases/*` on the REMOTE, and the
+override walked the local lock directory only.
+
+This is AS-01b returning on the other plane. That row closed *"expired locks accumulate
+with no path out for anybody"* for the filesystem; the same sentence was true of the git
+plane the whole time, and the tool that reports it could not act on it.
+
+- `_reap_by_operator_decision` now reads **both planes** and collects entries per key as a
+  LIST — a key can be a lock file here AND a ref there, and clearing one while calling the
+  key done is how the ref survived every sweep that ran. A git entry is deleted through
+  `git_reap`'s existing `--force-with-lease` compare-and-swap and proved gone by a second
+  `ls-remote`, never by the push's exit code.
+- **Every refusal the override had, it keeps**, now per plane: a LIVE lease is refused and
+  named, a key nobody holds is reported rather than guessed at, the destroyed payload is
+  printed with its plane so the decision stays auditable, and the journal line carries it.
+- **A remote that cannot be read says so** instead of answering "no such lock" — that
+  answer reads as *there is nothing to clear* over state that may well be there.
+
+Three cases in `test/claim_cell_test.py` (27 total): the override clears a dead run's ref
+and proves it gone, a live ref is still refused, and an unreachable remote does not read
+as a missing key.
+
 ## v1.20.1 — the filter that was never read, and the check that would have said so
 
 Claude Code 2.1.270 prints `agent-sync: hooks.json: unknown key "if" in
