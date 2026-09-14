@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.20.1"
+VERSION = "1.20.2"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -4327,6 +4327,18 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
     * **it prints the payload it destroyed** — run, timestamp, machine — so the decision is
       auditable afterwards by somebody who was not there, and journals it where a record
       plane is configured.
+
+    **Both planes, because AS-01b came back on the other one.** Until v1.20.2 this walked
+    the lock DIRECTORY only. In git mode the authority is `refs/agent-sync/leases/*` on the
+    remote, a ref outlives the checkout that wrote it, and `reap` clears a git ref only when
+    the classifier calls it `reapable` — this run's own. So an expired ref in a DEAD run's
+    name had no path out from anywhere: `residue` listed it, `reap` left it alone, and
+    `--i-own-this` answered *there is no lock by that name in this checkout*, which is true
+    and useless. Measured on this machine 2026-09-14: **161 refs from two runs that ended on
+    2026-09-09 and 2026-09-10**, every one expired more than four days against a 2700-second
+    TTL, with no command able to reach them. That is the identical shape AS-01b closed for
+    the local plane — "expired locks accumulate with no path out for anybody" — and the
+    remedy is the identical one, applied where the state actually lives.
     """
     if not keys:
         print("reap --i-own-this needs the keys, one or more, by name.\n"
@@ -4336,48 +4348,94 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
               file=sys.stderr)
         return 2
 
-    by_key = {}
+    # A key can exist on BOTH planes — a lock file here and a ref on the remote — and the
+    # two are separate pieces of state with separate deletes. Collected as a LIST per key
+    # rather than a dict, because clearing one and calling the key done is how the git ref
+    # survived every sweep that ever ran.
+    by_key: dict[str, list[dict[str, Any]]] = {}
+
+    def offer(entry: dict[str, Any]) -> None:
+        by_key.setdefault(entry["key"], []).append(entry)
+        stem = s._local_lock(entry["key"]).stem
+        if stem != entry["key"]:
+            by_key.setdefault(stem, []).append(entry)
+
     for e in s.residue():
-        by_key.setdefault(e["key"], e)
-        by_key.setdefault(s._local_lock(e["key"]).stem, e)
+        e.setdefault("plane", "fs")
+        offer(e)
+    git_unreadable = None
+    if s.lease_mode == "git":
+        refs, git_unreadable = s.git_residue()
+        for e in refs:
+            offer(e)
+        if git_unreadable is not None:
+            print(f"  ⚠ the git plane could not be read ({git_unreadable}) — anything on it "
+                  "is neither cleared nor\n    reported clean. Enumerate by hand: git "
+                  f"ls-remote {s.cfg.get('leaseRemote') or 'origin'} "
+                  "'refs/agent-sync/leases/*'", file=sys.stderr)
 
     rc = 0
     for k in keys:
-        e = by_key.get(k) or by_key.get(s._local_lock(k).stem)
-        if e is None:
-            print(f"  · {k} — there is no lock by that name in this checkout", file=sys.stderr)
+        entries = by_key.get(k) or by_key.get(s._local_lock(k).stem) or []
+        # Deduplicate: the stem alias can offer the same object twice.
+        seen_ids, unique = set(), []
+        for e in entries:
+            if id(e) in seen_ids:
+                continue
+            seen_ids.add(id(e))
+            unique.append(e)
+        if not unique:
+            where = "this checkout" if s.lease_mode != "git" else (
+                "this checkout or on the remote" if git_unreadable is None
+                else "this checkout (the remote could not be read)")
+            print(f"  · {k} — there is no lock by that name in {where}", file=sys.stderr)
             rc = 1
             continue
-        if e["state"] == LIVE:
-            print(f"  ✗ {e['key']} is LIVE under {e.get('run') or 'a run'}"
-                  f"{' on ' + e['host'] if e.get('host') else ''} — not cleared. An override "
-                  "is for residue;\n    a live lease belongs to a run that may still be "
-                  "working. Ask the holder, or wait for the TTL.", file=sys.stderr)
-            rc = 1
-            continue
-        had = (f"run {e.get('run') or 'unknown'}"
-               f"{' · host ' + e['host'] if e.get('host') else ''}"
-               f"{' · ' + e['ts'] if e.get('ts') else ''}"
-               f" · {spent(e)}")
-        try:
-            e["path"].unlink()
-        except OSError as exc:
-            print(f"  ✗ {e['key']} could not be removed ({exc})", file=sys.stderr)
-            rc = 1
-            continue
-        # Proved gone by looking again, the same rule the ordinary reap follows.
-        if any(x["key"] == e["key"] for x in s.residue()):
-            print(f"  ✗ {e['key']} is STILL PRESENT after the delete — the teardown was not "
-                  "verified, whatever the call returned", file=sys.stderr)
-            rc = 1
-            continue
-        print(f"  cleared {e['key']} by operator decision — it held {had}")
-        print(f"    the classifier called it `{e['state']}`, and that has not changed: this "
-              "was a person's\n    call, not a proof of ownership.")
-        try:
-            s.journal(f"reap --i-own-this {e['key']} — was {had}, classified {e['state']}")
-        except Exception:                                # noqa: BLE001 - the record plane is optional
-            pass
+        for e in unique:
+            plane = e.get("plane", "fs")
+            if e["state"] == LIVE:
+                print(f"  ✗ {e['key']} [{plane}] is LIVE under {e.get('run') or 'a run'}"
+                      f"{' on ' + e['host'] if e.get('host') else ''} — not cleared. An override "
+                      "is for residue;\n    a live lease belongs to a run that may still be "
+                      "working. Ask the holder, or wait for the TTL.", file=sys.stderr)
+                rc = 1
+                continue
+            had = (f"run {e.get('run') or 'unknown'}"
+                   f"{' · host ' + e['host'] if e.get('host') else ''}"
+                   f"{' · ' + e['ts'] if e.get('ts') else ''}"
+                   f" · {spent(e)}")
+            if plane == "git":
+                # The same compare-and-swap the ordinary reap uses, and the same proof:
+                # a second read of the remote, never the push's exit code.
+                done = s.git_reap([e])[0]
+                if not done.get("gone"):
+                    print(f"  ✗ {e['key']} is STILL on the remote after the delete "
+                          f"({done.get('why_gone') or 'no reason given'}) — either somebody "
+                          "won it between the read\n    and the delete, or the remote "
+                          "refused. Nothing was reported as cleared.", file=sys.stderr)
+                    rc = 1
+                    continue
+            else:
+                try:
+                    e["path"].unlink()
+                except OSError as exc:
+                    print(f"  ✗ {e['key']} could not be removed ({exc})", file=sys.stderr)
+                    rc = 1
+                    continue
+                # Proved gone by looking again, the same rule the ordinary reap follows.
+                if any(x["key"] == e["key"] for x in s.residue()):
+                    print(f"  ✗ {e['key']} is STILL PRESENT after the delete — the teardown was not "
+                          "verified, whatever the call returned", file=sys.stderr)
+                    rc = 1
+                    continue
+            print(f"  cleared {e['key']} [{plane}] by operator decision — it held {had}")
+            print(f"    the classifier called it `{e['state']}`, and that has not changed: this "
+                  "was a person's\n    call, not a proof of ownership.")
+            try:
+                s.journal(f"reap --i-own-this {e['key']} [{plane}] — was {had}, "
+                          f"classified {e['state']}")
+            except Exception:                            # noqa: BLE001 - the record plane is optional
+                pass
     return rc
 
 

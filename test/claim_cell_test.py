@@ -504,6 +504,56 @@ def two_machines_are_separated_in_local_mode():
     assert "boxB" in there["why"], f"does not name the machine: {there['why']}"
 
 
+def the_override_reaches_the_git_plane():
+    """AS-01b came back on the other plane, and this is the case that says so.
+
+    A ref in a DEAD run's name is `foreign`, so `reap` leaves it alone — correctly. Until
+    v1.20.2 `--i-own-this` walked the lock DIRECTORY only, answered *there is no lock by
+    that name in this checkout*, and there was no command anywhere that could clear it.
+    Measured on the operator's machine 2026-09-14: 161 refs from two runs that ended five
+    days earlier, unreachable by every verb the tool has.
+    """
+    d, _bare = git_project(["| B-01 | a thing | open |\n"], run="r-dead", keys=("B-31",))
+    before = remote_lease_refs(d)
+    assert any(r.endswith("/B-31") for r in before), f"fixture did not push the ref: {before}"
+    r = cli(d, "reap", "--i-own-this", "B-31")
+    out = r.stdout + r.stderr
+    assert "there is no lock by that name" not in out, \
+        f"the override still reads only the local plane: {out}"
+    assert "cleared B-31 [git]" in out, f"the git ref was not cleared by name: {out}"
+    after = remote_lease_refs(d)
+    assert not any(x.endswith("/B-31") for x in after), \
+        f"the ref is still on the remote after the override said it cleared it: {after}"
+    assert "r-dead" in out, "the payload it destroyed is not printed — the decision is unauditable"
+
+
+def the_override_still_refuses_a_live_git_lease():
+    """The floor the override must not lower: residue is what a person may clear by hand;
+    a live lease belongs to a run that may still be working."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # The fixture back-dates by ttl+600 so its default state is EXPIRED; a live lease
+    # needs the stamp said out loud, or the case tests the wrong thing.
+    d, _bare = git_project(["| B-01 | a thing | open |\n"], run="r-busy", ttl=9000,
+                           ts=now, keys=("B-32",))
+    r = cli(d, "reap", "--i-own-this", "B-32")
+    out = r.stdout + r.stderr
+    assert "is LIVE" in out, f"a live git lease was not refused: {out}"
+    assert any(x.endswith("/B-32") for x in remote_lease_refs(d)), \
+        "a live lease was taken by hand — the collision this tool exists to prevent"
+
+
+def an_unreachable_remote_does_not_read_as_a_missing_key():
+    """A remote nobody could read must not make the override answer `no such lock` — that
+    reads as *there is nothing to clear* over state that may well be there."""
+    d, bare = git_project(["| B-01 | a thing | open |\n"], keys=("B-33",))
+    subprocess.run(["rm", "-rf", bare], check=True)
+    r = cli(d, "reap", "--i-own-this", "B-33")
+    out = r.stdout + r.stderr
+    assert "could not be read" in out, f"an unreachable remote said nothing: {out}"
+    assert "the remote could not be read" in out or "could not be read" in out
+
+
 CASES = [
     ("a cited id is still taggable (B-42)", a_cited_id_is_still_taggable),
     ("releasing keeps a close written while held (B-35)", releasing_keeps_a_close_written_while_held),
@@ -536,6 +586,11 @@ CASES = [
      residue_says_it_could_not_look_when_the_remote_is_gone),
     ("a local lock records its host (AS-03)", a_local_lock_records_the_machine_that_wrote_it),
     ("two machines are separated in local mode (AS-03)", two_machines_are_separated_in_local_mode),
+    ("the override reaches the git plane (AS-01b, second plane)",
+     the_override_reaches_the_git_plane),
+    ("the override still refuses a live git lease", the_override_still_refuses_a_live_git_lease),
+    ("an unreachable remote does not read as a missing key",
+     an_unreachable_remote_does_not_read_as_a_missing_key),
 ]
 for n, f in CASES:
     case(n, f)

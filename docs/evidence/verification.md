@@ -8,6 +8,16 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.20.2 — the override reaches the plane the state is on
+
+**Release candidate v1.20.2.** This section was written before the tag.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| REQ-31 | `reap --i-own-this` can clear an expired lease ref in a dead run's name | `test/claim_cell_test.py` `the_override_reaches_the_git_plane`: a ref pushed by `r-dead` is cleared by name, the remote is re-read to prove it went, and the payload is printed | 2026-09-14 |
+| REQ-32 | The override's floors survive on the git plane | same suite: a LIVE ref is refused and left on the remote; an unreachable remote reports *could not be read* rather than *no such lock* | 2026-09-14 |
+| Gate | The whole suite on this tree | `npm test` → `PASS: agent-sync v1.20.2 — all checks green`, `SELF-TEST PASS`, claim cell 27 cases, SessionStart identity, installer | 2026-09-14 |
+
 ## v1.20.1 — the filter that was never read
 
 **Release candidate v1.20.1.** This section was written before the tag.
