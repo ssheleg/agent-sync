@@ -373,6 +373,9 @@ def check_scripts_run() -> None:
             err(f"bin/agent-sync.js: syntax error: {r.stderr.strip()}")
 
 
+SESSION_END_TIMEOUT_CAP = 3
+
+
 def check_hooks_manifest() -> None:
     p = ROOT / "plugins" / "agent-sync" / "hooks" / "hooks.json"
     if not p.exists():
@@ -391,6 +394,17 @@ def check_hooks_manifest() -> None:
     GROUP_KEYS = {"matcher", "hooks"}
     HANDLER_KEYS = {"type", "command", "args", "if", "shell", "timeout", "statusMessage",
                     "once", "async", "asyncRewake"}
+    # Codex 0.157 clamps a SessionEnd handler's timeout to 3 s and prints
+    # `clamping SessionEnd hook timeout to 3s in …/hooks.json` at every session start;
+    # Claude Code sizes its SessionEnd wait from the largest handler timeout. 20 s shipped
+    # from 0.1.0 to 1.20.2 — a number no host honoured, and a warning on every Codex start.
+    for i, entry in enumerate(hooks.get("SessionEnd", [])):
+        for j, h in enumerate(entry.get("hooks", [])):
+            t = h.get("timeout")
+            if not isinstance(t, (int, float)) or t > SESSION_END_TIMEOUT_CAP:
+                err(f"hooks.json/SessionEnd[{i}].hooks[{j}]: timeout {t!r} — declare at most "
+                    f"{SESSION_END_TIMEOUT_CAP} s; Codex clamps anything larger and warns at "
+                    "every session start")
     for event, entries in hooks.items():
         for i, entry in enumerate(entries):
             extra = sorted(set(entry) - GROUP_KEYS)
@@ -3169,6 +3183,9 @@ def self_test() -> int:
         "hooks.json key at the wrong level": ("plugins/agent-sync/hooks/hooks.json",
                                               lambda t: t.replace('"matcher": "Bash",',
                                                                   '"matcher": "Bash", "if": "Bash(git commit *)",', 1)),
+        # The exact value that shipped 0.1.0 → 1.20.2, which Codex clamps with a warning.
+        "SessionEnd timeout a host clamps": ("plugins/agent-sync/hooks/hooks.json",
+                                             lambda t: t.replace('"timeout": 3\n', '"timeout": 20\n', 1)),
         "description over cap": ("plugins/agent-sync/skills/agent-sync/SKILL.md",
                                  lambda t: t.replace("description: \"Use when",
                                                      "description: \"" + "x" * 1100 + " Use when")),

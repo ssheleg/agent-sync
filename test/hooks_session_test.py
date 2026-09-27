@@ -225,7 +225,157 @@ def the_stamp_makes_this_run_identity_strong():
         shutil.rmtree(root, ignore_errors=True)
 
 
-print("agent-sync — SessionStart identity")
+# --- SessionEnd: one budget both hosts honour ---------------------------------------------
+#
+# Codex 0.157 clamps a SessionEnd handler's timeout to 3 s and says so at every session start
+# (`clamping SessionEnd hook timeout to 3s in …/hooks.json`); Claude Code sizes its own
+# SessionEnd wait from the largest handler timeout. The hook declared 20 s and spent it as
+# `whoami` plus one `release` process per key, each with its own 10 s limit — so under the
+# real 3 s the kill landed mid-loop and the tail of the held keys stayed out until their TTL.
+
+END_HOOK = os.path.join(PLUGIN, "hooks", "session-end.sh")
+SESSION_END_BUDGET = 3
+
+
+def _as(root, rid, *args):
+    env = dict(os.environ, AGENT_SYNC_RUN_ID=rid, CLAUDE_PROJECT_DIR=root)
+    return subprocess.run([sys.executable, SCRIPT, *args], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def _run_end_hook(root, rid):
+    env = dict(os.environ, AGENT_SYNC_RUN_ID=rid, CLAUDE_PLUGIN_ROOT=PLUGIN,
+               CLAUDE_PROJECT_DIR=root)
+    import time
+    t0 = time.monotonic()
+    proc = subprocess.run(["bash", END_HOOK], cwd=root, env=env,
+                          input=json.dumps({"hook_event_name": "SessionEnd", "reason": "exit"}),
+                          capture_output=True, text=True, timeout=60)
+    return proc, time.monotonic() - t0
+
+
+def the_session_end_timeout_fits_every_host():
+    with open(os.path.join(PLUGIN, "hooks", "hooks.json")) as fh:
+        entries = json.load(fh)["hooks"]["SessionEnd"]
+    for e in entries:
+        for h in e["hooks"]:
+            t = h.get("timeout")
+            assert t is not None and t <= SESSION_END_BUDGET, (
+                "SessionEnd timeout %r — Codex clamps it to %d s and warns at every session "
+                "start; declare what the hosts will actually give" % (t, SESSION_END_BUDGET))
+
+
+def the_session_end_hook_releases_every_held_lease_within_budget():
+    root = _repo()
+    try:
+        for k in ("T-1", "T-2", "T-3"):
+            r = _as(root, "r-ending", "acquire", k)
+            assert r.returncode == 0, r.stdout + r.stderr
+        assert "T-1, T-2, T-3" in _as(root, "r-ending", "whoami").stdout
+        proc, took = _run_end_hook(root, "r-ending")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert took < SESSION_END_BUDGET, (
+            "the hook took %.2f s against a %d s budget — the host kills it mid-release"
+            % (took, SESSION_END_BUDGET))
+        left = _as(root, "r-ending", "whoami").stdout
+        assert "holds: nothing" in left, "after SessionEnd the run still %s" % left.strip()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def the_session_end_hook_leaves_another_runs_lease_alone():
+    root = _repo()
+    try:
+        assert _as(root, "r-other", "acquire", "T-9").returncode == 0
+        assert _as(root, "r-ending", "acquire", "T-1").returncode == 0
+        proc, _ = _run_end_hook(root, "r-ending")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "T-9" in _as(root, "r-other", "whoami").stdout, (
+            "SessionEnd of one run released another run's lease")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def release_held_is_a_no_op_for_a_run_holding_nothing():
+    root = _repo()
+    try:
+        r = _as(root, "r-idle", "release", "--held")
+        assert r.returncode == 0, "exit %d: %s" % (r.returncode, r.stdout + r.stderr)
+        assert "nothing" in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def release_refuses_both_a_key_and_held():
+    root = _repo()
+    try:
+        r = _as(root, "r-x", "release", "T-1", "--held")
+        assert r.returncode != 0, "release accepted a key AND --held: %s" % r.stdout
+        r = _as(root, "r-x", "release")
+        assert r.returncode != 0, "release with neither a key nor --held exited 0"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# --- run_limited: the watchdog must not hold the caller's pipe --------------------------
+#
+# Stock macOS has neither `timeout` nor `gtimeout`, so `run_limited` falls back to a bash
+# watchdog. That watchdog was `( sleep N; kill ) &` with the caller's stdout inherited, and
+# `kill "$watchdog"` ended the subshell but not its `sleep` — the orphan kept the pipe open,
+# so every `$(run_limited 10 …)` waited the full 10 s after the command had finished, and
+# SessionStart's stdout stayed open 10 s on every macOS session. Measured 2026-09-27:
+# session-end.sh took 10.45 s to release three leases that took well under one.
+
+LIB = os.path.join(PLUGIN, "hooks", "_lib.sh")
+
+
+def _fallback_path():
+    """A PATH carrying what the helper needs and neither timeout binary — the stock-macOS
+    shape, reproduced on a Linux runner where coreutils would otherwise hide the fallback."""
+    d = tempfile.mkdtemp(prefix="agent-sync-nopath-")
+    for tool in ("bash", "sleep", "echo", "true", "kill", "cat"):
+        src = shutil.which(tool)
+        if src:
+            os.symlink(src, os.path.join(d, tool))
+    return d
+
+
+def _lib_run(snippet):
+    """Run `snippet` with the helper sourced, stdout and stderr both pipes — the shape a hook
+    host gives. The defect is a race (whether the kill lands before the watchdog has forked its
+    `sleep`), so callers repeat the shape rather than trusting one draw."""
+    import time
+    d = _fallback_path()
+    try:
+        t0 = time.monotonic()
+        proc = subprocess.run([shutil.which("bash"), "-c", ". \"%s\"\n%s" % (LIB, snippet)],
+                              env={"PATH": d, "HOME": os.environ.get("HOME", "/")},
+                              capture_output=True, text=True, timeout=120)
+        return proc, time.monotonic() - t0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def the_fallback_watchdog_releases_a_captured_pipe_at_once():
+    proc, took = _lib_run('command -v timeout gtimeout && exit 9\n'
+                          'for i in {1..20}; do\n'
+                          '  x=$(run_limited 3 echo hi); echo "sub:$x"\n'
+                          '  run_limited 3 echo hi | cat >/dev/null; echo "pipe:$?"\n'
+                          'done')
+    assert proc.returncode == 0, "exit %d — the PATH still offers a timeout binary, or the "\
+        "helper failed: %s" % (proc.returncode, proc.stdout + proc.stderr)
+    assert proc.stdout.count("sub:hi") == 20, proc.stdout
+    assert took < 3, ("forty captured run_limited calls of `echo` took %.2f s — the watchdog's "
+                      "sleep is holding the caller's pipe open until its limit" % took)
+
+
+def the_fallback_watchdog_still_kills_an_overrun():
+    proc, took = _lib_run('run_limited 1 sleep 20; echo "rc:$?"')
+    assert took < 5, "an overrunning command outlived its 1 s limit: %.2f s" % took
+    assert "rc:0" not in proc.stdout, "a killed command reported success: %r" % proc.stdout
+
+
+print("agent-sync — session hooks: SessionStart identity, SessionEnd budget")
 for name, fn in [
     ("the hook stamps the session from its stdin payload",
      the_hook_stamps_the_session_from_its_stdin_payload),
@@ -236,10 +386,21 @@ for name, fn in [
     ("a cleared session is stamped as a new identity",
      a_cleared_session_is_stamped_as_a_new_identity),
     ("the stamp makes this run's identity strong", the_stamp_makes_this_run_identity_strong),
+    ("the SessionEnd timeout fits every host", the_session_end_timeout_fits_every_host),
+    ("the SessionEnd hook releases every held lease within budget",
+     the_session_end_hook_releases_every_held_lease_within_budget),
+    ("the SessionEnd hook leaves another run's lease alone",
+     the_session_end_hook_leaves_another_runs_lease_alone),
+    ("release --held is a no-op for a run holding nothing",
+     release_held_is_a_no_op_for_a_run_holding_nothing),
+    ("release refuses both a key and --held", release_refuses_both_a_key_and_held),
+    ("the fallback watchdog releases a captured pipe at once",
+     the_fallback_watchdog_releases_a_captured_pipe_at_once),
+    ("the fallback watchdog still kills an overrun", the_fallback_watchdog_still_kills_an_overrun),
 ]:
     case(name, fn)
 
 if failures:
     print("\nFAIL: %d of %d — %s" % (len(failures), cases, ", ".join(failures)))
     sys.exit(1)
-print("\nPASS: SessionStart identity — %d cases" % cases)
+print("\nPASS: session hooks — %d cases" % cases)

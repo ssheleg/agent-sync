@@ -24,9 +24,25 @@ run_limited() {
     return $?
   fi
 
+  # The watchdog POLLS in 0.1 s steps with its stdio on /dev/null, and nothing here
+  # depends on a signal reaching it in time. It used to be `( sleep N; kill ) &` with
+  # the caller's stdout inherited: `kill "$watchdog"` ended the subshell and not its
+  # `sleep`, and the orphan held the pipe, so `$(run_limited 10 …)` or `… | sed` waited
+  # the full limit after the command had finished. A trap-based stop still lost the
+  # race now and then (the TERM landing inside the fork), so the stop is now "the
+  # command is gone", seen within one step. session-end.sh spent 10.4 s releasing
+  # three leases the old way, against a SessionEnd budget of 3 s.
   "$@" &
   local pid=$!
-  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) &
+  (
+    n=$((secs * 10))
+    while [ "$n" -gt 0 ]; do
+      kill -0 "$pid" 2>/dev/null || exit 0
+      sleep 0.1
+      n=$((n - 1))
+    done
+    kill -TERM "$pid" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
   local watchdog=$!
   wait "$pid" 2>/dev/null
   local rc=$?

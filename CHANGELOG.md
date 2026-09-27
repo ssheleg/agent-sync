@@ -1,3 +1,30 @@
+## v1.21.0 — the SessionEnd budget no host gave, and the watchdog that held the pipe
+
+Codex 0.157 prints `clamping SessionEnd hook timeout to 3s in …/agent-sync/…/hooks.json`
+at every session start. The hook declared 20 s; Codex clamps a SessionEnd handler to 3 s,
+and Claude Code sizes its own SessionEnd wait from the largest handler timeout. So the
+number was never honoured, and the loop behind it did not fit the budget it really had.
+
+- **`hooks.json` declares `timeout: 3`** for SessionEnd, and `check_hooks_manifest` refuses
+  anything larger, with a self-test plant of the exact 20 that shipped 0.1.0 → 1.20.2.
+- **`release --held`** gives back everything this run holds in ONE process. `session-end.sh`
+  used to run `whoami` plus one `release` per key, each with its own 10 s limit, so the host
+  killed it part-way and the tail of the list stayed out until its TTL. It now runs
+  `release --held` under a 2 s limit. The re-read of `held()` after each release is kept,
+  because a run's last task key takes its resource claims with it.
+- **`run_limited`'s fallback watchdog held the caller's pipe.** Stock macOS has neither
+  `timeout` nor `gtimeout`; the bash fallback was `( sleep N; kill ) &` with the caller's
+  stdout inherited, and `kill "$watchdog"` ended the subshell but not its `sleep`. The orphan
+  kept the pipe open, so `$(run_limited 10 …)` and `… | sed` waited the full limit after the
+  command had finished. That covered session-end, and SessionStart's `status` output too.
+  Measured 2026-09-27: session-end took 10.4 s to release three leases. It is a race, so a
+  trap-based stop still lost it now and then. The watchdog now polls `kill -0` in 0.1 s steps
+  with its stdio on `/dev/null`.
+
+Seven cases in `test/hooks_session_test.py` (13 total). The watchdog cases force the
+fallback with a PATH that carries no timeout binary, so a Linux runner exercises it too.
+They repeat the shape forty times, because a single draw of a race proves nothing.
+
 ## v1.20.2 — the override that could not reach the plane the state was on
 
 **161 expired lease refs on one remote, from two runs that ended five days earlier, and

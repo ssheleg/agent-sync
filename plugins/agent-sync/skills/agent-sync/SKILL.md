@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.20.2"
+  version: "1.21.0"
   author: ssheleg
 ---
 
@@ -163,6 +163,7 @@ npx sshlg-skills install
 | `acquire <KEY>` | Take the lease on a task id. Prints `won` or `lost <holder>` |
 | `renew <KEY>` | Extend the lease. The `PostToolUse` hook does this for you |
 | `release <KEY>` | Give the lease back. Always do this, including on failure |
+| `release --held` | Give back everything this run holds, in one process — what SessionEnd runs |
 | `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …); prints it. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
 | `map-offline <REG> <ID> <N>` | Bind an offline id to a properly reserved number — append-only, never rebound |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |

@@ -8,6 +8,17 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.0 — SessionEnd fits the budget both hosts give
+
+**Release candidate v1.21.0.** This section was written before the tag.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| REQ-33 | Every SessionEnd handler declares `timeout` ≤ 3 s (Codex clamps above it, with a warning) | `check_hooks_manifest` + self-test `SessionEnd timeout a host clamps`; `test/hooks_session_test.py` `the_session_end_timeout_fits_every_host` | 2026-09-27 |
+| REQ-34 | `session-end.sh` releases every held lease within 3 s, and never another run's | `test/hooks_session_test.py`: three leases released and timed as a real process; a foreign lease survives; `release --held` is a no-op when nothing is held, and refuses a key plus `--held` | 2026-09-27 |
+| REQ-35 | `run_limited`'s fallback never holds the caller's pipe past the command | `test/hooks_session_test.py` `the_fallback_watchdog_releases_a_captured_pipe_at_once` (forty calls, no timeout binary on PATH, < 3 s; the old helper failed at 3–18 s) and `…still_kills_an_overrun` | 2026-09-27 |
+| Gate | The whole suite on this tree | `npm test` → `PASS: agent-sync v1.21.0 — all checks green`, `SELF-TEST PASS` (62 fixtures), claim cell, session hooks 13, installer | 2026-09-27 |
+
 ## v1.20.2 — the override reaches the plane the state is on
 
 **Release candidate v1.20.2.** This section was written before the tag.

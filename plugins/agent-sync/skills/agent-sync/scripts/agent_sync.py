@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.20.2"
+VERSION = "1.21.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -4128,12 +4128,45 @@ def cmd_renew(args: argparse.Namespace) -> int:
 
 
 def cmd_release(args: argparse.Namespace) -> int:
+    if getattr(args, "held", False):
+        if args.key:
+            raise Fail("release takes a key OR --held, not both")
+        return _release_held()
+    if not args.key:
+        raise Fail("release needs a key, or --held for everything this run holds")
     # Exit non-zero when nothing was released. A caller that scripts `release` in a
     # cleanup path has no other way to learn the lease is still out there.
     if not Sync().release(args.key):
         print(f"NOT released: {args.key} is held by another run", file=sys.stderr)
         return 1
     print(f"released {args.key}")
+    return 0
+
+
+def _release_held() -> int:
+    """Everything this run holds, in ONE process — the SessionEnd path.
+
+    The hook used to spend `whoami` plus one `release` process per key, each paying the
+    interpreter start and the config read again; under the 3 s both hosts give a SessionEnd
+    handler, the tail of the list stayed out until its TTL. `held()` is re-read after every
+    release because releasing a run's last task key releases its resource claims with it.
+    """
+    s = Sync()
+    released, refused = [], []
+    for _ in range(len(s.held()) + 1):
+        pending = [k for k in s.held() if k not in refused]
+        if not pending:
+            break
+        key = pending[0]
+        (released if s.release(key) else refused).append(key)
+    if not released and not refused:
+        print("released nothing — this run holds nothing")
+        return 0
+    if released:
+        print(f"released {', '.join(released)}")
+    if refused:
+        print(f"NOT released: {', '.join(refused)}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -5493,10 +5526,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also render the configured git documents into the plane")
     bd.set_defaults(fn=cmd_board)
 
-    for name, fn, arg in (("acquire", cmd_acquire, "key"), ("release", cmd_release, "key")):
-        q = sub.add_parser(name)
-        q.add_argument(arg)
-        q.set_defaults(fn=fn)
+    q = sub.add_parser("acquire")
+    q.add_argument("key")
+    q.set_defaults(fn=cmd_acquire)
+    q = sub.add_parser("release", help="release a lease, or --held for all this run holds")
+    q.add_argument("key", nargs="?")
+    q.add_argument("--held", action="store_true",
+                   help="release every lease this run holds, in one process (SessionEnd)")
+    q.set_defaults(fn=cmd_release)
 
     r = sub.add_parser("renew")
     r.add_argument("key", nargs="?")
