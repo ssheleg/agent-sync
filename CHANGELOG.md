@@ -1,3 +1,32 @@
+## v1.21.1 — the check that asked the wrong plane who hands out ids
+
+`check` refused every `idRegisters` entry on `backend: "fs"` + `leaseBackend: "git"`,
+while `reserve DEC` in that same repository allocated race-free. Found 2026-10-01 while
+installing agent-sync across an organisation's repositories: each one with a local record
+plane had to drop its DEC/OQ registers and take numbers by hand — the collision this tool
+exists to prevent, recommended by the tool's own health check.
+
+The two commands asked different questions. `reserve` allocates when the record plane
+orders writes OR the lease is git — in git mode the allocator is a compare-and-swap on
+`refs/agent-sync/ids/<REG>` at the remote, independent of the record plane, exactly like
+the lease. `check` asked only the record plane.
+
+- **One predicate, `id_allocator(cfg, adapter)`**, now answers for `reserve`,
+  `release_id`, `check` and the generated snapshot, which also names the allocator under
+  *Id registers*. `check` accepts registers under `leaseBackend: "git"` whatever the
+  record plane, and still refuses the two configurations that genuinely cannot allocate:
+  a non-ordering plane (`fs`, or a cloud plane degraded to `fs`) with `leaseBackend:
+  "local"`, and `leaseBackend: "git"` pointed at a remote that does not exist.
+- **A missing lease remote is refused by name** in `acquire` and `reserve`. It used to
+  surface as "held by another run" and "another allocator is racing" — a holder and a
+  contention that did not exist.
+- `check_check_and_reserve_agree_on_who_allocates_ids` drives all three configurations
+  through both commands against a real bare remote; two self-test plants put back the
+  record-plane-only condition and the phantom-contention path, and each is caught.
+- Docs: `lease-protocol.md` → *Id reservation* carries the configuration table;
+  `backend-fs.md`, the schema description, the README and SKILL.md say that registers
+  follow the lease, not the record plane.
+
 ## v1.21.0 — the SessionEnd budget no host gave, and the watchdog that held the pipe
 
 Codex 0.157 prints `clamping SessionEnd hook timeout to 3s in …/agent-sync/…/hooks.json`

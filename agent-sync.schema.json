@@ -37,7 +37,7 @@
     },
     "idRegisters": {
       "type": "object",
-      "description": "Registers whose next free id must be reserved before it is written to git.",
+      "description": "Registers whose next free id must be reserved before it is written to git. Needs an allocator: leaseBackend 'git' (ids from refs/agent-sync/ids/* at the remote, whatever the backend) or a backend that orders writes (outline, notion). `check` refuses registers that neither serves.",
       "additionalProperties": {
         "type": "object",
         "required": [

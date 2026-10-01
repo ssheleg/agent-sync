@@ -335,7 +335,7 @@ through and `release` restores exactly what was there, so one fact keeps one hom
 | `leaseTtlSeconds` | how long a lease survives without a renew (default 2700) |
 | `renewIntervalSeconds` | how often a live run renews (default 300) |
 | `gated` | whether runs may be recorded as enforced at all |
-| `idRegisters` | register → the git file that owns it, and its "next free id" pattern |
+| `idRegisters` | register → the git file that owns it, and its "next free id" pattern. Needs an allocator: `leaseBackend: "git"` (any `backend`, `fs` included) or a cloud backend |
 | `guardedFiles` | registry files no run may edit without a live lease |
 | `claimTags` | file → the durable claim tag `acquire`/`release` writes through |
 | `gates` | commands the pipeline stages run as gates |

@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.21.0"
+  version: "1.21.1"
   author: ssheleg
 ---
 
@@ -106,7 +106,8 @@ the storage question once, and writes it down.
      machine — no shared awareness, cross-repo signal or board.
 
    The lease is decided separately by `leaseBackend` (trap 2), and **`gated` follows that
-   choice, never the record plane** — report the guarantee you actually have.
+   choice, never the record plane** — report the guarantee you actually have. Ids too:
+   under `leaseBackend: "git"` registers reserve from git refs even on `fs`.
 2. **If cloud: where.** Outline needs its instance URL; Notion needs the id of the page
    the container goes under. Both are configuration, not secrets, so you may write them.
    The **token is not** — you never ask for it in chat, never read it back, and never
