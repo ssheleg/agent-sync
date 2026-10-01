@@ -1,3 +1,74 @@
+## v1.21.3 — the key that came back under a different name
+
+Under `leaseBackend: "git"` a lease key containing a dot was reported and released under a
+name nothing had been taken under (ssheleg/agent-sync#25). Reproduced against 1.21.2 with a
+local bare remote:
+
+```
+acquire T-1.2            # won T-1.2
+whoami                   # holds: T-1-2
+release --held           # released T-1-2      (exit 0)
+git ls-remote origin 'refs/agent-sync/leases/*'
+                         # .../refs/agent-sync/leases/T-1.2   <- still there
+```
+
+**Root cause: the key was stored under two different lossy slugs, and the local one was
+reported.** `_ref` kept dots (`re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")`),
+`_local_lock` did not (`re.sub(r"[^A-Za-z0-9_-]", "-", key)`), and `held()` returned the
+lock file's stem. `release --held` then released `T-1-2`: `_git_release` found no ref of
+that name, returned without a word, and `release` printed "released". The same slugs
+broke more than dots: every path key (`docs/x.md` → note `docs-x-md`, ref `docs-x.md`) was
+stranded the same way; `a/b` and `a-b` were one ref; a key with a leading dot
+(`.claude-plugin/marketplace.json`) produced an invalid ref, and the rejected push was
+reported as "held by another run".
+
+- **One key, one name.** `lease_name` percent-escapes every byte outside
+  `[A-Za-z0-9._-]`, and a `.` wherever git forbids one in a ref component; `lease_key`
+  reverses it. The ref and the note carry that same name, and both payloads carry the key
+  verbatim, which is what `held()`, `whoami`, `residue` and the board now report. A key
+  made only of safe characters is its own name, so every ref 1.21.2 pushed for one is
+  already under the right name.
+- **A key that cannot travel unchanged is refused at `acquire`**, before anything is
+  written: empty, whitespace or a control character, a backtick, `|`, or a stored name over
+  200 bytes. Two spellings that land on one note file (`T-1`/`t-1` on a case-insensitive
+  disk) are refused instead of the second overwriting the first.
+- **`released` is said only after the remote is read again.** `release` asks the remote
+  first, deletes with `--force-with-lease`, re-reads the ref with a strict `ls-remote`, and
+  only then clears the board claim and the note. A refused delete or an unreachable remote
+  is `NOT released`, exit 1, with the claim and the note kept — they are the only trace of
+  a lease that is still out there. `release --held` and `merge` report the same way; `merge`
+  printed `✓ released` unconditionally.
+- **What 1.21.2 left behind stays exclusive and releasable.** A 1.21.2 ref with a slugged
+  name is still that key's lease (`acquire docs/x.md` loses to its holder; `release
+  docs/x.md` deletes it); a 1.21.2 note is re-noted under the key its ref was taken as by
+  `whoami`, `status`, `release` and `release --held`; the slug 1.21.2 printed (`release
+  T-1-2`) resolves to this run's ref — only refs 1.21.2 wrote, so a lease taken under 1.21.3
+  is released by its own key only; and in local mode a 1.21.2 lock held by another run
+  still blocks the dotted key. The PreToolUse guard does none of this: it stays local.
+- **Checked for the same defect:** `reserve` built `refs/agent-sync/ids/<REG>` from the same
+  slug, so `A B` and `A-B` shared one counter; a register name the ref cannot carry verbatim
+  is now refused (every name the slug left unchanged keeps its ref). `release-id` writes a
+  log receipt keyed by the exact register name and touches no ref — unaffected. Resource
+  claims (`res--<repo>--<path>`) are built from `[A-Za-z0-9_-]` only and round-trip
+  unchanged; kept byte-identical so two versions cannot claim one register under two names.
+  `residue`/`reap` now report a git-plane ref by its key and delete the ref that exists;
+  `reap --i-own-this` still accepts the slugs 1.21.2 printed.
+- **Left open, stated:** a run still on 1.21.2 and one on 1.21.3 taking the same PATH key at
+  the same moment, with no ref yet under either name, push two different refs. Task ids made
+  of safe characters never had two names. Update every machine.
+- Eight new `check_*` in `test/validate.py`, all against a real bare origin and confirmed by
+  `git ls-remote`: the issue's round trip, a ten-key bijection in both modes, refusals,
+  legacy release (`--held`, by key, by the printed slug), legacy exclusion on both planes,
+  the false "released" (a pre-receive hook refusing deletes, and a vanished remote), case
+  variants, and register names. Run against the 1.21.2 script, seven of the eight fail
+  with 37 problems (case variants only on a case-insensitive disk, the macOS default); the
+  legacy-exclusion guard passes there and must keep passing. Eight self-test plants put back the
+  slugged ref, the slugged stem, `held()` reporting the stem, the unverified delete, the
+  missing migration, the unread legacy ref, the accepted unrepresentable key and the slugged
+  register; all eight are caught.
+- Docs: `references/lease-protocol.md` (one key, one name; what 1.21.2 left behind; the
+  release proof; register names), README command table and troubleshooting, SKILL.md.
+
 ## v1.21.2 — the guard that asked the session instead of the repository it guarded
 
 The `PreToolUse` guard decided whether coordination was on from

@@ -3265,6 +3265,350 @@ def check_baseline_is_not_poisoned_by_the_next_free_line() -> None:
                 f"{out.stdout.strip()[:160]!r})")
 
 
+# --------------------------------------------------------------- ssheleg/agent-sync#25
+#
+# A lease key and the names it is stored under — `refs/agent-sync/leases/<name>` on the
+# remote, `.agent-sync/leases/<name>.lock` here — must be ONE string read two ways. Until
+# 1.21.3 they were two different lossy slugs: the ref kept dots, the lock stem turned them
+# into dashes, and `held()` reported the stem. So `acquire T-1.2` was reported as `T-1-2`,
+# `release --held` released `T-1-2`, printed "released", and left the ref on the remote.
+
+LEASE_PREFIX = "refs/agent-sync/leases/"
+
+
+def _origin_project(project: str, mode: str = "git") -> Path | None:
+    """A project with a REAL bare `origin`, configured for `mode`. Returns the bare path."""
+    _git_project(project)
+    bare = Path(project) / ".remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=project,
+                   capture_output=True)
+    if _run_script(project, "init", "--backend", "fs").returncode != 0:
+        return None
+    _write_cfg(project, leaseBackend=mode)
+    return bare
+
+
+def _remote_lease_refs(project: str) -> list[str] | None:
+    """The authority, read the way an operator would: `git ls-remote`. None = unreadable."""
+    r = subprocess.run(["git", "ls-remote", "origin", LEASE_PREFIX + "*"], cwd=project,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return [l.split()[1] for l in r.stdout.strip().splitlines() if l.strip()]
+
+
+def _holds(project: str, run_id: str = "validator") -> list[str]:
+    line = next((l for l in _run_script(project, "whoami", run_id=run_id).stdout.splitlines()
+                 if l.startswith("holds:")), "holds: nothing")
+    rest = line[len("holds:"):].strip()
+    return [] if rest == "nothing" else [k.strip() for k in rest.split(", ")]
+
+
+def _push_legacy_ref(project: str, name: str, payload: dict) -> None:
+    """A lease ref exactly as agent-sync <= 1.21.2 pushed one: no `key` in the payload."""
+    tree = subprocess.run(["git", "hash-object", "-t", "tree", os.devnull], cwd=project,
+                          capture_output=True, text=True).stdout.strip()
+    commit = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                             "commit-tree", tree], cwd=project, input=json.dumps(payload),
+                            capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "push", "-q", "origin", f"{commit}:{LEASE_PREFIX}{name}"],
+                   cwd=project, capture_output=True)
+
+
+def check_a_dotted_key_round_trips_through_the_git_plane() -> None:
+    """#25 verbatim: acquire a dotted key, see THAT key, release it, and the ref is gone.
+
+    Driven against a real bare origin and confirmed with `git ls-remote`, because the
+    defect was exactly a release whose own report and the remote disagreed.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — dotted-key round trip skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        if _origin_project(project) is None:
+            err("#25 dotted key: init failed")
+            return
+        won = _run_script(project, "acquire", "T-1.2")
+        if won.returncode != 0 or "won T-1.2" not in won.stdout:
+            err(f"#25 dotted key: acquire T-1.2 did not win ({won.stdout.strip()[:160]!r})")
+            return
+        if (_remote_lease_refs(project) or []) != [LEASE_PREFIX + "T-1.2"]:
+            err(f"#25 dotted key: the remote does not carry exactly the ref for T-1.2: "
+                f"{_remote_lease_refs(project)}")
+        held = _holds(project)
+        if held != ["T-1.2"]:
+            err(f"#25 dotted key: `whoami` reports {held} for a lease taken as T-1.2 — the "
+                "reported key and the ref name are different strings")
+        out = _run_script(project, "release", "--held")
+        if out.returncode != 0 or "released T-1.2" not in out.stdout:
+            err(f"#25 dotted key: `release --held` did not release T-1.2 by its own name "
+                f"(rc {out.returncode}, said {out.stdout.strip()[:160]!r})")
+        refs = _remote_lease_refs(project)
+        if refs:
+            err(f"#25 dotted key: `release --held` reported success and the ref is still on "
+                f"the remote: {refs}")
+        if _holds(project):
+            err(f"#25 dotted key: still holding after release: {_holds(project)}")
+
+
+def check_every_accepted_key_round_trips() -> None:
+    """The mapping key <-> ref name <-> lock name is a bijection for every key accepted.
+
+    Keys the old slugs collapsed: a path (`/` and `.`), a leading dot (an invalid ref
+    component — 1.21.2 could not even push it, and reported the push rejection as "held by
+    another run"), a `..`, a `.lock` suffix, and two keys that slugged to ONE name. Each is
+    held at once by one run, each must be reported by its own spelling, each must own its
+    own ref, and `release --held` must leave the remote empty — in git mode. In local mode
+    the same keys must stay distinct locks.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — key bijection check skipped")
+        return
+    keys = ["docs/adr/0001-x.md", ".claude-plugin/marketplace.json", "a..b", "x.lock",
+            "a/b", "a-b", "T-1.2", "T-1-2", "%41", "ünï-1"]
+    for mode in ("git", "local"):
+        with tempfile.TemporaryDirectory() as project:
+            if _origin_project(project, mode) is None:
+                err(f"key bijection [{mode}]: init failed")
+                continue
+            for k in keys:
+                r = _run_script(project, "acquire", "--", k)
+                if r.returncode != 0 or f"won {k}" not in r.stdout:
+                    err(f"key bijection [{mode}]: acquire {k!r} did not win "
+                        f"({(r.stdout + r.stderr).strip()[:200]!r})")
+            held = _holds(project)
+            if sorted(held) != sorted(keys):
+                err(f"key bijection [{mode}]: `whoami` reports {sorted(held)}, the run took "
+                    f"{sorted(keys)} — a key that comes back spelled differently is released "
+                    "under a name nothing was taken under")
+            if mode == "git":
+                refs = _remote_lease_refs(project) or []
+                if len(set(refs)) != len(keys):
+                    err(f"key bijection [git]: {len(keys)} distinct keys own {len(set(refs))} "
+                        f"distinct refs: {refs}")
+            out = _run_script(project, "release", "--held")
+            if out.returncode != 0:
+                err(f"key bijection [{mode}]: `release --held` failed: "
+                    f"{(out.stdout + out.stderr).strip()[:200]!r}")
+            if mode == "git" and _remote_lease_refs(project):
+                err(f"key bijection [git]: refs left on the remote after `release --held`: "
+                    f"{_remote_lease_refs(project)}")
+            if _holds(project):
+                err(f"key bijection [{mode}]: still holding after release: {_holds(project)}")
+
+
+def check_an_unrepresentable_key_is_refused() -> None:
+    """A key that cannot be one string everywhere is refused at acquire, never mangled.
+
+    Whitespace and control characters split the log line and the `whoami` list, a backtick
+    ends the log pair, `|` ends the board cell. Refused out loud, with nothing written.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — key refusal check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        if _origin_project(project) is None:
+            err("key refusal: init failed")
+            return
+        for bad in ("two words", "tick`key", "pipe|key", "new\nline", "", "x" * 300):
+            r = _run_script(project, "acquire", "--", bad)
+            if r.returncode == 0 or "won" in r.stdout:
+                err(f"key refusal: acquire {bad[:20]!r} was accepted — the key cannot be "
+                    "represented faithfully and must be refused")
+            elif "key" not in r.stderr.lower():
+                err(f"key refusal: the refusal of {bad[:20]!r} does not say what is wrong with "
+                    f"the key: {r.stderr.strip()[:160]!r}")
+        if _remote_lease_refs(project):
+            err(f"key refusal: a refused key left a ref: {_remote_lease_refs(project)}")
+        leases = Path(project) / ".agent-sync" / "leases"
+        if leases.exists() and list(leases.glob("*.lock")):
+            err(f"key refusal: a refused key left a lock: {list(leases.glob('*.lock'))}")
+
+
+def check_a_legacy_lease_is_still_releasable() -> None:
+    """Refs already on remotes were written by 1.21.2's encoding, and must still go.
+
+    Planted exactly as 1.21.2 left them — a ref with no `key` in its payload, and a local
+    note under the dash-slug — for both shapes that existed: a dotted task key (`T-1.2`,
+    noted as `T-1-2.lock`), and a path key whose ref itself was slugged (`docs/x.md`,
+    ref `docs-x.md`, note `docs-x-md.lock`). Each must be reported by its real key,
+    released by `--held`, by its real key and by the legacy alias 1.21.2 printed.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — legacy lease check skipped")
+        return
+    for how in ("--held", "by key", "by alias"):
+        with tempfile.TemporaryDirectory() as project:
+            if _origin_project(project) is None:
+                err(f"legacy lease [{how}]: init failed")
+                continue
+            rid = _rid_of(project, "validator")
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            leases = Path(project) / ".agent-sync" / "leases"
+            leases.mkdir(parents=True, exist_ok=True)
+            # (key the run took, ref name 1.21.2 pushed, note stem 1.21.2 wrote)
+            legacy = [("T-1.2", "T-1.2", "T-1-2"), ("docs/x.md", "docs-x.md", "docs-x-md")]
+            for _key, ref, stem in legacy:
+                payload = {"run": rid, "ts": now, "ttl": 2700, "repo": "r", "host": "h"}
+                _push_legacy_ref(project, ref, payload)
+                (leases / f"{stem}.lock").write_text(json.dumps(payload))
+            if len(_remote_lease_refs(project) or []) != 2:
+                err(f"legacy lease [{how}]: fixture did not push both refs")
+                continue
+            held = _holds(project)
+            if sorted(held) != ["T-1.2", "docs-x.md"] and sorted(held) != ["T-1.2", "docs/x.md"]:
+                err(f"legacy lease [{how}]: `whoami` reports {held} over two legacy leases — "
+                    "the dash-slug of the note is still what the run is told it holds")
+            if how == "--held":
+                out = _run_script(project, "release", "--held")
+                if out.returncode != 0:
+                    err(f"legacy lease [--held]: rc {out.returncode}: "
+                        f"{(out.stdout + out.stderr).strip()[:200]!r}")
+            else:
+                for key, ref, stem in legacy:
+                    name = key if how == "by key" else stem
+                    out = _run_script(project, "release", name)
+                    if out.returncode != 0:
+                        err(f"legacy lease [{how}]: release {name} failed: "
+                            f"{(out.stdout + out.stderr).strip()[:200]!r}")
+            refs = _remote_lease_refs(project)
+            if refs:
+                err(f"legacy lease [{how}]: refs written by 1.21.2 are still on the remote "
+                    f"after release: {refs}")
+            if _holds(project):
+                err(f"legacy lease [{how}]: still holding after release: {_holds(project)}")
+
+
+def check_a_legacy_lease_still_excludes() -> None:
+    """The other half of the migration: a lease another run took under 1.21.2's name must
+    still block the same key taken under 1.21.3's — on both planes. Otherwise the upgrade
+    hands one task to two runs."""
+    if not shutil.which("git"):
+        notes.append("git not found — legacy exclusion check skipped")
+        return
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload = {"run": "r-older-version", "ts": now, "ttl": 2700, "repo": "r", "host": "h"}
+    with tempfile.TemporaryDirectory() as project:
+        if _origin_project(project) is None:
+            err("legacy exclusion [git]: init failed")
+            return
+        _push_legacy_ref(project, "docs-x.md", payload)
+        r = _run_script(project, "acquire", "docs/x.md")
+        if r.returncode == 0:
+            err("legacy exclusion [git]: a key another run holds under its 1.21.2 ref name was "
+                "handed out again under the new name")
+        elif "r-older-version" not in r.stdout:
+            err(f"legacy exclusion [git]: the loser is not told who holds it: {r.stdout!r}")
+    with tempfile.TemporaryDirectory() as project:
+        if _origin_project(project, "local") is None:
+            err("legacy exclusion [local]: init failed")
+            return
+        _plant_lock(project, "T-1-2", **payload)
+        r = _run_script(project, "acquire", "T-1.2")
+        if r.returncode == 0:
+            err("legacy exclusion [local]: a key another run holds under its 1.21.2 lock name "
+                "was handed out again under the new name")
+
+
+def check_release_proves_the_ref_is_gone() -> None:
+    """"released" is a statement about the remote, so it is made only after reading it.
+
+    Two ways the delete does not happen while the command used to say it did: the remote
+    refuses it (a server-side policy, here a pre-receive hook), and the remote cannot be
+    reached at all. Both must exit non-zero, must not print "released", and must leave the
+    run still holding — the note is the only local trace of a lease that is still out there.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — release proof check skipped")
+        return
+    for how in ("refused", "unreachable"):
+        for argv in (["release", "PROOF-1"], ["release", "--held"]):
+            with tempfile.TemporaryDirectory() as project:
+                bare = _origin_project(project)
+                if bare is None:
+                    err(f"release proof [{how}]: init failed")
+                    continue
+                if _run_script(project, "acquire", "PROOF-1").returncode != 0:
+                    err(f"release proof [{how}]: acquire failed")
+                    continue
+                if how == "refused":
+                    hooks = bare / "hooks"
+                    hooks.mkdir(exist_ok=True)
+                    hook = hooks / "pre-receive"
+                    hook.write_text("#!/bin/sh\nwhile read old new ref; do\n"
+                                    "  case \"$new\" in 0000000000000000000000000000000000000000)\n"
+                                    "    echo 'deletes refused by policy' >&2; exit 1;;\n"
+                                    "  esac\ndone\nexit 0\n")
+                    hook.chmod(0o755)
+                    subprocess.run(["git", "-C", str(bare), "config", "core.hooksPath",
+                                    str(hooks)], capture_output=True)
+                else:
+                    bare.rename(Path(project) / ".remote-gone.git")
+                out = _run_script(project, *argv)
+                said = out.stdout + out.stderr
+                if out.returncode == 0:
+                    err(f"release proof [{how}, {' '.join(argv)}]: exit 0 while the ref was "
+                        "not removed from the remote")
+                if re.search(r"(?m)^released ", out.stdout):
+                    err(f"release proof [{how}, {' '.join(argv)}]: printed 'released' while "
+                        f"the ref stayed: {said.strip()[:200]!r}")
+                if how == "refused" and LEASE_PREFIX + "PROOF-1" not in \
+                        (_remote_lease_refs(project) or []):
+                    err(f"release proof [{how}]: fixture broken — the hook did not refuse")
+                if "PROOF-1" not in _holds(project):
+                    err(f"release proof [{how}, {' '.join(argv)}]: the local note was dropped "
+                        "for a lease that is still on the remote")
+
+
+def check_case_variants_never_strand_a_ref() -> None:
+    """`T-1` and `t-1` are two refs on a remote and ONE file on a case-insensitive disk
+    (the macOS default). Either both are held and both released, or the second is refused —
+    what must never happen is the second note overwriting the first, so that `release
+    --held` releases one and strands the other's ref on the remote."""
+    if not shutil.which("git"):
+        notes.append("git not found — case-variant check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        if _origin_project(project) is None:
+            err("case variants: init failed")
+            return
+        first = _run_script(project, "acquire", "CASE-1")
+        second = _run_script(project, "acquire", "case-1")
+        if first.returncode != 0:
+            err(f"case variants: acquire CASE-1 failed: {first.stdout + first.stderr!r}")
+            return
+        if second.returncode != 0 and "case-insensitive" not in second.stderr:
+            err(f"case variants: the second spelling failed without saying why: "
+                f"{second.stdout + second.stderr!r}")
+        _run_script(project, "release", "--held")
+        refs = _remote_lease_refs(project)
+        if refs:
+            err(f"case variants: `release --held` stranded a ref on the remote: {refs}")
+
+
+def check_a_register_name_must_name_its_ref() -> None:
+    """`reserve` under git: the id ref is `refs/agent-sync/ids/<REG>`. A register whose name
+    the ref cannot carry verbatim used to be slugged — so `A B` and `A-B` shared one
+    counter. It is refused out loud now; a valid name keeps the ref it always had."""
+    if not shutil.which("git"):
+        notes.append("git not found — register-name check skipped")
+        return
+    with tempfile.TemporaryDirectory() as project:
+        if _origin_project(project) is None:
+            err("register name: init failed")
+            return
+        (Path(project) / "DECISIONS.md").write_text("**Next free ID:** `A B-0001`\n")
+        _write_cfg(project, idRegisters={"A B": {
+            "file": "DECISIONS.md", "pattern": r"\*\*Next free ID:\*\* `A B-(\d{4})`"}})
+        r = _run_script(project, "reserve", "A B")
+        if r.returncode == 0:
+            err("register name: a register whose name no ref can carry verbatim was "
+                "allocated from a slugged counter")
+        elif "register" not in r.stderr.lower():
+            err(f"register name: the refusal does not name the register: {r.stderr!r}")
+
+
 def check_no_adapter_claims_a_lease_it_cannot_decide() -> None:
     """`exclusiveLease` is the one flag that can make the tool lie about safety.
 
@@ -3391,6 +3735,16 @@ def main() -> int:
     _guarded(check_bootstrap_follows_the_configured_backend)
     _guarded(check_check_accepts_every_shipped_backend)
     _guarded(check_baseline_is_not_poisoned_by_the_next_free_line)
+
+    # ssheleg/agent-sync#25 — one key, one name, on both planes
+    _guarded(check_a_dotted_key_round_trips_through_the_git_plane)
+    _guarded(check_every_accepted_key_round_trips)
+    _guarded(check_an_unrepresentable_key_is_refused)
+    _guarded(check_a_legacy_lease_is_still_releasable)
+    _guarded(check_a_legacy_lease_still_excludes)
+    _guarded(check_release_proves_the_ref_is_gone)
+    _guarded(check_case_variants_never_strand_a_ref)
+    _guarded(check_a_register_name_must_name_its_ref)
 
     for n in notes:
         print(f"note: {n}")
@@ -3815,13 +4169,15 @@ def self_test() -> int:
         # one field that separates two machines in that mode.
         "a local lock records no host": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            # Anchored on the LOCAL acquire's payload (it gained `key` in 1.21.3, #25, and
+            # the old anchor stopped matching — a plant that no-ops reports MISSED).
             lambda t: t.replace(
-                '        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,\n'
-                '                              "repo": repo_name(), "host": platform.node()})\n\n'
-                "        if lock.exists():",
-                '        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,\n'
-                '                              "repo": repo_name()})\n\n'
-                "        if lock.exists():")),
+                '        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),\n'
+                '                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node()})\n\n'
+                "        # A lease another run took under 1.21.2's lock name",
+                '        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),\n'
+                '                              "ttl": self.ttl, "repo": repo_name()})\n\n'
+                "        # A lease another run took under 1.21.2's lock name")),
         # The ledger back to naming a version that is not the one that shipped — the exact
         # state found at 1.14.0, where the newest section cited v1.13.0 under a v1.14.0 tag.
         # Planted in the NEWEST section, because that is the only place the check reads
@@ -3860,6 +4216,49 @@ def self_test() -> int:
                                 "            raise Fail(",
                                 "        if False:\n"
                                 "            raise Fail(", 1)),
+        # --- ssheleg/agent-sync#25: one key, one name. Each plant puts back one way the
+        # key and the names it is stored under stopped being the same string.
+        # The ref slugged again — 1.21.2's `_ref`, verbatim.
+        "a lease key is slugged into its ref again (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        return LEASE_REF_PREFIX + lease_name(key)\n",
+                                "        return LEASE_REF_PREFIX + legacy_ref_name(key)\n", 1)),
+        # The lock stem slugged again — 1.21.2's `_local_lock`, verbatim.
+        "a lease key is slugged into its lock stem again (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace('        return d / f"{lease_name(key)}.lock"\n',
+                                '        return d / f"{legacy_lock_stem(key)}.lock"\n', 1)),
+        # `held()` reports the filename instead of the key the note names.
+        "held() reports the lock stem again (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("                mine.add(self.lock_key(q, h))",
+                                "                mine.add(q.stem)", 1)),
+        # The false "released": the push's outcome trusted instead of a second read.
+        "release trusts the push instead of re-reading the remote (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        if after == sha:\n            lines = ",
+                                "        if False:\n            lines = ", 1)),
+        # 1.21.2's notes no longer resolved against the remote.
+        "1.21.2 notes are no longer migrated (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        if self.lease_mode != \"git\":\n            return []\n"
+                                "        d = self.root / STATE_DIR / \"leases\"\n        legacy = []\n",
+                                "        return []\n", 1)),
+        # 1.21.2's refs no longer read: the upgrade hands a held key out twice.
+        "a 1.21.2 ref no longer excludes (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        legacy = self._legacy_ref(key)\n        if legacy:\n",
+                                "        legacy = None\n        if legacy:\n", 1)),
+        # An unrepresentable key accepted and slugged.
+        "an unrepresentable key is accepted again (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        problem = lease_key_problem(key)\n        if problem:\n",
+                                "        problem = lease_key_problem(key)\n        if False:\n", 1)),
+        # A register name slugged onto a shared counter again.
+        "a register name is slugged into its id ref again (#25)": (
+            "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
+            lambda t: t.replace("        if not reg or lease_name(reg) != reg or legacy_ref_name(reg) != reg:\n",
+                                "        if not reg:\n", 1)),
         "stray SKILL.md": (None, None),
     }
     # Each case runs as its own PROCESS, and they run concurrently.

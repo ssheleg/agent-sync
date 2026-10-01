@@ -137,6 +137,57 @@ the second read is the state.
 identically to an operator and mean opposite things, so they are printed differently and
 `reap` exits non-zero on the first.
 
+### One key, one name (since 1.21.3, ssheleg/agent-sync#25)
+
+A lease key is stored under two names — the ref `refs/agent-sync/leases/<name>` and the
+local note `.agent-sync/leases/<name>.lock` — and **both are the same `<name>`**, computed
+by `lease_name` in `scripts/agent_sync.py`:
+
+- every byte outside `[A-Za-z0-9._-]` is percent-escaped (UTF-8, `%` itself included);
+- a `.` is escaped where git forbids it in a ref component — first, last, before another
+  `.` — and so is the one that opens a trailing `.lock`.
+
+`lease_key` reverses it, so the mapping is a bijection: `T-1.2` is stored as `T-1.2`,
+`docs/adr/0001-x.md` as `docs%2Fadr%2F0001-x.md`, `.claude-plugin/marketplace.json` as
+`%2Eclaude-plugin%2Fmarketplace.json`. Both the ref payload and the note also carry the
+key verbatim (`"key": …`), and `held()` / `whoami` / `residue` report THAT — never a
+filename.
+
+Until 1.21.2 the two names were two different lossy slugs: the ref kept dots, the note
+turned them into dashes, and `held()` reported the note's stem. `acquire T-1.2` was then
+reported as `T-1-2`, `release --held` (the SessionEnd path) released `T-1-2`, printed
+`released`, and the ref stayed on the remote until someone released it by its dotted name.
+A key with a leading dot could not be pushed at all and read as "held by another run".
+
+**A key that cannot travel unchanged is refused at `acquire`, before anything is
+written:** empty, whitespace or control characters (they split the `whoami` list and the
+log line), a backtick (it ends a log pair), `|` (it ends a board cell), or a stored name
+over 200 bytes (a lock filename limit). On a case-insensitive filesystem `T-1` and `t-1`
+are one note; the second is refused rather than allowed to overwrite the first.
+
+**What 1.21.2 left on remotes stays exclusive and releasable.** Its refs carry no `key`:
+
+| Left by 1.21.2 | 1.21.3 reads it as |
+|---|---|
+| a ref for a key made only of safe characters (`T-1.2`) | the same ref — the name never changed |
+| a slugged ref for a key that was not (`docs/x.md` → `docs-x.md`) | that key's lease while no ref exists under the new name: `acquire docs/x.md` loses to its holder, and `release docs/x.md` deletes it |
+| a note under the dash-slug (`T-1-2.lock`, no `key`) | re-noted under the key its ref was taken as by `whoami`, `status`, `release` and `release --held` (`migrate_legacy_notes`), never by the PreToolUse guard, which must not pay a round-trip per Edit |
+| the slug 1.21.2 *printed* (`release T-1-2`) | resolved to the ref this run holds whose slug it is — only refs 1.21.2 wrote, so a lease taken under 1.21.3 is released by its own key and nothing else |
+| a local-mode lock under the dash-slug, held by another run | blocks the dotted key, so an upgrade cannot hand one task to two runs |
+
+The one window left: a run still on 1.21.2 and a run on 1.21.3 taking the SAME path key
+(one with a character outside `[A-Za-z0-9._-]`) at the same moment, when neither ref
+exists yet, push to two different refs. Update every machine; task ids made of safe
+characters never had two names and are unaffected.
+
+**`release` says `released` only after reading the remote again.** It deletes the ref
+with `--force-with-lease`, then reads it back with a strict `ls-remote`: the ref still
+there (a server-side policy refused the delete, another run's lease) or a remote that
+cannot be read is `NOT released`, exit 1, and the board claim and the local note are left
+in place — they are the only trace of a lease that is still out there. The remote is
+asked **before** anything local is touched; `merge` and `release --held` report the same
+way.
+
 ## The lock is published FULL, never created empty (SY-05)
 
 A lock created empty by `O_EXCL` and filled by a later write has a window a
@@ -264,9 +315,10 @@ an operator from deciding. Three things keep it a decision instead of a sweep:
 
 * **named keys, and it refuses to run without them** — a blanket override is the sweep the
   classifier exists to refuse, wearing a flag. Use `--` before a key that starts with a
-  dash: the tool slugifies guarded-file paths into keys like
-  `-claude-plugin-marketplace-json`, and a key the tool writes must be a key the tool can
-  address;
+  dash: versions before 1.21.3 slugified guarded-file paths into keys like
+  `-claude-plugin-marketplace-json`, and a key the tool wrote must be a key the tool can
+  address. The slugs 1.21.2 printed for a key — its note stem and its ref name — still
+  find it;
 * **it refuses a LIVE lease** — residue is what it clears, and a live lease belongs to a run
   that may still be working;
 * **it prints the payload it destroyed** — run, timestamp, machine, how long expired — and
@@ -321,6 +373,10 @@ comes from depends on the mode:
   the push IS the allocation: the remote accepts exactly one successor per tip, so two
   concurrent reserves cannot take one number — the loser re-reads the moved tip and
   takes the next, bounded at `RESERVE_RETRIES` attempts before reporting contention.
+  The register's name is the ref's name verbatim: one that would have to be escaped or
+  slugged (`A B`, `-X`) is refused by `reserve`, because 1.21.2 slugged it and `A B` and
+  `A-B` then shared one counter. Every name that slug left unchanged keeps its ref.
+  `release-id` writes a log receipt keyed by the exact register name and touches no ref.
   This is the same push semantics the lease itself rides on, and it is why positional
   replay could never be safe across machines: a shard another machine has not pushed
   yet is invisible, and two machines replaying different logs were both "correct" about
