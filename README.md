@@ -396,14 +396,20 @@ the plugin and run by Claude Code on the events below, each with a timeout (15�
 hung script cannot stall a session. Read them before installing: they are short, and
 [`SECURITY.md`](SECURITY.md) lists every path the install touches and why.
 
-Every hook exits immediately in projects without `.claude/agent-sync.json`, so installing
-globally changes nothing elsewhere. The `PreToolUse` guard can **deny** a tool call and
-never grants one that would otherwise be denied.
+Installing globally changes nothing in repositories without `.claude/agent-sync.json`.
+The lifecycle hooks (`SessionStart`, `PostToolUse`, `SessionEnd`) act on the session's
+project and exit immediately when it has no config. The `PreToolUse` guard asks a
+different question — **the repository that owns the write decides**: for an edit, the
+git repository containing the file; for a commit, the one named by `-C` or `cd`. No
+config there → allowed; config there → checked from that repository's root, against its
+`guardedFiles` and its leases, whatever the session's own project is. A path inside no
+git repository is allowed. The guard can **deny** a tool call and never grants one that
+would otherwise be denied.
 
 | Hook | Runs | Effect |
 |---|---|---|
 | `SessionStart` | startup, resume | `status` — the board summary, other runs, one next action |
-| `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and every `Bash` call — of which only a parsed `git commit` is acted on | Denies the edit (exit 2) when the path is guarded and this run holds no lease; a `git commit` is checked against every staged path |
+| `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and every `Bash` call — of which only a parsed `git commit` is acted on | Denies the edit (exit 2) when the path is guarded **in the repository that owns it** and this run holds no lease there; a `git commit` is checked against every staged path of the repository it commits to |
 | `PostToolUse` | every tool call | Throttled `renew` — touches the network at most once per `renewIntervalSeconds` |
 | `SessionEnd` | session end | Releases every lease this run holds |
 
@@ -443,7 +449,7 @@ check fails when a document stops agreeing with it. Wiring:
 | `lease: local — advisory across machines` | Expected on the default. Set `leaseBackend: "git"` (and a reachable `leaseRemote`) when agents run on more than one machine |
 | Every `acquire` reports `lost` | Check the holder in `status`. The lease is decided by a lock file or a git ref, never by the log, so this is a real holder — not a parse failure |
 | A command stops with `the … log is N/M unparseable` | Past 2%, every command that *replays* a log refuses it rather than acting on a partial history. Fix or remove the malformed lines; `acquire` is unaffected, because a lease is not decided there |
-| Guarded edit blocked in Claude Code | Working as designed: `acquire` the key first, or unstage the file |
+| Guarded edit blocked in Claude Code | Working as designed: `acquire` the key first, or unstage the file. The lease must be taken in the repository that owns the file (`cd <that repo> && agent_sync.py acquire <KEY>`) — a lease in the session's own project does not cover another repository |
 | Guarded edit *not* blocked | You are not on Claude Code. Run `guard <path>` yourself; the run is `ungated` |
 | `AGENT_SYNC_OUTLINE_COLLECTION is not set` | Run `bootstrap` and paste the printed id into `.env.agent-sync` |
 | An HTTP `400`/`403` from the backend | The response body is surfaced verbatim — read it; a bad collection id and a bad token look nothing alike |

@@ -1,3 +1,51 @@
+## v1.21.2 — the guard that asked the session instead of the repository it guarded
+
+The `PreToolUse` guard decided whether coordination was on from
+`${CLAUDE_PROJECT_DIR:-$PWD}/.claude/agent-sync.json` — the SESSION's project
+(`hooks/_lib.sh` `agent_sync_configured`, called at the top of `guard.sh`) — and then
+ran the check somewhere else. Reproduced 2026-10-01 against 1.21.1, three ways:
+
+- **A commit into a repository with no config was blocked.** For `git -C <repo> commit`
+  or `cd <repo> && git commit` the guard ran `agent_sync.py guard` per staged path inside
+  `<repo>`, which exits 2 for *no .claude/agent-sync.json in this project*; the guard read
+  that as "no lease" and refused a commit in a repository where coordination is off.
+- **An edit in another repository was judged by the session's rules.** `agent_sync.py
+  guard <abs path>` ran from the session's cwd, so the path was made relative to the wrong
+  root (`../other/docs/ROADMAP.md`): the other repository's own `guardedFiles` never
+  applied, and a session glob such as `**/HANDOFF.md` matched files it was never written for.
+- **A session rooted in an unconfigured project guarded nothing**, so it could write a
+  guarded register in a configured repository with no lease at all.
+
+Now **the repository that owns the write decides**. `agent_sync_owner` (`hooks/_lib.sh`)
+resolves `git -C <dir> rev-parse --show-toplevel` — the file's nearest existing directory
+for `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, the repository named by `-C`/`cd` for a
+commit — and prints it only when that toplevel carries its own config. None → exit 0,
+silently; a path inside no git repository → exit 0; otherwise `agent_sync.py guard` runs
+from that toplevel, against its `guardedFiles` and its leases. The guard no longer exits
+early on the session's config.
+
+- **Failing closed is unchanged where it was promised.** A parser that cannot run (no
+  python3) — and now also a missing git — still exits 2 in a session whose project is
+  configured. In an unconfigured session the owning repository cannot be named without
+  them, so the guard exits 0 and says so in its capability matrix rather than refusing
+  every call on a machine that never opted in.
+- **The common Bash call stays cheap** now that the guard runs in every session: a payload
+  without the substring `commit` exits before the commit tokeniser starts an interpreter.
+- A commit refusal now names the repository to take the lease in and carries the
+  coordinator's own reason.
+- `check_guard_asks_the_repository_that_owns_the_file` drives fifteen cases through the
+  real hook (configured / unconfigured session × repository with / without a config, a
+  path in no repository, a subdirectory commit, a `Write` into a directory that does not
+  exist yet, and the same writes with the owning repository's lease). Seven failed on
+  1.21.1. Two self-test plants put back the session lookup and the early exit; both are
+  caught.
+- **Unchanged, checked:** `session-start.sh`, `renew.sh` and `session-end.sh` still act on
+  the session's project. They register, renew and release this session's run there, which
+  is the right scope for them; a lease taken in a second repository is still neither
+  renewed nor released by them (backlog AS-07, open).
+- Docs: `references/hooks.md` (which repository decides, debugging rows), README hook
+  table and troubleshooting, SKILL.md, SECURITY.md, the `hooks.json` description.
+
 ## v1.21.1 — the check that asked the wrong plane who hands out ids
 
 `check` refused every `idRegisters` entry on `backend: "fs"` + `leaseBackend: "git"`,

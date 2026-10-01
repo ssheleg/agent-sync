@@ -2240,6 +2240,119 @@ def check_guard_fails_closed_without_python3() -> None:
                 f"cannot fix what the message never names: {r.stderr[:200]!r}")
 
 
+def check_guard_asks_the_repository_that_owns_the_file() -> None:
+    """The repository a write lands in decides whether it is guarded — not the session's.
+
+    Until v1.21.2 `guard.sh` asked `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/agent-sync.json`,
+    which is the SESSION's project, and then acted somewhere else. Three ways that was wrong,
+    each reproduced 2026-10-01 against 1.21.1:
+
+    - a `git -C <repo> commit` into a repository with NO config ran `agent_sync.py guard`
+      there, which exits 2 for "no .claude/agent-sync.json in this project" — and the guard
+      read that as "no lease" and blocked a commit in a repo where coordination is off;
+    - an Edit of a file in ANOTHER repository ran the guard from the session's root, so the
+      path was resolved against the wrong tree and the wrong `guardedFiles` applied (a
+      session pattern `**/HANDOFF.md` matched `../bare/HANDOFF.md`; the other repo's own
+      `docs/ROADMAP.md` matched nothing);
+    - a session whose own project has no config was not guarded at all, so it could write a
+      guarded register in a configured repository with no lease.
+
+    The subdirectory commit and the not-yet-existing directory are here because the fix
+    resolves the owner with `git -C <dir> rev-parse --show-toplevel`: a staged path is
+    toplevel-relative, and a Write may create the directory it lands in.
+    """
+    hooks = ROOT / "plugins" / "agent-sync" / "hooks"
+    if not shutil.which("git") or not (hooks / "guard.sh").exists():
+        notes.append("git or guard.sh not found — owning-repository check skipped")
+        return
+    with tempfile.TemporaryDirectory() as box:
+        base = Path(box)
+        session, bare, other, plain, nogit = (base / n for n in
+                                              ("session", "bare", "other", "plain", "nogit"))
+        for d in (session, bare, other, plain, nogit):
+            d.mkdir()
+        for d in (session, bare, other, plain):
+            _git_project(str(d))
+        for d, guarded in ((session, ["DECISIONS.md", "**/HANDOFF.md"]),
+                           (other, ["docs/ROADMAP.md", "notes/*.md"])):
+            if _run_script(str(d), "init", "--backend", "fs").returncode != 0:
+                err(f"owning repository: init failed in {d.name}")
+                return
+            _write_cfg(str(d), guardedFiles=guarded)
+        (bare / "HANDOFF.md").write_text("# handoff\n")
+        (bare / "DECISIONS.md").write_text("# decisions\n")
+        (other / "docs").mkdir()
+        (other / "docs" / "ROADMAP.md").write_text("# roadmap\n")
+        (other / "README.md").write_text("# readme\n")
+        (nogit / "x.md").write_text("x\n")
+        subprocess.run(["git", "add", "HANDOFF.md", "DECISIONS.md"], cwd=bare,
+                       capture_output=True)
+        subprocess.run(["git", "add", "docs/ROADMAP.md"], cwd=other, capture_output=True)
+
+        def edit(p: Path) -> str:
+            return json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(p)}})
+
+        def bash(cmd: str) -> str:
+            return json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+
+        def guard(session_root: Path, payload: str, run: str = "nobody"):
+            env = {**os.environ,
+                   "CLAUDE_PLUGIN_ROOT": str(ROOT / "plugins" / "agent-sync"),
+                   "CLAUDE_PROJECT_DIR": str(session_root),
+                   "AGENT_SYNC_RUN_ID": run}
+            return subprocess.run(["bash", str(hooks / "guard.sh")], input=payload,
+                                  cwd=str(session_root), env=env, capture_output=True,
+                                  text=True, timeout=60)
+
+        cases = [
+            # (label, session root, payload, expected exit)
+            ("configured session, `git -C` commit into a repo with no config",
+             session, bash(f"git -C {bare} commit -m wip"), 0),
+            ("configured session, `cd <repo> && git commit` into a repo with no config",
+             session, bash(f"cd {bare} && git commit -m wip"), 0),
+            ("configured session, Edit in a repo with no config that the SESSION's "
+             "pattern would match", session, edit(bare / "HANDOFF.md"), 0),
+            ("configured session, Edit of a file the OTHER repo guards",
+             session, edit(other / "docs" / "ROADMAP.md"), 2),
+            ("configured session, Edit of a name only the session guards, in the other repo",
+             session, edit(other / "DECISIONS.md"), 0),
+            ("configured session, `git -C` commit staging the other repo's guarded file",
+             session, bash(f"git -C {other} commit -m wip"), 2),
+            ("a commit run from a subdirectory of the other repo",
+             session, bash(f"git -C {other / 'docs'} commit -m wip"), 2),
+            ("Write of a new file in a directory that does not exist yet, guarded there",
+             session, json.dumps({"tool_name": "Write", "tool_input": {
+                 "file_path": str(other / "notes" / "n.md")}}), 2),
+            ("unconfigured session, Edit of a file a configured repo guards",
+             plain, edit(other / "docs" / "ROADMAP.md"), 2),
+            ("unconfigured session, `git -C` commit into a configured repo",
+             plain, bash(f"git -C {other} commit -m wip"), 2),
+            ("unconfigured session, Edit of an unguarded file in a configured repo",
+             plain, edit(other / "README.md"), 0),
+            ("a path inside no git repository", session, edit(nogit / "x.md"), 0),
+        ]
+        for label, root, payload, want in cases:
+            r = guard(root, payload)
+            if r.returncode != want:
+                err(f"owning repository: {label} — exit {r.returncode}, expected {want} "
+                    f"({(r.stderr.strip() or 'no stderr')[:240]})")
+
+        # The lease that authorises those writes is the one taken IN the owning repository.
+        if _run_script(str(other), "acquire", "OWN-1", run_id="holder").returncode != 0:
+            err("owning repository: acquire in the other repo failed")
+            return
+        for label, root, payload in (
+                ("Edit with the other repo's lease", plain, edit(other / "docs" / "ROADMAP.md")),
+                ("commit with the other repo's lease", session,
+                 bash(f"git -C {other} commit -m wip")),
+                ("subdirectory commit with the other repo's lease", session,
+                 bash(f"git -C {other / 'docs'} commit -m wip"))):
+            r = guard(root, payload, run="holder")
+            if r.returncode != 0:
+                err(f"owning repository: {label} was refused — exit {r.returncode} "
+                    f"({(r.stderr.strip() or 'no stderr')[:240]})")
+
+
 def check_merge_refuses_without_an_identity() -> None:
     """No committer identity is a preflight failure, not a mid-merge abort.
 
@@ -3255,6 +3368,7 @@ def main() -> int:
     _guarded(check_two_agents_cannot_share_one_task)
     _guarded(check_guard_covers_every_write_shape)
     _guarded(check_guard_fails_closed_without_python3)
+    _guarded(check_guard_asks_the_repository_that_owns_the_file)
     _guarded(check_merge_refuses_without_an_identity)
     _guarded(check_merge_releases_only_its_key)
 
@@ -3616,6 +3730,20 @@ def self_test() -> int:
         "an absent interpreter fails open": (
             "plugins/agent-sync/hooks/guard.sh",
             lambda t: t.replace('  [ "$rc" -eq 0 ] && return 0', "  return 0")),
+        # The 1.21.1 lookup planted back: the owning repository is the SESSION's project
+        # again, so a file in another repository is judged by the session's guardedFiles
+        # and a session with no config of its own guards nothing.
+        "the guard asks the session's project, not the owning repository": (
+            "plugins/agent-sync/hooks/_lib.sh",
+            lambda t: t.replace(
+                '  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1\n',
+                '  top="${CLAUDE_PROJECT_DIR:-$PWD}"\n', 1)),
+        # And the early exit it shipped with: an unconfigured session skips the guard
+        # before it ever looks at where the write lands.
+        "the guard exits early on the session's config": (
+            "plugins/agent-sync/hooks/guard.sh",
+            lambda t: t.replace('\ninput=$(cat)\n',
+                                '\nagent_sync_configured || exit 0\ninput=$(cat)\n', 1)),
         # merge back to releasing everything the run holds.
         "merge releases leases it did not land": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",

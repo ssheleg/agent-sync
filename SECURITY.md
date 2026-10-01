@@ -23,8 +23,10 @@ Review what you are installing before you run the installer. Specifically:
 | `<project>/.agent-sync/` | run state and, in degraded mode, lease files |
 
 The hooks it registers can **deny** tool calls (`PreToolUse` returning exit 2). They
-never allow a call that would otherwise be denied, and they exit 0 immediately in
-any project without a `.claude/agent-sync.json`.
+never allow a call that would otherwise be denied. The lifecycle hooks exit 0
+immediately in a session whose project has no `.claude/agent-sync.json`; the guard
+exits 0 for any write whose owning git repository has none — there it runs only
+`git rev-parse --show-toplevel` and a test for that file's existence.
 
 ## How credentials are handled
 
