@@ -8,6 +8,21 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.3 — one key, one name, and a release that proves the ref is gone
+
+**Release candidate v1.21.3.** This section was written before the tag. ssheleg/agent-sync#25.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| REQ-41 | A dotted key under `leaseBackend: "git"` is reported by `whoami` as taken, `release --held` releases it by that name, and `git ls-remote` then shows no ref | `check_a_dotted_key_round_trips_through_the_git_plane` (real bare origin) + self-tests `a lease key is slugged into its ref again (#25)`, `held() reports the lock stem again (#25)` | 2026-10-01 |
+| REQ-42 | Every accepted key round-trips: ten keys the old slugs collapsed or could not push (path, leading dot, `..`, `.lock`, `a/b` beside `a-b`, `T-1.2` beside `T-1-2`, `%41`, non-ASCII) are held at once as ten refs and ten notes, reported verbatim, all released — git and local mode | `check_every_accepted_key_round_trips` + self-test `a lease key is slugged into its lock stem again (#25)`; `check_case_variants_never_strand_a_ref` for `CASE-1`/`case-1` | 2026-10-01 |
+| REQ-43 | A key that cannot travel unchanged (empty, whitespace, control character, backtick, `\|`, over 200 bytes stored) is refused at `acquire` with a reason, leaving no ref and no lock | `check_an_unrepresentable_key_is_refused` + self-test `an unrepresentable key is accepted again (#25)` | 2026-10-01 |
+| REQ-44 | Leases 1.21.2 left on a remote stay releasable — by `release --held`, by the real key and by the slug 1.21.2 printed — for a dotted task key and a slugged path ref; and stay exclusive on both planes | `check_a_legacy_lease_is_still_releasable`, `check_a_legacy_lease_still_excludes` + self-tests `1.21.2 notes are no longer migrated (#25)`, `a 1.21.2 ref no longer excludes (#25)` | 2026-10-01 |
+| REQ-45 | `release` (by key and `--held`) whose delete did not remove the ref — refused by the remote, or remote unreachable — exits non-zero, never prints `released`, and keeps the local note | `check_release_proves_the_ref_is_gone` (pre-receive hook refusing deletes; remote moved away) + self-test `release trusts the push instead of re-reading the remote (#25)` | 2026-10-01 |
+| REQ-46 | `reserve` refuses a register name `refs/agent-sync/ids/<REG>` cannot carry verbatim, instead of slugging it onto a shared counter | `check_a_register_name_must_name_its_ref` + self-test `a register name is slugged into its id ref again (#25)` | 2026-10-01 |
+| Before | The new checks against the 1.21.2 script | 7 of 8 fail with 37 problems (`case variants` only on a case-insensitive disk); the legacy-exclusion guard passes there by design | 2026-10-01 |
+| Gate | The whole suite on this tree | `npm test` → `PASS: agent-sync v1.21.3 — all checks green` (also on Python 3.9.6), `SELF-TEST PASS` (74 fixtures), claim cell 27, session hooks 13, installer 11; pinned house audit `0 GAP, 18 PASS` (body 4749/4750 tokens) | 2026-10-01 |
+
 ## v1.21.2 — the guard asks the repository that owns the write
 
 **Release candidate v1.21.2.** This section was written before the tag.

@@ -256,9 +256,9 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" <command>
 | `init` | **Run first.** Ask where state lives, write config + gitignored env file, print your step |
 | `status` | Inspect, repair, report — other runs' leases, signals new since you last looked, and `check`'s verdict on the setup |
 | `bootstrap` | Create the cloud container and print the id to paste into the env file |
-| `acquire <KEY>` | Take the lease on a task id. Prints `won`, or `lost <holder>` |
+| `acquire <KEY>` | Take the lease on a task id. Prints `won`, or `lost <holder>`. The key is kept verbatim — `T-1.2` is reported, released and stored on the remote as `T-1.2`; a key with whitespace, a backtick or `|` is refused |
 | `renew <KEY>` | Extend the lease — moves the timestamp expiry is computed from. In Claude Code the `PostToolUse` hook does this for you |
-| `release <KEY>` | Give the lease back. Always, including on failure |
+| `release <KEY>` | Give the lease back. Always, including on failure. Says `released` only once the remote no longer has the ref; otherwise `NOT released`, exit 1 |
 | `reserve <REG>` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …). Prints the id |
 | `release-id <REG> <ID>` | Return an id you did not end up writing to git |
 | `journal <text>` | Append one line to this run's journal |
@@ -450,6 +450,8 @@ check fails when a document stops agreeing with it. Wiring:
 | Every `acquire` reports `lost` | Check the holder in `status`. The lease is decided by a lock file or a git ref, never by the log, so this is a real holder — not a parse failure |
 | A command stops with `the … log is N/M unparseable` | Past 2%, every command that *replays* a log refuses it rather than acting on a partial history. Fix or remove the malformed lines; `acquire` is unaffected, because a lease is not decided there |
 | Guarded edit blocked in Claude Code | Working as designed: `acquire` the key first, or unstage the file. The lease must be taken in the repository that owns the file (`cd <that repo> && agent_sync.py acquire <KEY>`) — a lease in the session's own project does not cover another repository |
+| `release` printed `released T-1-2` but `git ls-remote origin 'refs/agent-sync/leases/*'` still shows `T-1.2` | agent-sync 1.21.2 and earlier reported a dotted key by its dash-slug (#25). Update; 1.21.3 reports the real key, and `release T-1-2` or `release --held` still finds a lease 1.21.2 took |
+| `NOT released: <KEY>` with `is still on 'origin' after the delete` | The remote refused the delete (a protected-ref rule) or could not be reached. The lease is still held and the local note is kept; fix the remote and release again |
 | Guarded edit *not* blocked | You are not on Claude Code. Run `guard <path>` yourself; the run is `ungated` |
 | `AGENT_SYNC_OUTLINE_COLLECTION is not set` | Run `bootstrap` and paste the printed id into `.env.agent-sync` |
 | An HTTP `400`/`403` from the backend | The response body is surfaced verbatim — read it; a bad collection id and a bad token look nothing alike |

@@ -28,12 +28,13 @@ import shutil
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.2"
+VERSION = "1.21.3"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -189,6 +190,82 @@ def git(*args: str, cwd: Path | None = None) -> str:
 def project_root() -> Path:
     top = git("rev-parse", "--show-toplevel")
     return Path(top) if top else Path.cwd()
+
+
+# --------------------------------------------------------------------------- lease names
+
+# A lease key is stored under two names — `refs/agent-sync/leases/<name>` on the remote and
+# `.agent-sync/leases/<name>.lock` here — and both are THIS name. Until 1.21.3 they were two
+# different lossy slugs (ssheleg/agent-sync#25): the ref kept `.`, the lock stem turned it
+# into `-`, and `held()` reported the stem. `acquire T-1.2` came back as `T-1-2`, `release
+# --held` released `T-1-2`, printed "released", and the ref stayed on the remote.
+#
+# The name is the key with every byte outside `[A-Za-z0-9._-]` percent-escaped (UTF-8), and
+# a `.` escaped wherever git forbids it in a ref component: first, last, before another `.`,
+# and the one that opens a trailing `.lock`. `%` is itself escaped, so the escape is
+# unambiguous and `lease_key(lease_name(k)) == k` for every key — a bijection, not a slug.
+# A key made only of safe characters is its own name, which is why every ref 1.21.2 pushed
+# for such a key is already under the right name.
+LEASE_REF_PREFIX = "refs/agent-sync/leases/"
+_LEASE_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+# Filename budget: a lock is `<name>.lock`, its guard `<name>.lock.steal`, its temp inode
+# `<name>.lock.<pid>.new` — all inside the 255-byte limit of every filesystem this runs on.
+LEASE_NAME_MAX = 200
+# Characters a key may not carry, because a surface OTHER than the ref and the lock cannot
+# carry them back: whitespace splits the `whoami` list and the CLI, a backtick ends a log
+# pair (`key=...`), `|` ends a board cell, and a control character ends the log line.
+_KEY_FORBIDDEN = re.compile(r"[\s`|\x00-\x1f\x7f]")
+
+
+def lease_name(key: str) -> str:
+    """The one name a key is stored under, as a ref component and as a lock stem."""
+    out: list[str] = []
+    for i, ch in enumerate(key):
+        dot_forbidden = ch == "." and (i == 0 or i == len(key) - 1 or key[i + 1] == ".")
+        if ch in _LEASE_SAFE and not dot_forbidden:
+            out.append(ch)
+        else:
+            out.extend(f"%{b:02X}" for b in ch.encode("utf-8"))
+    name = "".join(out)
+    if name.endswith(".lock"):                 # git refuses a component ending in `.lock`
+        name = name[:-len(".lock")] + "%2Elock"
+    return name
+
+
+def lease_key(name: str) -> str:
+    """The inverse of `lease_name`. A name with no `%` is its own key — which is also how
+    every name 1.21.2 wrote reads back, since its slugs never produced a `%`."""
+    if "%" not in name:
+        return name
+    try:
+        return urllib.parse.unquote(name, errors="strict")
+    except UnicodeDecodeError:
+        return name
+
+
+def lease_key_problem(key: str) -> str | None:
+    """Why `key` cannot be a lease key, or None. Asked by `acquire` before anything is written."""
+    if not key:
+        return "a lease key cannot be empty"
+    bad = _KEY_FORBIDDEN.search(key)
+    if bad:
+        return (f"lease key {key!r} contains {bad.group()!r} — whitespace, control characters, "
+                "a backtick or `|` cannot travel through the log, the board and `whoami` "
+                "unchanged, so the key would come back as a different string")
+    if len(lease_name(key)) > LEASE_NAME_MAX:
+        return (f"lease key {key[:40]!r}… is {len(lease_name(key))} bytes once stored, over the "
+                f"{LEASE_NAME_MAX}-byte limit of a lock filename — use a shorter task id")
+    return None
+
+
+def legacy_ref_name(key: str) -> str:
+    """The ref component agent-sync <= 1.21.2 pushed for `key`. Read for migration only."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
+
+
+def legacy_lock_stem(key: str) -> str:
+    """The lock stem agent-sync <= 1.21.2 wrote for `key`. Read for migration only."""
+    return re.sub(r"[^A-Za-z0-9_-]", "-", key)
 
 
 def head_sha() -> str:
@@ -1450,6 +1527,10 @@ class Sync:
         # checkout with its replacement — the only thing it does NOT share is
         # this dict, which is exactly what makes it a fence.
         self._lease_gen: dict[str, int] = {}
+        # What each `release(name)` actually released, by key — usually `[name]`, but a
+        # name 1.21.2 reported for another key resolves to that key (#25), and the CLI
+        # says which key it let go rather than repeating the name it was given.
+        self.released_as: dict[str, list[str]] = {}
 
     def capabilities(self) -> dict:
         """Five SEPARATE capability fields — because `gated` was one boolean
@@ -1583,7 +1664,21 @@ class Sync:
 
     @staticmethod
     def _ref(key: str) -> str:
-        return "refs/agent-sync/leases/" + re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
+        return LEASE_REF_PREFIX + lease_name(key)
+
+    @staticmethod
+    def _legacy_ref(key: str) -> str | None:
+        """The ref agent-sync <= 1.21.2 pushed for `key`, when that is a DIFFERENT ref.
+
+        It slugged every run of characters outside `[A-Za-z0-9._-]` into one `-` and
+        stripped the ends, so a path key (`docs/x.md`) lives on remotes as `docs-x.md`.
+        Those refs exist and must stay both exclusive and releasable — read, never
+        written to under the new name, until the lease they carry ends.
+        """
+        name = legacy_ref_name(key)
+        if not name or name == lease_name(key):
+            return None
+        return LEASE_REF_PREFIX + name
 
     def _git_remote(self) -> str:
         return self.cfg.get("leaseRemote") or "origin"
@@ -1604,19 +1699,66 @@ class Sync:
                 f"(`git remote add {remote} <url>`) or point `leaseRemote` at one that does")
         return remote
 
-    def _git_read_lease(self, key: str) -> tuple[str | None, dict[str, Any]]:
-        """(sha, payload) currently on the remote for this key, or (None, {})."""
-        out = git("ls-remote", self._git_remote(), self._ref(key))
-        if not out:
-            return None, {}
-        sha = out.split()[0]
-        git("fetch", "-q", self._git_remote(), f"{self._ref(key)}:refs/agent-sync/fetched")
-        body = git("log", "-1", "--format=%B", sha) or git("log", "-1", "--format=%B",
-                                                           "refs/agent-sync/fetched")
+    def _git_lease_at(self, ref: str, *, strict: bool = False) -> tuple[str | None, dict[str, Any]]:
+        """(sha, payload) on the remote at exactly `ref`, or (None, {}) when there is none.
+
+        `strict` is for the callers whose answer is a claim about the remote — `acquire`
+        and `release`. A remote that cannot be read is then a `Fail`, never "no ref":
+        the lenient read answered (None, {}) for both, and `release` printed "released"
+        over a remote it never reached.
+        """
+        remote = self._git_remote()
         try:
-            return sha, json.loads(body.strip())
+            r = subprocess.run(["git", "ls-remote", remote, ref], capture_output=True,
+                               text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            if strict:
+                raise Fail(f"could not read {ref} on '{remote}' ({exc})") from exc
+            return None, {}
+        if r.returncode != 0:
+            if strict:
+                why = (r.stderr or "").strip().splitlines()
+                raise Fail(f"could not read {ref} on '{remote}' "
+                           f"({why[-1] if why else 'git ls-remote failed'})")
+            return None, {}
+        # ls-remote matches by tail; only the exact ref is this lease.
+        sha = next((parts[0] for parts in (l.split() for l in r.stdout.splitlines())
+                    if len(parts) == 2 and parts[1] == ref), None)
+        if not sha:
+            return None, {}
+        # The object is local whenever this machine wrote it — the common case for a
+        # release — so the fetch is paid only when it is not. `release --held` runs under
+        # SessionEnd's 2 s limit, and the proof re-read below costs a round-trip of its own.
+        body = git("log", "-1", "--format=%B", sha)
+        if not body:
+            git("fetch", "-q", remote, f"{ref}:refs/agent-sync/fetched")
+            body = git("log", "-1", "--format=%B", sha) or git("log", "-1", "--format=%B",
+                                                               "refs/agent-sync/fetched")
+        try:
+            payload = json.loads(body.strip())
         except (json.JSONDecodeError, ValueError):
-            return sha, {}
+            payload = {}
+        return sha, payload if isinstance(payload, dict) else {}
+
+    def _git_read_lease(self, key: str, *, strict: bool = False
+                        ) -> tuple[str | None, dict[str, Any], str]:
+        """(sha, payload, ref) of the lease on the remote for `key`, or (None, {}, ref).
+
+        Under its own name first, then under the name 1.21.2 gave it — and a legacy-NAMED
+        ref counts as this key's only when 1.21.2 wrote it (no `key` in the payload) or it
+        names this key. A ref 1.21.3 wrote for the key `docs-x.md` is not `docs/x.md`'s
+        lease just because the old slug of one is the name of the other.
+        """
+        ref = self._ref(key)
+        sha, held = self._git_lease_at(ref, strict=strict)
+        if sha:
+            return sha, held, ref
+        legacy = self._legacy_ref(key)
+        if legacy:
+            lsha, lheld = self._git_lease_at(legacy, strict=strict)
+            if lsha and lheld.get("key") in (None, key):
+                return lsha, lheld, legacy
+        return None, {}, ref
 
     def _note_local(self, key: str, payload: str) -> None:
         """Record locally that THIS run won THIS key here.
@@ -1632,6 +1774,14 @@ class Sync:
         """
         lock = self._local_lock(key)
         try:
+            body = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if isinstance(body, dict):
+            # The note names its key (#25): the stem is the key's encoded name, and the
+            # payload is what `held()` reports, so the two cannot drift apart.
+            payload = json.dumps({**body, "key": key})
+        try:
             fd = os.open(str(lock), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
             with os.fdopen(fd, "w") as fh:
                 fh.write(payload)
@@ -1642,8 +1792,11 @@ class Sync:
     def _git_acquire(self, key: str) -> tuple[bool, str | None]:
         """Push a ref that must not already exist. The remote's non-fast-forward rule
         IS the compare-and-swap — verified against a hosted remote, not assumed."""
-        remote, ref = self._require_git_remote(f"acquire {key}"), self._ref(key)
-        held_sha, held = self._git_read_lease(key)
+        remote = self._require_git_remote(f"acquire {key}")
+        # Strict: a remote that cannot be read is not a free key. `ref` is the key's own
+        # name — or, while 1.21.2's ref for it still exists, that one, so a run on the old
+        # version and a run on this one contend on the same ref instead of one each.
+        held_sha, held, ref = self._git_read_lease(key, strict=True)
         if held:
             if held.get("run") == self.rid:
                 self._note_local(key, json.dumps(held))
@@ -1653,7 +1806,7 @@ class Sync:
             if alive:
                 return False, held.get("run")
 
-        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
+        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(), "ttl": self.ttl,
                               "repo": repo_name(), "host": platform.node()})
         empty_tree = git("hash-object", "-t", "tree", os.devnull)
         # A lease object is plumbing, not authorship, so it must not depend on the
@@ -1677,32 +1830,140 @@ class Sync:
         r = subprocess.run(args, capture_output=True, text=True)
         if r.returncode != 0:
             # Rejected: somebody won between our read and our push. Ask who.
-            _s, now_held = self._git_read_lease(key)
+            _s, now_held, _r = self._git_read_lease(key)
             return False, now_held.get("run") or "another run"
         self._note_local(key, payload)
         self._touch_renew(key)
         return True, self.rid
 
-    def _git_release(self, key: str) -> None:
-        sha, held = self._git_read_lease(key)
+    def _git_release(self, key: str) -> tuple[str, str, str]:
+        """Delete this run's ref for `key` and PROVE it went. Returns (state, why, ref).
+
+        `state` is `gone` (deleted, and a second read of the remote no longer finds it),
+        `absent` (nothing on the remote under either name), or `kept` (the ref is still
+        there — another run's, a delete the remote refused, or a remote nobody could read).
+
+        This used to return nothing. A refused push printed a note and the caller went on
+        to print "released", exit 0 and drop the local note — so the only trace of a
+        lease still on the remote was removed by the command that had failed to remove
+        it. The verdict comes from re-reading the remote, never from the push's exit code.
+        """
+        remote = self._git_remote()
+        try:
+            sha, held, ref = self._git_read_lease(key, strict=True)
+        except Fail as exc:
+            return "kept", str(exc), self._ref(key)
         if not sha:
-            return
+            return "absent", "", ref
         if held.get("run") not in (self.rid, None):
-            print(f"note: {key} is held by {held.get('run')}, not this run — not released",
-                  file=sys.stderr)
-            return
-        r = subprocess.run(["git", "push", self._git_remote(),
-                            f"--force-with-lease={self._ref(key)}:{sha}",
-                            f":{self._ref(key)}"], capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"note: could not release {key} on the remote: {r.stderr.strip()[:160]}",
-                  file=sys.stderr)
+            return "kept", f"{key} is held by {held.get('run')}, not this run", ref
+        r = subprocess.run(["git", "push", remote, f"--force-with-lease={ref}:{sha}",
+                            f":{ref}"], capture_output=True, text=True)
+        try:
+            after, _ = self._git_lease_at(ref, strict=True)
+        except Fail as exc:
+            return "kept", f"could not re-read the remote to prove {ref} went ({exc})", ref
+        if after == sha:
+            lines = (r.stderr or "").strip().splitlines()
+            why = next((l.strip() for l in lines if "remote:" in l or "rejected" in l),
+                       lines[-1].strip() if lines else "the delete did not land")
+            return "kept", f"{ref} is still on '{remote}' after the delete ({why[:160]})", ref
+        # Gone — or replaced by another run's lease after this run's delete landed, which
+        # is that run's lease and not a failure of this one.
+        return "gone", "", ref
+
+    def _legacy_aliases(self, name: str) -> list[str]:
+        """The keys whose 1.21.2 lock stem was `name`, among refs THIS run holds.
+
+        1.21.2 told the run it held `T-1-2` when it held `T-1.2`, and anything scripted
+        from that output releases `T-1-2`. Only refs 1.21.2 wrote (no `key` in the
+        payload) are matched: a lease taken under 1.21.3 is released by its own key and
+        nothing else, so `release T-1-2` can never take this run's `T-1.2` by accident.
+        """
+        refs, why = self._git_lease_refs()
+        if why is not None:
+            return []
+        out = []
+        for sha, comp in refs:
+            k = lease_key(comp)
+            if k == name or legacy_lock_stem(k) != name:
+                continue
+            try:
+                body = json.loads(self._git_lease_payload(sha) or "{}")
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(body, dict) and "key" not in body and body.get("run") == self.rid:
+                out.append(k)
+        return sorted(out)
+
+    def migrate_legacy_notes(self) -> list[tuple[str, str]]:
+        """Rewrite this run's 1.21.2 notes under the key their ref was actually taken as.
+
+        A 1.21.2 note is named by a lossy slug and carries no `key`, so the local plane
+        alone cannot say which key it stands for. The remote can: the ref this run holds
+        whose slug is the note's stem. Run by the commands that report or release what a
+        run holds — never by the PreToolUse guard, which must not pay a round-trip per
+        Edit. Returns (old stem, key) per note rewritten; a note no ref explains is left
+        as it is, and reads back as its stem, exactly as before.
+        """
+        if self.lease_mode != "git":
+            return []
+        d = self.root / STATE_DIR / "leases"
+        legacy = []
+        for q in sorted(d.glob("*.lock") if d.exists() else []):
+            try:
+                h = json.loads(q.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(h, dict) and "key" not in h and h.get("run") == self.rid \
+                    and self._lease_alive(h, self.ttl):
+                legacy.append(q)
+        if not legacy:
+            return []
+        refs, why = self._git_lease_refs()
+        if why is not None:
+            return []
+        done = []
+        for q in legacy:
+            matches = []
+            for sha, comp in refs:
+                k = lease_key(comp)
+                if legacy_lock_stem(k) != q.stem:
+                    continue
+                try:
+                    body = json.loads(self._git_lease_payload(sha) or "{}")
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(body, dict) and body.get("run") == self.rid \
+                        and body.get("key") in (None, k):
+                    matches.append((k, body))
+            # One 1.21.2 note could stand for SEVERAL leases (`T-1.2` and `T-1-2` shared
+            # it), so every ref it explains gets its own note back.
+            for k, body in matches:
+                self._note_local(k, json.dumps(body))
+                done.append((q.stem, k))
+            if matches and all(self._local_lock(k) != q for k, _b in matches):
+                q.unlink(missing_ok=True)
+        return done
 
     # -- git id allocation: the same compare-and-swap, pointed at a counter -----
 
     @staticmethod
     def _id_ref(reg: str) -> str:
-        return "refs/agent-sync/ids/" + re.sub(r"[^A-Za-z0-9._-]+", "-", reg).strip("-")
+        """`refs/agent-sync/ids/<REG>` — the register's name verbatim, or a refusal.
+
+        It used to be a slug, so `A B` and `A-B` were one counter and a name made only of
+        punctuation was the invalid ref `refs/agent-sync/ids/`. A name the ref carries
+        verbatim is exactly the set that slug left unchanged, so every counter that exists
+        is still at the ref it was always at; the rest are refused instead of merged.
+        """
+        if not reg or lease_name(reg) != reg or legacy_ref_name(reg) != reg:
+            raise Fail(
+                f"register {reg!r} cannot name its id ref verbatim "
+                "(refs/agent-sync/ids/<REG>): use letters, digits, `.`, `_` and `-`, not "
+                "starting or ending with `-` or `.` — a name that has to be slugged shares "
+                "its counter with every other name that slugs the same way")
+        return "refs/agent-sync/ids/" + reg
 
     def _git_reserve_id(self, reg: str, floor: int, rkey: str | None = None) -> tuple[int, str]:
         """Allocate the next id for `reg` by compare-and-swap on a remote ref.
@@ -1810,7 +2071,55 @@ class Sync:
     def _local_lock(self, key: str) -> Path:
         d = self.root / STATE_DIR / "leases"
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{re.sub(r'[^A-Za-z0-9_-]', '-', key)}.lock"
+        return d / f"{lease_name(key)}.lock"
+
+    def _legacy_lock(self, key: str) -> Path | None:
+        """The lock 1.21.2 wrote for `key`, when that is a different file — or None.
+
+        Its stem turned every character outside `[A-Za-z0-9_-]` into `-`, dots included,
+        and it carried no `key`. Such a lock is read as this key's only while it has no
+        `key` field: a lock 1.21.3 wrote names its own key and is nobody else's.
+        """
+        legacy = self.root / STATE_DIR / "leases" / f"{legacy_lock_stem(key)}.lock"
+        return None if legacy.name == f"{lease_name(key)}.lock" else legacy
+
+    @staticmethod
+    def _read_lock(lock: Path | None) -> dict[str, Any] | None:
+        """The lock's payload, `{}` when unreadable, None when there is no such file."""
+        if lock is None or not lock.exists():
+            return None
+        try:
+            held = json.loads(lock.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return held if isinstance(held, dict) else {}
+
+    def _legacy_holding(self, key: str) -> dict[str, Any] | None:
+        """1.21.2's lock for `key`, if one exists, carries no `key`, and is still alive."""
+        held = self._read_lock(self._legacy_lock(key))
+        if held and "key" not in held and self._lease_alive(held, self.ttl):
+            return held
+        return None
+
+    def _lock_names_other_key(self, key: str) -> str | None:
+        """The key a lock at THIS key's path already names, when it is a different key.
+
+        The encoding is injective, so on a case-sensitive filesystem this never fires. On
+        a case-insensitive one (the macOS default) `T-1.lock` and `t-1.lock` are one file:
+        without this check the second acquire overwrote the first's note, `held()` lost
+        one of the two, and `release --held` left its ref on the remote — #25 by another
+        route. Refused at acquire, where nothing has been written yet.
+        """
+        held = self._read_lock(self._local_lock(key))
+        other = (held or {}).get("key")
+        return other if isinstance(other, str) and other != key else None
+
+    def lock_key(self, lock: Path, held: dict[str, Any] | None = None) -> str:
+        """The key a lock file stands for: the `key` it names, else its decoded stem."""
+        if held is None:
+            held = self._read_lock(lock) or {}
+        k = held.get("key")
+        return k if isinstance(k, str) and k else lease_key(self._key_of(lock))
 
     # A lock created empty by O_EXCL and filled by a LATER write has a window
     # where a competitor reads it as `{}` — not live, therefore stealable — and
@@ -1948,6 +2257,18 @@ class Sync:
         which is how these agents actually run. Across machines it is not, and the tool
         says so rather than implying a guarantee it cannot keep.
         """
+        # One key, one name, everywhere (#25): a key that cannot come back as the same
+        # string from the ref, the lock, the log and `whoami` is refused before anything
+        # is written — never slugged into a different key the run then cannot release.
+        problem = lease_key_problem(key)
+        if problem:
+            raise Fail(f"acquire refused: {problem}")
+        other = self._lock_names_other_key(key)
+        if other is not None:
+            raise Fail(
+                f"acquire refused: lease key {key!r} and the held key {other!r} resolve to "
+                "one lock file in this checkout (a case-insensitive filesystem folds `T-1` "
+                "and `t-1` together) — they cannot both be held here. Use one spelling")
         if self.lease_mode == "git":
             won, holder = self._git_acquire(key)
             if won:
@@ -1968,8 +2289,15 @@ class Sync:
         # and `classify_lock` consumes `host` to decide `foreign`. Without it the classifier
         # had one fewer way to refuse, on 25 of the 25 locks this family had on disk
         # (2026-08-20). Absent stays legal: locks written before this line exist.
-        payload = json.dumps({"run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name(), "host": platform.node()})
+        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),
+                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node()})
+
+        # A lease another run took under 1.21.2's lock name is still that run's: the
+        # upgrade must not hand the same key out a second time under the new name.
+        if not lock.exists():
+            legacy = self._legacy_holding(key)
+            if legacy is not None and legacy.get("run") != self.rid:
+                return False, legacy.get("run")
 
         if lock.exists():
             try:
@@ -2054,7 +2382,7 @@ class Sync:
         The `PostToolUse` hook changed nothing, because there was nothing for it to move.
         """
         if self.lease_mode == "git":
-            sha, held = self._git_read_lease(key)
+            sha, held, ref = self._git_read_lease(key)
             if not sha or held.get("run") != self.rid:
                 return False
             if time.time() > parse_iso(held.get("ts", "")) + int(
@@ -2062,7 +2390,7 @@ class Sync:
                 print(f"note: {key}: this lease expired — a renewal does not "
                       "resurrect it; acquire it again", file=sys.stderr)
                 return False
-            payload = json.dumps({**held, "ts": now_iso()})
+            payload = json.dumps({**held, "key": key, "ts": now_iso()})
             empty_tree = git("hash-object", "-t", "tree", os.devnull)
             made = subprocess.run(
                 ["git", "-c", "user.name=agent-sync", "-c", "user.email=agent-sync@localhost",
@@ -2074,8 +2402,8 @@ class Sync:
             # Against the exact object just read: a renewal must never overwrite a lease
             # somebody else took while this run was between the read and the push.
             r = subprocess.run(["git", "push", self._git_remote(),
-                                f"--force-with-lease={self._ref(key)}:{sha}",
-                                f"{commit}:{self._ref(key)}"], capture_output=True, text=True)
+                                f"--force-with-lease={ref}:{sha}",
+                                f"{commit}:{ref}"], capture_output=True, text=True)
             if r.returncode != 0:
                 print(f"note: could not renew {key} on the remote: {r.stderr.strip()[:160]}",
                       file=sys.stderr)
@@ -2178,8 +2506,7 @@ class Sync:
         return bool(renewed)
 
     def _renew_marker(self, key: str) -> Path:
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
-        return self.root / STATE_DIR / "renew" / f"{self.rid}--{safe}"
+        return self.root / STATE_DIR / "renew" / f"{self.rid}--{lease_name(key)}"
 
     def _renew_age(self, key: str) -> float | None:
         """Seconds since THIS run last renewed THIS key, or None when it never has.
@@ -2227,18 +2554,15 @@ class Sync:
         contract, and a lease past it is not held by anybody.
         """
         if self.lease_mode == "git":
-            sha, held = self._git_read_lease(key)
+            sha, held, _ref = self._git_read_lease(key)
             if not sha or not self._lease_alive(held, self.ttl):
                 return None
             return held.get("run")
-        lock = self._local_lock(key)
-        if not lock.exists():
-            return None
-        try:
-            held = json.loads(lock.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-        return held.get("run") if self._lease_alive(held, self.ttl) else None
+        held = self._read_lock(self._local_lock(key))
+        if held is None:
+            legacy = self._legacy_holding(key)
+            return legacy.get("run") if legacy else None
+        return held.get("run") if held and self._lease_alive(held, self.ttl) else None
 
     def release(self, key: str) -> bool:
         """Release only what this run holds, and say so plainly when it does not.
@@ -2257,6 +2581,34 @@ class Sync:
                   file=sys.stderr)
             return False
 
+        # The remote FIRST, and nothing else is touched unless it is proved gone (#25).
+        # This ran after the board claim was blanked and before the note was dropped,
+        # and its failure was a stderr note: the command printed "released", exited 0,
+        # and removed the one local trace of a lease that was still on the remote.
+        git_ref = None
+        if self.lease_mode == "git":
+            state, why, git_ref = self._git_release(key)
+            if state == "kept":
+                print(f"note: {why} — NOT released; the local note is kept, because the "
+                      "lease is still on the remote", file=sys.stderr)
+                return False
+            if state == "absent":
+                # Nothing under this name — but it may be the name 1.21.2 REPORTED for a
+                # lease it took under another (`T-1-2` for `T-1.2`). Resolved only for a
+                # name no 1.21.3 note claims, and only to refs 1.21.2 wrote.
+                own = self._read_lock(self._local_lock(key))
+                if own is None or "key" not in own:
+                    aliases = self._legacy_aliases(key)
+                    if aliases:
+                        print(f"  {key} is the name agent-sync 1.21.2 reported for "
+                              f"{', '.join(aliases)} — releasing it under that name")
+                        ok = [a for a in aliases if self.release(a)]
+                        self.released_as[key] = ok
+                        if len(ok) == len(aliases):
+                            self._drop_note(self._local_lock(key), key, legacy_only=True)
+                        return len(ok) == len(aliases)
+                    git_ref = None
+
         # Releasing the last TASK key releases this run's resource claims too:
         # a file claim only ever rides under a task lease (FIX-SY-04.01), and
         # an orphaned one would hold the registry for a task already finished.
@@ -2270,25 +2622,15 @@ class Sync:
 
         for n in self.write_claim(key, None):
             print(f"  {n}")
-        if self.lease_mode == "git":
-            self._git_release(key)
-        lock = self._local_lock(key)
-        if lock.exists():
-            try:
-                held = json.loads(lock.read_text())
-            except (json.JSONDecodeError, OSError):
-                lock.unlink(missing_ok=True)
-            else:
-                owner = held.get("run")
-                if owner in (self.rid, None):
-                    lock.unlink(missing_ok=True)
-                elif not self._lease_alive(held, self.ttl):
-                    # Reaped, not stolen — and said out loud, because the operator
-                    # asked to release THEIR lease and is getting somebody else's
-                    # corpse cleared as well.
-                    print(f"  reaped {key}: expired lease from {owner}, "
-                          f"whose run left it past its TTL")
-                    lock.unlink(missing_ok=True)
+        self._drop_note(self._local_lock(key), key)
+        # 1.21.2's note for this key, under its slug — only while it names no key.
+        self._drop_note(self._legacy_lock(key), key, legacy_only=True)
+        if git_ref and git_ref != self._ref(key):
+            # The lease lived on its 1.21.2 ref, and `migrate_legacy_notes` may already
+            # have re-noted it under that ref's own key: that note goes with it.
+            ref_key = lease_key(git_ref[len(LEASE_REF_PREFIX):])
+            self._drop_note(self._local_lock(ref_key), key, names={ref_key})
+        self.released_as.setdefault(key, [key])
         if self.adapter.is_lease_authority:
             try:
                 self.adapter.log_append(self.log_id("claims"),
@@ -2296,6 +2638,30 @@ class Sync:
             except Fail as exc:
                 print(f"note: released locally, not published ({exc})", file=sys.stderr)
         return True
+
+    def _drop_note(self, lock: Path | None, key: str, *, legacy_only: bool = False,
+                   names: set[str] | None = None) -> None:
+        """Remove a lock/note this release covers: this run's, ownerless, or spent.
+
+        `legacy_only` — only a 1.21.2 lock (no `key`), never one that names a key.
+        `names` — only a lock naming one of these keys.
+        """
+        held = self._read_lock(lock)
+        if held is None or lock is None:
+            return
+        if legacy_only and "key" in held:
+            return
+        if names is not None and held.get("key") not in names:
+            return
+        owner = held.get("run")
+        if not held or owner in (self.rid, None):
+            lock.unlink(missing_ok=True)
+        elif not self._lease_alive(held, self.ttl):
+            # Reaped, not stolen — and said out loud, because the operator asked to
+            # release THEIR lease and is getting somebody else's corpse cleared as well.
+            print(f"  reaped {key}: expired lease from {owner}, "
+                  f"whose run left it past its TTL")
+            lock.unlink(missing_ok=True)
 
     @property
     def identity(self) -> tuple[str, str]:
@@ -2317,7 +2683,10 @@ class Sync:
     # -- the git plane's own enumerating read (AS-01a) -------------------------
 
     def _git_lease_refs(self) -> tuple[list[tuple[str, str]], str | None]:
-        """Every lease ref on the remote as (sha, key), or the reason it could not look.
+        """Every lease ref on the remote as (sha, name), or the reason it could not look.
+
+        `name` is the ref with the prefix removed; `lease_key(name)` is the key, unless the
+        payload names one (1.21.3 writes it there).
 
         The authority in git mode is `refs/agent-sync/leases/*` on the remote, and a ref
         won on another machine leaves NO local note — `_note_local` only fires for the run
@@ -2339,7 +2708,10 @@ class Sync:
             parts = line.split()
             if len(parts) != 2 or not parts[1].startswith("refs/agent-sync/leases/"):
                 continue
-            out.append((parts[0], parts[1].rsplit("/", 1)[-1]))
+            # The NAME after the prefix, whole: a lease name never contains `/` (it is
+            # escaped), so anything nested here was not written by this tool and is still
+            # reported by the name it actually has.
+            out.append((parts[0], parts[1][len(LEASE_REF_PREFIX):]))
         return out, None
 
     def _git_lease_payload(self, sha: str) -> str:
@@ -2364,8 +2736,15 @@ class Sync:
             return [], why
         now, host, repo = time.time(), platform.node(), repo_name()
         out: list[dict[str, Any]] = []
-        for sha, key in sorted(refs, key=lambda x: x[1]):
+        for sha, comp in sorted(refs, key=lambda x: x[1]):
             raw = self._git_lease_payload(sha)
+            try:
+                named = json.loads(raw).get("key") if raw else None
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                named = None
+            # The key the ref was taken as: the one its payload names (1.21.3), else its
+            # decoded name — which for every ref 1.21.2 pushed is the name itself.
+            key = named if isinstance(named, str) and named else lease_key(comp)
             if raw:
                 entry = classify_lock(key, raw, rid=self.rid,
                                       identity_is_strong=self.identity_is_strong,
@@ -2375,7 +2754,7 @@ class Sync:
                          "host": None, "ts": "", "expired_for": None,
                          "why": "the lease object carries no readable payload"}
             entry["plane"] = "git"
-            entry["ref"] = self._ref(key)
+            entry["ref"] = LEASE_REF_PREFIX + comp        # the ref that exists, as it exists
             entry["sha"] = sha
             entry["path"] = None
             out.append(entry)
@@ -2396,11 +2775,11 @@ class Sync:
                                 f"--force-with-lease={e['ref']}:{e['sha']}",
                                 f":{e['ref']}"], capture_output=True, text=True)
             after, why = self._git_lease_refs()
-            still = {k for _s, k in after}
+            still = {LEASE_REF_PREFIX + c for _s, c in after}
             if why is not None:
                 e["gone"] = None
                 e["why_gone"] = f"could not re-read the remote to prove it went ({why})"
-            elif e["key"] in still:
+            elif e["ref"] in still:
                 e["gone"] = False
                 e["why_gone"] = ((r.stderr or "").strip().splitlines() or
                                  ["the ref is still on the remote"])[-1]
@@ -2426,11 +2805,16 @@ class Sync:
                 raw = p.read_text()
             except OSError as exc:
                 entry: dict[str, Any] = {
-                    "key": p.stem, "state": AMBIGUOUS, "run": None, "repo": None,
-                    "host": None, "ts": "", "expired_for": None,
+                    "key": lease_key(p.stem), "state": AMBIGUOUS, "run": None,
+                    "repo": None, "host": None, "ts": "", "expired_for": None,
                     "why": f"the lock cannot be read ({exc})"}
             else:
-                entry = classify_lock(p.stem, raw, rid=self.rid,
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = {}
+                key = self.lock_key(p, parsed if isinstance(parsed, dict) else {})
+                entry = classify_lock(key, raw, rid=self.rid,
                                       identity_is_strong=self.identity_is_strong,
                                       repo=repo, host=host, default_ttl=self.ttl, at=now)
             entry["path"] = p
@@ -2461,7 +2845,9 @@ class Sync:
             named = set()
             for k in keys:
                 named.add(k)
-                named.add(self._local_lock(k).stem)
+                # A 1.21.2 lock reads back as its slug, so the key it was taken as must
+                # still find it.
+                named.add(legacy_lock_stem(k))
         wanted = [e for e in before
                   if e["state"] == REAPABLE and (named is None or e["key"] in named)]
         refused = [e for e in before
@@ -2469,7 +2855,7 @@ class Sync:
         if named is not None:
             known = {e["key"] for e in before}
             for k in sorted(named - known):
-                if self._local_lock(k).stem in known:
+                if legacy_lock_stem(k) in known:
                     continue
                 refused.append({"key": k, "state": "absent", "run": None, "ts": "",
                                 "expired_for": None,
@@ -2576,16 +2962,26 @@ class Sync:
         return out
 
     def held(self) -> list[str]:
+        """The keys this run holds — each spelled exactly as it was acquired (#25).
+
+        Local only, by design: the PreToolUse guard asks this on every Edit. The key is
+        the one the note NAMES; the stem is only its encoded filename, and reporting the
+        stem is what turned `T-1.2` into `T-1-2`. A 1.21.2 note names no key and reads
+        back as its stem until `migrate_legacy_notes` (run by whoami/status/release)
+        rewrites it from the remote.
+        """
         d = self.root / STATE_DIR / "leases"
-        mine = []
+        mine = set()
         for q in sorted(d.glob("*.lock") if d.exists() else []):
             try:
                 h = json.loads(q.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
+            if not isinstance(h, dict):
+                continue
             if h.get("run") == self.rid and \
                     time.time() <= parse_iso(h.get("ts", "")) + int(h.get("ttl", self.ttl)):
-                mine.append(q.stem)
+                mine.add(self.lock_key(q, h))
         return sorted(mine)
 
     # -- ids ---------------------------------------------------------------
@@ -3372,8 +3768,10 @@ class Sync:
         would collide on, so two runs editing one register serialize on the
         register, not on whoever's task id sorts first."""
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(str(self.root)))
-        # No dots: the local lock filename sanitizes them, and the key must
-        # round-trip through `held()` byte-identical to its lock's stem.
+        # `[A-Za-z0-9_-]` only, which `lease_name` stores unchanged — so the key is
+        # byte-identical to its ref name and its lock stem, and reads back from `held()`
+        # as written. Kept exactly as 1.21.2 built it: a different key for the same file
+        # would let two versions claim one register under two names.
         canon = re.sub(r"[^A-Za-z0-9_-]+", "-", rel).strip("-")
         repo = re.sub(r"[^A-Za-z0-9_-]+", "-", repo_name() or "repo")
         return f"{self.RESOURCE_PREFIX}{repo}--{canon}"[:120]
@@ -3457,7 +3855,7 @@ class Sync:
             except (json.JSONDecodeError, OSError):
                 continue
             if now <= parse_iso(held.get("ts", "")) + int(held.get("ttl", self.ttl)):
-                out[p.stem] = {"run": str(held.get("run")), "repo": repo_name(),
+                out[self.lock_key(p, held)] = {"run": str(held.get("run")), "repo": repo_name(),
                                "ts": parse_iso(held.get("ts", ""))}
         return out
 
@@ -3937,6 +4335,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         return 1
 
     try:
+        s.migrate_legacy_notes()
         held = s.held()
     except Fail as exc:
         print(f"\n✗ {exc}")
@@ -4190,11 +4589,15 @@ def cmd_release(args: argparse.Namespace) -> int:
     if not args.key:
         raise Fail("release needs a key, or --held for everything this run holds")
     # Exit non-zero when nothing was released. A caller that scripts `release` in a
-    # cleanup path has no other way to learn the lease is still out there.
-    if not Sync().release(args.key):
-        print(f"NOT released: {args.key} is held by another run", file=sys.stderr)
+    # cleanup path has no other way to learn the lease is still out there. The reason —
+    # another run's lease, a delete the remote refused, a remote nobody reached — is
+    # printed by `release` itself; this line only refuses to say "released" over it.
+    s = Sync()
+    s.migrate_legacy_notes()
+    if not s.release(args.key):
+        print(f"NOT released: {args.key}", file=sys.stderr)
         return 1
-    print(f"released {args.key}")
+    print(f"released {', '.join(s.released_as.get(args.key) or [args.key])}")
     return 0
 
 
@@ -4207,13 +4610,25 @@ def _release_held() -> int:
     release because releasing a run's last task key releases its resource claims with it.
     """
     s = Sync()
+    # 1.21.2 named its notes by a slug; resolve them against the remote first, so the
+    # keys released below are the keys the refs were taken as (#25).
+    s.migrate_legacy_notes()
     released, refused = [], []
     for _ in range(len(s.held()) + 1):
         pending = [k for k in s.held() if k not in refused]
         if not pending:
             break
         key = pending[0]
-        (released if s.release(key) else refused).append(key)
+        try:
+            ok = s.release(key)
+        except Fail as exc:
+            # One key's failure must not strand the rest: this is the SessionEnd path.
+            print(f"note: {key}: {exc}", file=sys.stderr)
+            ok = False
+        if ok:
+            released.extend(s.released_as.get(key) or [key])
+        else:
+            refused.append(key)
     if not released and not refused:
         print("released nothing — this run holds nothing")
         return 0
@@ -4444,9 +4859,11 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
 
     def offer(entry: dict[str, Any]) -> None:
         by_key.setdefault(entry["key"], []).append(entry)
-        stem = s._local_lock(entry["key"]).stem
-        if stem != entry["key"]:
-            by_key.setdefault(stem, []).append(entry)
+        # The names 1.21.2 printed for this key — its lock slug and its ref slug — so a
+        # key copied from that version's output still reaches the state it named.
+        for alias in {legacy_lock_stem(entry["key"]), legacy_ref_name(entry["key"])}:
+            if alias and alias != entry["key"]:
+                by_key.setdefault(alias, []).append(entry)
 
     for e in s.residue():
         e.setdefault("plane", "fs")
@@ -4464,7 +4881,8 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
 
     rc = 0
     for k in keys:
-        entries = by_key.get(k) or by_key.get(s._local_lock(k).stem) or []
+        entries = (by_key.get(k) or by_key.get(legacy_lock_stem(k))
+                   or by_key.get(legacy_ref_name(k)) or [])
         # Deduplicate: the stem alias can offer the same object twice.
         seen_ids, unique = set(), []
         for e in entries:
@@ -5383,6 +5801,9 @@ def cmd_setup(_args: argparse.Namespace) -> int:
 
 def cmd_whoami(_args: argparse.Namespace) -> int:
     s = Sync()
+    for stem, key in s.migrate_legacy_notes():
+        print(f"note: {stem} is the name agent-sync 1.21.2 gave lease {key} — re-noted as {key}",
+              file=sys.stderr)
     print(f"run {s.rid} · backend {s.adapter.name} · "
           f"{'gated' if s.gated else 'ungated'}")
     print(f"holds: {', '.join(s.held()) or 'nothing'}")
@@ -5519,9 +5940,16 @@ def cmd_merge(args: argparse.Namespace) -> int:
                   f"{', '.join(held)} held")
     else:
         to_release = held
+    unreleased = []
     for key in to_release:
-        s.release(key)
-        print(f"✓ released {key}")
+        # The merge has landed; whether the lease is gone is a separate fact, and a "✓"
+        # printed over a release that did not happen is #25's false success again.
+        if s.release(key):
+            print(f"✓ released {key}")
+        else:
+            print(f"✗ NOT released {key} — the lease is still held; release it once the "
+                  "reason above is fixed", file=sys.stderr)
+            unreleased.append(key)
 
     if args.push:
         out = subprocess.run(["git", "push", "origin", target], capture_output=True, text=True)
@@ -5529,7 +5957,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
               else f"✗ push failed: {(out.stderr or '').strip().splitlines()[-1:]}")
     else:
         print(f"\nNEXT: push {target}, or run `finish` to check every repository first.")
-    return 0
+    return 1 if unreleased else 0
 
 
 def cmd_merges(args: argparse.Namespace) -> int:
