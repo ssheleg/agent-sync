@@ -1873,6 +1873,126 @@ def check_registers_need_a_backend_that_can_reserve() -> None:
                 "instructs every agent to run it")
 
 
+def check_check_and_reserve_agree_on_who_allocates_ids() -> None:
+    """`check` and `reserve` must give one answer to "can this project allocate ids?".
+
+    They did not. `reserve` allocates whenever the record plane orders writes OR
+    `leaseBackend` is `git` — in git mode the allocator is a compare-and-swap on
+    `refs/agent-sync/ids/<REG>` at the remote, whatever the record plane. `check` asked
+    only the record plane, so `backend: fs` + `leaseBackend: git` — the shape every
+    repository with a local journal and a shared remote has — was refused for declaring a
+    register `reserve` served race-free. Found 2026-10-01 installing agent-sync across an
+    organisation's repositories: each had to drop its DEC/OQ registers and take numbers
+    by hand, which is the collision the tool exists to prevent.
+
+    Three configurations, each driven through BOTH commands:
+
+    - fs + git + a real remote  → `check` healthy, `reserve` race-free across two runs;
+    - fs + local (no git lease) → both refuse: nothing orders two clones' writes;
+    - fs + git + a remote that does not exist → both refuse, and `reserve` says WHY. It
+      used to report "another allocator is racing" — a contention that was not there.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — check/reserve allocator agreement skipped")
+        return
+
+    def project_with(tmp: str, lease_backend: str | None, lease_remote: str | None):
+        project = Path(tmp) / "p"
+        project.mkdir()
+        remote = Path(tmp) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)],
+                       capture_output=True)
+        _git_project(str(project))
+        (project / "docs").mkdir()
+        (project / "docs" / "DECISIONS.md").write_text(
+            "# Decisions\n\n**Next free ID:** `DEC-0005`\n")
+        (project / "AGENTS.md").write_text(
+            "# Agents\n\nRead [docs/AGENT_SYNC.md](docs/AGENT_SYNC.md) first.\n")
+        subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=project,
+                       capture_output=True)
+        if _run_script(str(project), "init", "--backend", "fs").returncode != 0:
+            return None
+        keys: dict[str, object] = {"idRegisters": {"DEC": {
+            "file": "docs/DECISIONS.md",
+            "nextFreeIdPattern": r"\*\*Next free ID:\*\* `DEC-(\d{4})`"}}}
+        if lease_backend:
+            keys["leaseBackend"] = lease_backend
+        if lease_remote:
+            keys["leaseRemote"] = lease_remote
+        _write_cfg(str(project), **keys)
+        _run_script(str(project), "setup")
+        subprocess.run(["git", "add", "-A"], cwd=project, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "coordination"], cwd=project,
+                       capture_output=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=project,
+                       capture_output=True)
+        return str(project)
+
+    # 1. The defect: a local record plane with git ids must pass, and reserve must work.
+    with tempfile.TemporaryDirectory() as tmp:
+        project = project_with(tmp, "git", None)
+        if project is None:
+            err("allocator agreement: init failed")
+            return
+        chk = _run_script(project, "check")
+        if "cannot reserve" in chk.stdout or chk.returncode != 0:
+            err("check: refused `idRegisters` on `backend: fs` + `leaseBackend: git`, where "
+                "`reserve` allocates race-free through refs/agent-sync/ids/* — repositories "
+                "with a local record plane are told to take numbers by hand "
+                f"(exit {chk.returncode}): "
+                + " | ".join(l.strip() for l in chk.stdout.splitlines() if "✗" in l))
+        elif "refs/agent-sync/ids" not in chk.stdout:
+            err("check: accepted the git-allocated register without naming its allocator — "
+                "an operator cannot tell which authority hands out the ids")
+        got = [_run_script(project, "reserve", "DEC", run_id=rid) for rid in ("alpha", "beta")]
+        ids = [g.stdout.strip() for g in got]
+        if any(g.returncode != 0 for g in got):
+            err("reserve: failed on fs + git with a real remote: "
+                + " | ".join(g.stderr.strip()[:160] for g in got))
+        elif len(set(ids)) != 2 or ids[0] != "DEC-0005":
+            err(f"reserve: two runs on fs + git were handed {ids} — expected DEC-0005 then a "
+                "different number")
+
+    # 2. No allocator at all: fs record plane, local lease.
+    with tempfile.TemporaryDirectory() as tmp:
+        project = project_with(tmp, None, None)
+        if project is None:
+            err("allocator agreement: init failed")
+            return
+        chk = _run_script(project, "check")
+        res = _run_script(project, "reserve", "DEC")
+        if "cannot reserve" not in chk.stdout or chk.returncode == 0:
+            err("check: called fs + local healthy with an id register — two clones' appends "
+                "are ordered by nothing, and `reserve` refuses there")
+        if res.returncode == 0:
+            err("reserve: allocated on fs + local, where no authority orders two clones — "
+                f"handed {res.stdout.strip()}")
+
+    # 3. A git allocator pointed at a remote that is not there.
+    with tempfile.TemporaryDirectory() as tmp:
+        project = project_with(tmp, "git", "nowhere")
+        if project is None:
+            err("allocator agreement: init failed")
+            return
+        chk = _run_script(project, "check")
+        res = _run_script(project, "reserve", "DEC")
+        if chk.returncode == 0 or not re.search(r"✗[^\n]*register[^\n]*'nowhere'", chk.stdout):
+            err("check: did not refuse an id register whose git allocator points at a remote "
+                "that does not exist ('nowhere')")
+        if res.returncode == 0:
+            err(f"reserve: allocated with no remote to allocate on — {res.stdout.strip()}")
+        elif "racing" in res.stderr or "'nowhere'" not in res.stderr \
+                or "does not exist" not in res.stderr:
+            err("reserve: a missing remote was reported as something else — "
+                f"{res.stderr.strip()[:200]!r}. Say the remote does not exist; 'another "
+                "allocator is racing' sends the operator after a contention that is not there")
+        acq = _run_script(project, "acquire", "T-1")
+        if "does not exist" not in (acq.stdout + acq.stderr):
+            err("acquire: a missing lease remote was reported as something else — "
+                f"{(acq.stdout + acq.stderr).strip()[-200:]!r}. 'held by another run' names a "
+                "holder that does not exist")
+
+
 def check_skill_gives_a_resolvable_script_path() -> None:
     """`$SKILL_DIR` appears in every command example and is defined nowhere.
 
@@ -3129,6 +3249,7 @@ def main() -> int:
     _guarded(check_every_advertised_verb_exists)
     _guarded(check_generated_docs_carry_current_doctrine)
     _guarded(check_registers_need_a_backend_that_can_reserve)
+    _guarded(check_check_and_reserve_agree_on_who_allocates_ids)
     _guarded(check_skill_gives_a_resolvable_script_path)
     _guarded(check_commands_work_without_the_family_installed)
     _guarded(check_two_agents_cannot_share_one_task)
@@ -3436,8 +3557,11 @@ def self_test() -> int:
                       '            "release ID  → on every path, including failure",\n')),
         "check blesses a register nobody can reserve": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
-            lambda t: t.replace("        if not probe.is_lease_authority:",
-                                "        if False:")),
+            # Anchored on the refusal itself, now that `check` asks `id_allocator`: the
+            # plant used to target `if not probe.is_lease_authority:`, and that line went
+            # away with the fix in 1.21.1 — a plant that no-ops reports MISSED, as it did.
+            lambda t: t.replace("        if authority is None:\n            problems.append(",
+                                "        if False:\n            problems.append(", 1)),
         # Anchored on the two VALUES the check looks for, not on the sentence around them.
         # It used to quote three lines of prose verbatim and stopped planting the first time
         # the paragraph was reflowed — a plant that silently no-ops still reports `detected`,
@@ -3592,6 +3716,22 @@ def self_test() -> int:
         "skill body over the token budget": (
             "plugins/agent-sync/skills/agent-sync/SKILL.md",
             lambda t: t + ("\n" + "padding that costs tokens and buys nothing. " * 60)),
+        # The exact condition that shipped to 1.21.0: `check` asked the record plane alone
+        # whether ids can be reserved, so fs + `leaseBackend: git` was refused for a
+        # register `reserve` served race-free through refs/agent-sync/ids/*.
+        "check asks only the record plane who allocates ids": (
+            SCRIPT_PATH,
+            lambda t: t.replace("        authority, how = id_allocator(cfg, probe)\n"
+                                "        if authority is None:",
+                                "        authority, how = id_allocator(cfg, probe)\n"
+                                "        if not probe.is_lease_authority:", 1)),
+        # A missing lease remote back to surfacing as a phantom holder / phantom race.
+        "a missing git remote reads as contention": (
+            SCRIPT_PATH,
+            lambda t: t.replace("        if not git_remote_exists(remote, self.root):\n"
+                                "            raise Fail(",
+                                "        if False:\n"
+                                "            raise Fail(", 1)),
         "stray SKILL.md": (None, None),
     }
     # Each case runs as its own PROCESS, and they run concurrently.

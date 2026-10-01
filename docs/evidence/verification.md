@@ -8,6 +8,16 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.1 — `check` and `reserve` agree on who allocates ids
+
+**Release candidate v1.21.1.** This section was written before the tag.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| REQ-36 | `check` accepts `idRegisters` on `backend: fs` + `leaseBackend: git` with a real remote, and `reserve` hands two runs different numbers there | `check_check_and_reserve_agree_on_who_allocates_ids` (case 1, bare remote) + self-test `check asks only the record plane who allocates ids` | 2026-10-01 |
+| REQ-37 | Configurations with no allocator are refused by both commands: fs + local; git + a remote that does not exist — and the missing remote is named, never reported as contention | same check, cases 2 and 3, including `acquire`; self-test `a missing git remote reads as contention` | 2026-10-01 |
+| Gate | The whole suite on this tree | `npm test` → `PASS: agent-sync v1.21.1 — all checks green`, `SELF-TEST PASS` (64 fixtures), claim cell, session hooks, installer | 2026-10-01 |
+
 ## v1.21.0 — SessionEnd fits the budget both hosts give
 
 **Release candidate v1.21.0.** This section was written before the tag.

@@ -47,6 +47,13 @@ file create; `leaseBackend: "git"` decides with a pushed ref whose non-fast-forw
 rejection is a real compare-and-swap. Both work regardless of which knowledge backend is
 configured — see `lease-protocol.md`.
 
+**Id registers follow the lease, not this backend.** This plane cannot order two clones'
+appends, so on its own it allocates nothing and `reserve` refuses. With `leaseBackend:
+"git"` the allocator is a compare-and-swap on `refs/agent-sync/ids/<REG>` at the remote —
+race-free across machines — so `idRegisters` belong in the config and `check` accepts
+them. With `leaseBackend: "local"` they do not, and `check` says so. The full table is in
+`lease-protocol.md` → *Id reservation*.
+
 ## When this is the right choice
 
 - A project with one agent at a time, which wants the journal and the board without

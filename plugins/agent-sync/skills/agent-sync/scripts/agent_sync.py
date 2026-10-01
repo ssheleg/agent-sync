@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.0"
+VERSION = "1.21.1"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -66,6 +66,40 @@ def lease_guarantee(mode: str) -> tuple[str, str]:
     return LEASE_GUARANTEE.get(
         mode, ("NOT a lease — unknown mode, treat this project as unprotected",
                f"'{mode}' is not a known leaseBackend; only {' or '.join(LEASE_GUARANTEE)}"))
+
+
+def id_allocator(cfg: dict[str, Any], adapter: "Adapter") -> tuple[str | None, str]:
+    """Who hands out register ids in this configuration — `(authority, description)`.
+
+    The ONE answer `reserve`, `release_id` and `check` share. `check` used to ask only
+    the record plane, while `reserve` also allocated through git refs, so a project with a
+    local record plane and `leaseBackend: "git"` was refused for declaring a register that
+    `reserve` served race-free — and took its numbers by hand instead.
+
+    - `"git"` — `leaseBackend` is git: a compare-and-swap on `refs/agent-sync/ids/<REG>`
+      at the lease remote. Independent of the record plane, exactly like the lease.
+    - `"log"` — the record plane orders writes (`atomicAppend` + `totalOrderRead`): an
+      optimistic claim over the merged log, confirmed on read-back.
+    - `None` — neither. Two clones' appends are ordered by nothing, so any number handed
+      out would be a guess another run can make too.
+
+    Order matters and matches `reserve`: in git mode the ref is the allocator even when
+    the record plane could order writes, because only the ref is shared across machines.
+    Whether the git remote actually exists is a separate question (`git_remote_exists`) —
+    a configuration names an allocator; a repository may still lack the remote it names.
+    """
+    if (cfg.get("leaseBackend") or "local") == "git":
+        remote = cfg.get("leaseRemote") or "origin"
+        return "git", f"compare-and-swap on refs/agent-sync/ids/* at '{remote}'"
+    if adapter.is_lease_authority:
+        return "log", f"the {adapter.name} plane's ordered log"
+    return None, (f"backend '{adapter.name}' cannot order writes (atomicAppend is false) "
+                  "and leaseBackend is not git")
+
+
+def git_remote_exists(remote: str, root: Path | None = None) -> bool:
+    """Whether `remote` is configured in this repository. Local only — no network."""
+    return bool(git("remote", "get-url", remote, cwd=root))
 
 
 LOGS = {
@@ -1554,6 +1588,22 @@ class Sync:
     def _git_remote(self) -> str:
         return self.cfg.get("leaseRemote") or "origin"
 
+    def _require_git_remote(self, what: str) -> str:
+        """The configured lease remote, or a refusal that names it.
+
+        Without this a missing remote surfaced as the wrong failure: `git ls-remote`
+        answered nothing, the push was rejected, and `acquire` reported the key "held by
+        another run" while `reserve` reported "another allocator is racing" — a holder
+        and a contention that did not exist. Local only, so it costs no round-trip.
+        """
+        remote = self._git_remote()
+        if not git_remote_exists(remote, self.root):
+            raise Fail(
+                f"{what}: leaseBackend is 'git' but remote '{remote}' does not exist in "
+                "this repository, so nothing can be decided. Add it "
+                f"(`git remote add {remote} <url>`) or point `leaseRemote` at one that does")
+        return remote
+
     def _git_read_lease(self, key: str) -> tuple[str | None, dict[str, Any]]:
         """(sha, payload) currently on the remote for this key, or (None, {})."""
         out = git("ls-remote", self._git_remote(), self._ref(key))
@@ -1592,7 +1642,7 @@ class Sync:
     def _git_acquire(self, key: str) -> tuple[bool, str | None]:
         """Push a ref that must not already exist. The remote's non-fast-forward rule
         IS the compare-and-swap — verified against a hosted remote, not assumed."""
-        remote, ref = self._git_remote(), self._ref(key)
+        remote, ref = self._require_git_remote(f"acquire {key}"), self._ref(key)
         held_sha, held = self._git_read_lease(key)
         if held:
             if held.get("run") == self.rid:
@@ -1674,7 +1724,7 @@ class Sync:
         Retry is bounded by RESERVE_RETRIES: a remote that keeps moving under us is
         reported as contention, not spun on.
         """
-        remote, ref = self._git_remote(), self._id_ref(reg)
+        remote, ref = self._require_git_remote(f"reserve {reg}"), self._id_ref(reg)
         last_err = "push rejected"
         for _attempt in range(RESERVE_RETRIES):
             out = git("ls-remote", remote, ref)
@@ -2541,7 +2591,8 @@ class Sync:
     # -- ids ---------------------------------------------------------------
 
     def reserve(self, reg: str, rkey: str | None = None) -> int:
-        if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
+        authority, _how = id_allocator(self.cfg, self.adapter)
+        if authority is None:
             raise Fail(
                 f"backend '{self.adapter.name}' cannot reserve ids safely "
                 "(atomicAppend is false and the lease backend is not git). Allocate by "
@@ -2564,7 +2615,7 @@ class Sync:
         # forward, so honouring it never revokes a live reservation.
         floor = self._seed_base(reg)
         oid = self.log_id("reservations")
-        if self.lease_is_cross_machine:
+        if authority == "git":
             # Across machines the shards are git files, and a shard another machine has
             # not pushed yet is invisible here — positional replay over what IS visible
             # handed two machines the same number. The remote id ref is the one piece of
@@ -2650,7 +2701,7 @@ class Sync:
         On a backend that cannot order writes this used to do nothing and print
         "released" anyway. The id stayed a hole the board reports as a leak, and the only
         party who could have fixed that had been told it was handled."""
-        if not (self.adapter.is_lease_authority or self.lease_is_cross_machine):
+        if id_allocator(self.cfg, self.adapter)[0] is None:
             raise Fail(
                 f"backend '{self.adapter.name}' cannot record a released id "
                 "(atomicAppend is false and the lease backend is not git), so nothing "
@@ -3522,6 +3573,10 @@ class Sync:
             L += ["| Register | File | Reserve with |", "|---|---|---|"]
             L += [f"| `{r}` | `{s['file']}` | `agent_sync.py reserve {r}` |" for r, s in sorted(regs.items())]
             L += ["", "Reading a *next free id* line is **not** reserving it — two agents read the same number."]
+            authority, how = id_allocator(cfg, self.adapter)
+            L += ["", f"Ids are allocated by {how}." if authority else
+                  f"**No allocator serves these registers** — {how}, so `reserve` refuses "
+                  "and `check` reports it."]
         else:
             L += ["None declared here. Ids live in the parent repository; reserve them there."]
 
@@ -5055,21 +5110,38 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
     for k in sorted(set(cfg) - CONFIG_KEYS):
         problems.append(f"config key '{k}' is not in the schema — it will be ignored")
 
-    # Registers must exist, their allocation pattern must match — and the backend must be
-    # able to hand an id out at all. A register declared on a plane whose `reserve` always
-    # raises is a rule that protects nothing, which is the exact thing `check` promises to
-    # refuse: the generated snapshot then instructs every agent to run `reserve <REG>`, and
-    # the command cannot succeed in that project.
+    # Registers must exist, their allocation pattern must match — and SOMETHING must be
+    # able to hand an id out at all. A register no allocator serves is a rule that protects
+    # nothing, which is the exact thing `check` promises to refuse: the generated snapshot
+    # then instructs every agent to run `reserve <REG>`, and the command cannot succeed.
+    #
+    # The question is asked through `id_allocator`, the predicate `reserve` itself uses.
+    # It used to be asked of the record plane alone, so `backend: fs` + `leaseBackend:
+    # git` — ids from refs/agent-sync/ids/* at the remote, race-free — was refused, and
+    # every such repository dropped its registers and took numbers by hand.
     regs = cfg.get("idRegisters") or {}
     if regs:
         backend = os.environ.get("AGENT_SYNC_BACKEND") or cfg.get("backend") or "fs"
         probe = make_adapter(cfg, root)
-        if not probe.is_lease_authority:
+        authority, how = id_allocator(cfg, probe)
+        if authority is None:
             problems.append(
                 f"{len(regs)} id register(s) declared, but backend '{probe.name}' cannot "
-                f"reserve ids (atomicAppend is false){' — the configured backend is ' + backend + ' and it is not reachable, so runs degrade to fs' if backend != probe.name else ''}. "
-                "`reserve` fails every time here; either configure a backend that can "
-                "allocate, or remove the registers and allocate them in the parent repository")
+                f"reserve ids (atomicAppend is false){' — the configured backend is ' + backend + ' and it is not reachable, so runs degrade to fs' if backend != probe.name else ''}, "
+                "and leaseBackend is not git. `reserve` fails every time here; set "
+                "`leaseBackend: \"git\"` (ids then come from refs/agent-sync/ids/* at the "
+                "remote, whatever the record plane), configure a backend that can allocate, "
+                "or remove the registers and allocate them in the parent repository")
+        elif authority == "git" and not git_remote_exists(
+                cfg.get("leaseRemote") or "origin", root):
+            problems.append(
+                f"{len(regs)} id register(s) declared and ids are allocated by "
+                f"{how}, but remote '{cfg.get('leaseRemote') or 'origin'}' does not exist "
+                "— `reserve` cannot allocate anything until it does")
+        else:
+            ok.append(f"{len(regs)} id register(s) allocated by {how}"
+                      + (" — race-free across machines, whatever the record plane"
+                         if authority == "git" else ""))
     for reg, spec in sorted(regs.items()):
         f = root / spec.get("file", "")
         if not f.exists():

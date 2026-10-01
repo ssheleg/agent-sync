@@ -330,6 +330,26 @@ comes from depends on the mode:
   the merged log, then claimed by appending the receipt and confirmed on read-back;
   a lost race retries with the next number, bounded the same way.
 
+**Which configurations can declare `idRegisters`** — one predicate (`id_allocator` in
+`scripts/agent_sync.py`) answers for `reserve`, `release_id`, `check` and the generated
+snapshot, so the four cannot disagree. Git mode wins when both could allocate, because
+only the ref is shared across machines.
+
+| `backend` (record plane) | `leaseBackend` | Allocator | `check` |
+|---|---|---|---|
+| any — `fs` included | `git`, remote exists | `refs/agent-sync/ids/<REG>` at `leaseRemote` | accepts |
+| any | `git`, remote missing | none until the remote exists | refuses, names the remote |
+| `outline` / `notion`, reachable | `local` | the plane's ordered log | accepts |
+| `fs`, or a cloud plane degraded to `fs` | `local` | none | refuses |
+
+The record plane has no say in the first row: a local journal with a shared remote
+reserves race-free. Through 1.21.0 `check` asked the record plane alone and refused that
+row while `reserve` served it, so repositories with `backend: fs` dropped their registers
+and took numbers by hand. A missing remote is refused by name in both `acquire` and
+`reserve` — it used to surface as "held by another run" and "another allocator is
+racing", a holder and a contention that did not exist
+(`test/validate.py` → `check_check_and_reserve_agree_on_who_allocates_ids`).
+
 A receipt also **names its authority**: `backend=` (git or log), `rev=` (the
 counter commit that served it, in git mode) and `rkey=` (the reservation key).
 A retry with the same `--key` is the SAME reservation — answered from the
