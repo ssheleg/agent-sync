@@ -51,10 +51,38 @@ run_limited() {
   return "$rc"
 }
 
-# Every hook is a no-op in a project that does not use agent-sync, so installing the
-# plugin globally changes nothing elsewhere.
+# Every lifecycle hook (SessionStart, renew, SessionEnd) is a no-op in a session whose
+# project does not use agent-sync, so installing the plugin globally changes nothing
+# elsewhere. These hooks act on the SESSION's project and nothing else, so the session's
+# config is the right question for them -- and the wrong one for the guard, which acts on
+# whatever repository a write lands in (see agent_sync_owner below).
 agent_sync_configured() {
   [ -f "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/agent-sync.json" ]
+}
+
+# The repository that OWNS a path decides whether a write to it is coordinated -- never the
+# session's project. Prints that repository's toplevel when it carries
+# .claude/agent-sync.json; prints nothing and returns 1 when the path is inside no git
+# repository, or inside one where coordination is off.
+#
+# Until v1.21.2 guard.sh asked agent_sync_configured and then ran the check somewhere else:
+# a commit into a repository with no config was blocked (the coordinator there exits 2 for
+# "no config", read as "no lease"), an Edit in another repository was judged against the
+# session's guardedFiles, and a session rooted in an unconfigured project guarded nothing
+# at all. Accepts a file's directory or a repository directory; a Write may create the
+# directory it lands in, so the lookup starts at the nearest ancestor that exists.
+agent_sync_owner() {
+  local dir="$1" top
+  [ -n "$dir" ] || dir="."
+  while [ ! -d "$dir" ]; do
+    case "$dir" in
+      */*) dir="${dir%/*}"; [ -n "$dir" ] || dir="/" ;;
+      *) dir="." ;;
+    esac
+  done
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$top" ] && [ -f "$top/.claude/agent-sync.json" ] || return 1
+  printf '%s\n' "$top"
 }
 
 AGENT_SYNC_PY="${CLAUDE_PLUGIN_ROOT:-}/skills/agent-sync/scripts/agent_sync.py"

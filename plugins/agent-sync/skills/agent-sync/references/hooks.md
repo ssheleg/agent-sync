@@ -76,14 +76,32 @@ The `Bash` group has no `if` filter, and that is deliberate. Until v1.20.1 it de
 the group level, so it was never evaluated (and 2.1.270 started saying so at every
 session start). Moving it into the handler would make it real, and a real one skips
 `git -C <dir> commit`, `env X=1 git commit` and `cd d && git commit` — the forms the
-parser in `guard.sh` was written to cover. So `guard.sh` runs on every Bash call in a
-coordinated project, exits 0 in a few milliseconds when the command is not a commit,
-and the parser is the whole narrowing.
+parser in `guard.sh` was written to cover. So `guard.sh` runs on every Bash call, exits
+0 without starting an interpreter when the payload does not contain `commit`, and the
+parser is the whole narrowing after that.
+
+**Which repository decides (since v1.21.2): the one that owns the write.** For
+`Edit`/`Write`/`MultiEdit`/`NotebookEdit` that is `git -C <dirname of the path>
+rev-parse --show-toplevel` (the nearest existing ancestor, since a `Write` may create
+its directory); for a commit, the repository named by `-C` or `cd`. Its own
+`.claude/agent-sync.json` absent → exit 0, silently; present → `agent_sync.py guard`
+runs from that toplevel, so its `guardedFiles` and its leases apply. A path inside no
+git repository is allowed. The session's project is **not** consulted: before 1.21.2 it
+was, so a configured session blocked commits in repositories without a config (the
+coordinator there exits 2 for "no config", read as "no lease"), judged another
+repository's files by the session's globs, and a session rooted in an unconfigured
+project guarded nothing anywhere. The guard still fails closed when its parser (python3)
+or git cannot run, but only in a session whose own project is configured — elsewhere the
+owning repository cannot be named without them, and the hook says so in its matrix.
+
+The lifecycle hooks below keep the session's project as their scope: they register,
+renew and release **this session's** run there. A lease taken in a second repository is
+therefore not renewed or released by them — backlog AS-07.
 
 | Hook | Job |
 |---|---|
 | `session-start.sh` | Register the run, print the board summary and the one next action |
-| `guard.sh` | Deny an edit to a `guardedFiles[]` path, or a commit staging one, without a live lease |
+| `guard.sh` | Deny an edit to a `guardedFiles[]` path, or a commit staging one, without a live lease — judged by the repository that owns the file |
 | `renew.sh` | Renew the lease — moves the timestamp expiry is computed from, throttled to `renewIntervalSeconds`, a no-op most calls |
 | `session-end.sh` | Release every lease this run holds. That is all it does — it writes no journal entry and closes nothing else |
 
@@ -99,7 +117,8 @@ throttle is broken — fix the throttle rather than removing the hook.
 | Symptom | Cause |
 |---|---|
 | Guarded edits go through | The guard crashed. Any exit code other than 2 is non-blocking. Run it by hand with a sample stdin payload |
-| Everything is denied | No config, or no lease. `status` says which |
+| Everything is denied | No lease in the repository that owns the file. Run `status` from that repository's root, not the session's |
+| A commit into a repository without a config is blocked | Fixed in 1.21.2 — update the plugin; earlier versions asked the session's config and ran the check in the target repository |
 | Session start is slow | The backend is unreachable. Each hook is capped twice — `run_limited 10` inside the script, and the `timeout` in `hooks.json` (15–20 s) — so it degrades rather than hanging |
 | Renew floods the log | The throttle file is not being written — check its path is writable |
 

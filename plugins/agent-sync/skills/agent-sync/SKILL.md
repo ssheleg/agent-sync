@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.21.1"
+  version: "1.21.2"
   author: ssheleg
 ---
 
@@ -249,7 +249,7 @@ them — for when writes overlap so heavily a lock would just queue everyone. Wh
 does NOT promise is enforcement from a single task owner: holding *a* lease was never
 holding *this* file.
 
-Claude Code's `PreToolUse` hook runs this for you. Elsewhere nothing does.
+Claude Code's `PreToolUse` hook runs this in the repo that owns the file. Elsewhere nothing does.
 
 ## Reserving an id
 

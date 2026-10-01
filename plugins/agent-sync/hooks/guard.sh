@@ -20,6 +20,23 @@ set -uo pipefail
 #   Bash: env VAR=x git commit                  COVERED (env prefix skipped)
 #   Bash: compound (a && git commit)            COVERED (each segment parsed)
 #
+# WHICH repository decides (v1.21.2): the one that owns the write -- for an
+# Edit/Write, `git -C <dirname of the path> rev-parse --show-toplevel`; for a
+# commit, the repository resolved from -C / cd. That repository's own
+# .claude/agent-sync.json absent -> allowed, silently; present -> the check runs
+# FROM its toplevel, against its guardedFiles and its leases. A path inside no git
+# repository is allowed. The session's project is not consulted: a session rooted
+# in an unconfigured project is still guarded when it writes into a configured
+# one, and a configured session no longer blocks commits in repositories where
+# coordination is off.
+#
+#   parser cannot run (no python3), session configured     FAIL CLOSED (exit 2)
+#   parser cannot run, session unconfigured                UNENFORCED (exit 0) --
+#     the owning repository cannot be named without the parser, and refusing every
+#     call on a machine that never opted in is not a guard; the coordinator cannot
+#     run there either
+#   git missing from PATH: same two rows, same reasons
+#
 # An UNSUPPORTED vector is not silently trusted — it is DECLARED unenforced.
 # A caller that needs a hard guarantee routes file writes through a trusted
 # mutation API, an isolated worktree, or OS controls with resource locks; a
@@ -29,7 +46,9 @@ set -uo pipefail
 # --------------------------------------------------------------------------
 . "${CLAUDE_PLUGIN_ROOT}/hooks/_lib.sh"
 S="$AGENT_SYNC_PY"
-agent_sync_configured || exit 0
+# No early `agent_sync_configured || exit 0` here, on purpose: that asks the SESSION's
+# project, and the guard's question is about the repository the write lands in. See
+# agent_sync_owner in _lib.sh and the matrix above.
 input=$(cat)
 
 # The parser IS the guard: hooks.json carries no `if` filter (the one it declared until
@@ -41,6 +60,9 @@ input=$(cat)
 parser_or_die() {
   local rc="$1"
   [ "$rc" -eq 0 ] && return 0
+  # Without the parser the owning repository cannot be named. Refuse only where this
+  # session opted in; elsewhere the coordinator could not run either (matrix above).
+  agent_sync_configured || exit 0
   echo "agent-sync: the guard could not run its parser (python3 exit $rc — likely missing from PATH). Failing closed. Install python3 or fix PATH and retry, or remove .claude/agent-sync.json to switch coordination off here." >&2
   exit 2
 }
@@ -56,8 +78,20 @@ print(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
 ' <<<"$input" 2>/dev/null)
 parser_or_die $?
 
+# The owning repository is resolved with git, so git is part of the parser.
+if ! command -v git >/dev/null 2>&1; then
+  agent_sync_configured || exit 0
+  echo "agent-sync: the guard cannot resolve which repository this call writes to (git is missing from PATH). Failing closed. Install git or fix PATH and retry." >&2
+  exit 2
+fi
+
 # git commit: check every staged path instead of a single file argument.
 if [ -z "$path" ]; then
+  # This hook now runs in EVERY session, not only coordinated ones, so the common Bash call
+  # must stay cheap. The tokeniser below accepts a commit only as the literal token `commit`,
+  # and the host serialises the payload as JSON without escaping ASCII letters, so a payload
+  # that lacks the substring carries no commit. One interpreter start saved per Bash call.
+  case "$input" in *commit*) ;; *) exit 0 ;; esac
   # What repository, and is this even a commit. Both used to be wrong, and the second one is why
   # the first went unnoticed: the old test was `case "$cmd" in *"git commit"*)`, a CONTIGUOUS
   # substring. `git -C <dir> commit` does not contain it, so every commit made that way skipped the
@@ -117,22 +151,29 @@ print(is_commit, repo)
   [ -d "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$PWD}"
 
   if [ "$is_commit" = "1" ]; then
-    # The guard runs FROM that repository, not merely against its file list: agent_sync.py resolves
-    # the project from `git rev-parse --show-toplevel` of its cwd, so a submodule gets its own
-    # .claude/agent-sync.json and its own guardedFiles -- the only reading under which
-    # "docs/ROADMAP.md" means the right file in each repo.
+    # The guard runs FROM that repository's toplevel, not merely against its file list:
+    # agent_sync.py resolves the project from `git rev-parse --show-toplevel` of its cwd, so a
+    # submodule gets its own .claude/agent-sync.json and its own guardedFiles -- the only
+    # reading under which "docs/ROADMAP.md" means the right file in each repo. A repository
+    # with no config of its own is not coordinated, whatever the session's project says.
+    owner=$(agent_sync_owner "$repo") || exit 0
     while IFS= read -r staged; do
       [ -n "$staged" ] || continue
-      if ! (cd "$repo" && python3 "$S" guard "$staged") >/dev/null 2>&1; then
-        echo "agent-sync: '$staged' is staged in $repo and this run holds no lease on it. Acquire one, or unstage it." >&2
+      if ! why=$(cd "$owner" && python3 "$S" guard "$staged" 2>&1 >/dev/null); then
+        echo "agent-sync: '$staged' is staged in $owner and this run holds no lease on it. Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>), or unstage it. ${why}" >&2
         exit 2
       fi
-    done < <(git -C "$repo" diff --cached --name-only 2>/dev/null)
+    done < <(git -C "$owner" diff --cached --name-only 2>/dev/null)
   fi
   exit 0
 fi
 
-if out=$(python3 "$S" guard "$path" 2>&1); then
+# An Edit/Write: the repository that contains the file decides. A relative path is relative
+# to this hook's cwd, which is where the tool call resolves it too.
+case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+owner=$(agent_sync_owner "$(dirname "$path")") || exit 0
+
+if out=$(cd "$owner" && python3 "$S" guard "$path" 2>&1); then
   exit 0
 else
   code=$?

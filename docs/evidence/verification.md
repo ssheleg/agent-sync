@@ -8,6 +8,17 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.2 — the guard asks the repository that owns the write
+
+**Release candidate v1.21.2.** This section was written before the tag.
+
+| REQ | What must hold | Verified by | Last run |
+|---|---|---|---|
+| REQ-38 | A configured session committing into, or editing in, a repository with no config of its own is allowed — even where the session's own globs would match | `check_guard_asks_the_repository_that_owns_the_file` (`git -C`, `cd &&`, Edit of `**/HANDOFF.md`) + self-test `the guard asks the session's project, not the owning repository` | 2026-10-01 |
+| REQ-39 | A file in another configured repository is guarded by THAT repository's `guardedFiles` and leases — from a subdirectory commit and for a `Write` into a directory that does not exist yet too | same check; the lease cases pass only with the lease taken in the owning repository | 2026-10-01 |
+| REQ-40 | A session whose own project has no config is denied a guarded write in a configured repository without a lease | same check, unconfigured-session cases + self-test `the guard exits early on the session's config` | 2026-10-01 |
+| Gate | The whole suite on this tree | `npm test` → `PASS: agent-sync v1.21.2 — all checks green` (also on Python 3.9.6), `SELF-TEST PASS` (66 fixtures), claim cell 27, session hooks 13, installer 11; pinned house audit `0 GAP, 18 PASS` (body 4744/4750 tokens) | 2026-10-01 |
+
 ## v1.21.1 — `check` and `reserve` agree on who allocates ids
 
 **Release candidate v1.21.1.** This section was written before the tag.
