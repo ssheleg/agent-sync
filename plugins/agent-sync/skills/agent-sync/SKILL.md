@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
 license: MIT
 metadata:
-  version: "1.21.3"
+  version: "1.21.4"
   author: ssheleg
 ---
 
@@ -179,7 +179,7 @@ npx sshlg-skills install
 | `reap [KEY…]` | Clear only what this run **proves** it owns and has spent, then re-read the directory to confirm it went |
 | `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
 | `adopt` | Inspect an existing project and **propose** a config — writes nothing |
-| `merge` | Land this branch: target fast-forwarded, conflicts checked **before** anything is touched, merge log written, the `--key` lease released. `--summary`, `--dry-run`, `--push` |
+| `merge` | Land this branch: conflicts checked **before** anything is touched, merge log written, the `--key` lease released after the push. `--summary`, `--dry-run`, `--push` |
 | `merges` | What landed while you were on your branch. `--all` includes the compacted tail |
 | `check` | Validate the whole setup end to end. Non-zero when it is not healthy |
 | `scaffold [--full]` | Create only what is missing, never a line over what exists. `--full` also seeds the question register, index, dependency board, data model and docs gate |

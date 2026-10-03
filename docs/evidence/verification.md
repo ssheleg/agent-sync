@@ -8,6 +8,15 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.4 — merge from a linked worktree (ssheleg/agent-sync#27)
+
+| Gate | Evidence |
+|---|---|
+| The failing case | `merge --push` from a linked worktree while the main checkout holds `main` → `agent-sync: could not check out main` on 1.21.3 (2026-10-03, a shared workspace) |
+| The check | `test/validate.py` `check_merge_from_a_linked_worktree` |
+| Mutations | holder detection removed → `could not check out main` reproduced; push failure ignored → "a rejected push was reported as landed" and "released the lease" — both caught |
+| Suite | `npm test` on this tree → `PASS: agent-sync v1.21.4 — all checks green`, then the self-test, the claim-cell and hooks tests and the installer test |
+
 ## v1.21.3 — one key, one name, and a release that proves the ref is gone
 
 **Release candidate v1.21.3.** This section was written before the tag. ssheleg/agent-sync#25.
