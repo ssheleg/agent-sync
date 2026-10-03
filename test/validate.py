@@ -1399,6 +1399,86 @@ def check_merge_refuses_stale_target() -> None:
             err("merge: refused, and still recorded a merge that never happened")
 
 
+def check_merge_from_a_linked_worktree() -> None:
+    """`merge` from a linked worktree lands without touching the checkout that holds main.
+
+    Run from a worktree while the main checkout sits on the integration branch — the ordinary
+    layout of several agents in one repository — `merge` failed with "could not check out
+    main" (2026-10-03, after the dry run had reported no conflicts). It must instead refuse
+    up front without --push, and with --push land through a temporary worktree: the holder's
+    files and ref untouched, the merge log on origin, the lease released only after the push,
+    and kept when the push is rejected.
+    """
+    if not shutil.which("git"):
+        notes.append("git not found — worktree merge check skipped")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        remote, main_co, wt = (Path(tmp) / n for n in ("remote.git", "main", "wt"))
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], capture_output=True)
+        main_co.mkdir()
+        g = lambda *a, cwd=main_co: subprocess.run(  # noqa: E731
+            ["git", *a], cwd=str(cwd), capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "v@e")
+        g("config", "user.name", "v")
+        g("remote", "add", "origin", str(remote))
+        (main_co / "f.txt").write_text("base\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "base")
+        if _run_script(str(main_co), "init", "--backend", "fs").returncode != 0:
+            err("worktree merge: init failed")
+            return
+        g("add", "-A")
+        g("commit", "-q", "-m", "cfg")
+        g("push", "-q", "-u", "origin", "main")
+        g("worktree", "add", "-q", "-b", "feature/w", str(wt))
+        (wt / "mine.txt").write_text("mine\n")
+        g("add", "-A", cwd=wt)
+        g("commit", "-q", "-m", "mine", cwd=wt)
+        main_head = g("rev-parse", "HEAD").stdout.strip()
+
+        refused = _run_script(str(wt), "merge", "--key", "T-9", "--summary", "landed")
+        if refused.returncode == 0 or "--push" not in (refused.stdout + refused.stderr):
+            err("worktree merge: without --push it must refuse up front and name --push — "
+                "main is checked out in another worktree")
+
+        if _run_script(str(wt), "acquire", "T-9").returncode != 0:
+            err("worktree merge: acquire failed")
+            return
+        landed = _run_script(str(wt), "merge", "--key", "T-9", "--summary", "landed", "--push")
+        remote_log = subprocess.run(["git", "log", "--format=%s", "main"], cwd=str(remote),
+                                    capture_output=True, text=True).stdout
+        if landed.returncode != 0:
+            err("worktree merge: --push from a linked worktree failed — "
+                + (landed.stderr or landed.stdout).strip().splitlines()[-1:][0]
+                if (landed.stderr or landed.stdout).strip() else "worktree merge: --push failed")
+            return
+        if "mine" not in remote_log or "docs(merges)" not in remote_log:
+            err("worktree merge: origin/main lacks the branch's commit or the merge-log entry")
+        if g("rev-parse", "HEAD").stdout.strip() != main_head or g("status", "--porcelain").stdout.strip():
+            err("worktree merge: the checkout holding main was moved or dirtied")
+        if g("branch", "--show-current", cwd=wt).stdout.strip() != "feature/w":
+            err("worktree merge: the linked worktree was switched off its branch")
+        if len([l for l in g("worktree", "list").stdout.splitlines() if l.strip()]) != 2:
+            err("worktree merge: the temporary worktree was left behind")
+        if "T-9" in _run_script(str(wt), "whoami").stdout.split("holds:")[-1]:
+            err("worktree merge: the landed lease was not released")
+
+        # A rejected push keeps the lease: nothing landed, so nothing is free.
+        hook = remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        (wt / "more.txt").write_text("more\n")
+        g("add", "-A", cwd=wt)
+        g("commit", "-q", "-m", "more", cwd=wt)
+        _run_script(str(wt), "acquire", "T-10")
+        rejected = _run_script(str(wt), "merge", "--key", "T-10", "--summary", "x", "--push")
+        if rejected.returncode == 0:
+            err("worktree merge: a rejected push was reported as landed")
+        if "T-10" not in _run_script(str(wt), "whoami").stdout:
+            err("worktree merge: a rejected push released the lease of work that did not land")
+
+
 def check_guard_and_check_agree_on_globs() -> None:
     """One pattern, one meaning. The guard and `check` read them differently.
 
@@ -3692,6 +3772,7 @@ def main() -> int:
     _guarded(check_doctrine_is_current)
     _guarded(check_steal_is_atomic)
     _guarded(check_merge_refuses_stale_target)
+    _guarded(check_merge_from_a_linked_worktree)
     _guarded(check_guard_and_check_agree_on_globs)
     _guarded(check_unparseable_log_fails_loudly)
     _guarded(check_stage_binding_agrees)

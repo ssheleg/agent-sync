@@ -1,3 +1,27 @@
+## v1.21.4 — merge from a linked worktree
+
+`merge` run from a linked worktree failed with `could not check out main` whenever another
+worktree — usually the main checkout — had the integration branch checked out
+(ssheleg/agent-sync#27). The dry run had just reported no conflicts. That is the ordinary layout
+of several agents in one repository, and it surfaced landing a guarded file in a shared
+workspace.
+
+- **Lands through a temporary worktree.** With `--push`, the merge, the merge-log entry and the
+  push happen in a detached temporary worktree at `origin/<target>`, removed on every path. The
+  worktree that holds the target is never touched — not its files, not its ref. Without `--push`
+  it refuses before anything is touched and says why.
+- **The holder's branch no longer moves under it.** The fast-forward of the local target
+  (`update-ref`) is skipped when another worktree has it checked out; it would have shown that
+  worktree the reverse of every change as its own uncommitted edits.
+- **A rejected push keeps the lease.** `--push` used to release leases first and push after, so a
+  rejected push printed `✗ push failed` with the work's lease already free. The push now comes
+  first, on both paths; a rejection fails and every lease stays held.
+
+Check: `check_merge_from_a_linked_worktree` (refusal without `--push`; landing with it; holder
+unmoved and clean; temporary worktree gone; lease released after the push and kept on a rejected
+one). Two mutations caught — dropping the holder detection reproduces the original
+`could not check out main`; releasing before a rejected push is reported.
+
 ## v1.21.3 — the key that came back under a different name
 
 Under `leaseBackend: "git"` a lease key containing a dot was reported and released under a

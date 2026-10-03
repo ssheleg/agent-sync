@@ -26,6 +26,7 @@ import subprocess
 import hashlib
 import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -34,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.3"
+VERSION = "1.21.4"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -274,6 +275,27 @@ def head_sha() -> str:
 
 def current_branch() -> str:
     return git("rev-parse", "--abbrev-ref", "HEAD") or ""
+
+
+def worktree_holding(branch: str) -> str | None:
+    """The OTHER worktree that has `branch` checked out, or None.
+
+    git refuses to check a branch out twice, and moving a branch's ref under the worktree
+    that has it checked out leaves that worktree showing the reverse of every change as
+    its own uncommitted edits. Both happen to `merge` run from a linked worktree while the
+    main checkout sits on the integration branch — the ordinary layout of several agents
+    sharing one repository.
+    """
+    here = git("rev-parse", "--show-toplevel")
+    here_path = Path(here).resolve() if here else None
+    path = None
+    for line in (git("worktree", "list", "--porcelain") or "").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}" and path is not None:
+            if here_path is None or Path(path).resolve() != here_path:
+                return path
+    return None
 
 
 def default_branch() -> str:
@@ -5856,7 +5878,14 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # staleness it had just measured, printed "✓ merged", wrote a merge-log entry and
     # released the lease — and the push was rejected as non-fast-forward. The work had not
     # landed, the log said it had, and the task was free for somebody else to take.
-    if upstream != target:
+    holder = worktree_holding(target)
+    if holder and not args.dry_run and not args.push:
+        raise Fail(
+            f"{target} is checked out in another worktree ({holder}), so it cannot be "
+            f"checked out here and its ref must not move under that worktree. Nothing was "
+            f"touched. Run this again with --push: the merge is made in a temporary worktree "
+            f"and lands on origin/{target}; or merge from {holder}")
+    if upstream != target and not holder:
         local_exists = bool(git("rev-parse", "--verify", "--quiet", f"refs/heads/{target}"))
         behind_local = git("rev-list", "--count", f"{target}..{upstream}") if local_exists else "0"
         ahead_local = git("rev-list", "--count", f"{upstream}..{target}") if local_exists else "0"
@@ -5902,8 +5931,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
               "what you are about to land.")
 
     if args.dry_run:
+        if holder:
+            print(f"\n  {target} is checked out in {holder}: a real run needs --push and lands "
+                  f"on origin/{target} through a temporary worktree")
         print("\n(dry run — nothing merged)")
         return 0
+
+    if holder:
+        return _merge_in_temporary_worktree(s, args, branch, target, upstream, holder,
+                                            changed, stat)
 
     if git("checkout", target) == "" and current_branch() != target:
         raise Fail(f"could not check out {target}")
@@ -5929,6 +5965,21 @@ def cmd_merge(args: argparse.Namespace) -> int:
                     f"docs(merges): record {branch} → {target}"], capture_output=True)
     print(f"✓ recorded in {rel_log}")
 
+    if args.push:
+        out = subprocess.run(["git", "push", "origin", target], capture_output=True, text=True)
+        if out.returncode != 0:
+            # Released after a failed push, the lease would free work that has not landed.
+            raise Fail(f"push of {target} failed — the merge exists only here and every lease "
+                       f"is still held: {(out.stderr or '').strip().splitlines()[-1:]}")
+        print(f"✓ pushed {target}")
+    unreleased = _release_landed(s, args)
+    if not args.push:
+        print(f"\nNEXT: push {target}, or run `finish` to check every repository first.")
+    return 1 if unreleased else 0
+
+
+def _release_landed(s: "Sync", args: argparse.Namespace) -> list[str]:
+    """Release the lease this merge landed; return the keys that could not be released."""
     # Only the lease this merge landed. It used to release every lease the run held, which
     # is a different statement from the one the documentation makes and quietly frees work
     # that has not landed.
@@ -5950,13 +6001,61 @@ def cmd_merge(args: argparse.Namespace) -> int:
             print(f"✗ NOT released {key} — the lease is still held; release it once the "
                   "reason above is fixed", file=sys.stderr)
             unreleased.append(key)
+    return unreleased
 
-    if args.push:
-        out = subprocess.run(["git", "push", "origin", target], capture_output=True, text=True)
-        print(f"✓ pushed {target}" if out.returncode == 0
-              else f"✗ push failed: {(out.stderr or '').strip().splitlines()[-1:]}")
-    else:
-        print(f"\nNEXT: push {target}, or run `finish` to check every repository first.")
+
+def _merge_in_temporary_worktree(s: "Sync", args: argparse.Namespace, branch: str, target: str,
+                                 upstream: str, holder: str, changed: list[str],
+                                 stat: str) -> int:
+    """Merge `branch` into `upstream` in a detached temporary worktree and push it to origin.
+
+    The worktree that has `target` checked out is never touched — not its files, not its
+    ref. The merge, the merge-log entry and the push all happen in a throwaway directory
+    that is removed on every path. The leases are released only after the push is accepted.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="agent-sync-merge-"))
+    added = subprocess.run(["git", "worktree", "add", "--quiet", "--detach", str(tmp), upstream],
+                           capture_output=True, text=True)
+    if added.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise Fail(f"could not create a temporary worktree at {upstream}: "
+                   f"{added.stderr.strip()[:160]}")
+    try:
+        msg = args.message or f"Merge {branch}" + (f" — {args.key}" if args.key else "")
+        r = subprocess.run(["git", "merge", "--no-ff", "-m", msg, branch], cwd=str(tmp),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise Fail(f"merge failed in the temporary worktree; nothing landed and {branch} "
+                       f"is untouched\n  {(r.stderr or r.stdout).strip().splitlines()[-1:]}")
+        sha = git("rev-parse", "--short", "HEAD", cwd=tmp) or "unknown"
+        print(f"\n✓ merged as {sha} (temporary worktree; {target} is checked out in {holder})")
+        root = s.root
+        try:
+            s.root = tmp  # the log is the integration branch's file, so it is written there
+            path = s.merge_log_append({
+                "ts": now_iso(), "key": args.key or "—", "branch": branch, "target": target,
+                "sha": sha, "run": s.rid, "files": f"{len(changed)} ({stat.strip()})",
+                "conflicts": "none", "summary": args.summary or "(no summary given)",
+            })
+        finally:
+            s.root = root
+        rel_log = path.relative_to(tmp)
+        git("add", str(rel_log), cwd=tmp)
+        subprocess.run(["git", "commit", "--quiet", "-m", f"docs(merges): record {branch} → {target}"],
+                       cwd=str(tmp), capture_output=True)
+        print(f"✓ recorded in {rel_log}")
+        out = subprocess.run(["git", "push", "origin", f"HEAD:refs/heads/{target}"], cwd=str(tmp),
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            raise Fail(f"push to origin/{target} failed — nothing landed and every lease is "
+                       f"still held: {(out.stderr or '').strip().splitlines()[-1:]}")
+        print(f"✓ pushed origin/{target}")
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(tmp)], capture_output=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    unreleased = _release_landed(s, args)
+    print(f"\nNEXT: {holder} still shows the old {target}; whoever works there runs "
+          f"`git pull --ff-only` when they are ready.")
     return 1 if unreleased else 0
 
 
