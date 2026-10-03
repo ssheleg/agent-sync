@@ -179,7 +179,7 @@ npx sshlg-skills install
 | `reap [KEY…]` | Clear only what this run **proves** it owns and has spent, then re-read the directory to confirm it went |
 | `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
 | `adopt` | Inspect an existing project and **propose** a config — writes nothing |
-| `merge` | Land this branch: conflicts checked **before** anything is touched, merge log written, the `--key` lease released only after a successful `--push`. From a linked worktree it lands via a temporary one (`--push`). `--summary`, `--dry-run`, `--push` |
+| `merge` | Land this branch: conflicts checked **before** anything is touched, merge log written, the `--key` lease released after the push. `--summary`, `--dry-run`, `--push` |
 | `merges` | What landed while you were on your branch. `--all` includes the compacted tail |
 | `check` | Validate the whole setup end to end. Non-zero when it is not healthy |
 | `scaffold [--full]` | Create only what is missing, never a line over what exists. `--full` also seeds the question register, index, dependency board, data model and docs gate |
