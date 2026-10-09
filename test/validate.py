@@ -2086,7 +2086,7 @@ def check_skill_gives_a_resolvable_script_path() -> None:
     if "$SKILL_DIR" not in md:
         return
     if not re.search(r"CLAUDE_PLUGIN_ROOT|\.agents/skills/agent-sync|"
-                     r"resolve .{0,40}\$SKILL_DIR|SKILL_DIR=", md):
+                     r"resolve .{0,40}\$SKILL_DIR|SKILL_DIR=", md, re.I):
         err("SKILL.md: uses $SKILL_DIR in every command example without giving one "
             "resolvable value or a way to find it — the agent guesses at the first step")
 
@@ -4118,7 +4118,8 @@ def self_test() -> int:
         "the script path is prose only": (
             "plugins/agent-sync/skills/agent-sync/SKILL.md",
             lambda t: re.sub(r"\$\{CLAUDE_PLUGIN_ROOT\}\S*", "the plugin directory",
-                             t).replace("~/.agents/skills/agent-sync", "the skill hub")),
+                             t).replace("~/.agents/skills/agent-sync", "the skill hub")
+             .replace("Resolve `$SKILL_DIR`", "Locate the directory")),
         # --- the scenarios that were only ever driven by hand ---
         # A live holder read as expired. BOTH guards have to go: `acquire` checks the
         # expiry, and `_steal_expired` re-checks it inside the critical section, so
@@ -4263,11 +4264,12 @@ def self_test() -> int:
         # state found at 1.14.0, where the newest section cited v1.13.0 under a v1.14.0 tag.
         # Planted in the NEWEST section, because that is the only place the check reads
         # since it stopped demanding that every dated row be rewritten on each release.
-        # Anchored on `## ` rather than on a version, so a renamed heading cannot disarm it.
+        # Insert into the first heading even when the candidate has no quoted output.
+        # Searching forward for PASS could cross into history, which must be ignored.
         "the ledger names a version that did not ship": (
             "docs/evidence/verification.md",
-            lambda t: re.sub(r"(?s)(\n## .*?)PASS: agent-sync v",
-                             r"\1PASS: agent-sync v0.0.0 not-v", t, count=1)),
+            lambda t: re.sub(r"(\n## [^\n]+\n)",
+                             r"\1\nPASS: agent-sync v0.0.0\n", t, count=1)),
         "the newest ledger section names no version": (
             "docs/evidence/verification.md",
             lambda t: t.replace("\n## ", "\n## A section that names no version\n\n"
