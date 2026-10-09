@@ -16,7 +16,11 @@ exited 0 and listed status/guard. The shipped hook adapter stays Claude-specific
 other hosts require independent registration and refusal evidence, or disclose unverified runtime enforcement.
 
 The first owner gate correctly refused an oversized draft body and missing current
-ledger entry. Both are corrected; final gate is pending. No native hook acceptance
+ledger entry. Both are corrected. The main validator printed
+`PASS: agent-sync v1.21.5 — all checks green`. Of 74 mutation cases, 73 were detected;
+one old fixture changed a historical section instead of this one. Its plant now
+inserts the invalid quote directly into the first section; final gate is pending.
+No native hook acceptance
 or changed coordination algorithm is claimed.
 
 ## v1.21.4 — merge from a linked worktree (ssheleg/agent-sync#27)

@@ -5,6 +5,9 @@ installs work without assuming a shared global root. Hook guidance now distingui
 the shipped Claude adapter from other hosts' capabilities: unverified adapters
 require separate runtime evidence, with explicit self-checks.
 
+The ledger mutation fixture now plants its invalid version in the current section
+even when that section has no quoted command output, preserving historical entries.
+
 ## v1.21.4 — merge from a linked worktree
 
 `merge` run from a linked worktree failed with `could not check out main` whenever another
