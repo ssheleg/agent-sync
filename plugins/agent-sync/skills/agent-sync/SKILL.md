@@ -44,8 +44,8 @@ edit. Land work with `merge`: conflicts computed **before** anything is touched,
 recorded in `docs/MERGES.md`, the `--key` lease released; `merges` says what landed while
 you were away. **Read `references/branching.md`** before merging.
 
-**3. Verify the shipped Claude hook adapter.** Other hosts may support hooks;
-without verified enforcement, run `guard` yourself and record `ungated`. A mode's five capability fields
+**3. Verify the Claude hook adapter.** Without verified enforcement, run `guard` explicitly. Report hook evidence separately
+from `gated` lease arbitration. A mode's five capability fields
 live in ONE place — `references/adapter-contract.md` → *The status capability
 contract*, never restated here. Do not describe a project as protected when it is not.
 

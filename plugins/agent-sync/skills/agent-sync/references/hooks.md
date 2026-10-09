@@ -17,11 +17,14 @@
 but their event names, payloads, registration and refusal semantics vary by version.
 A skills-directory install does not register this adapter. Detect the active host
 and installed adapter; require a planted refusal before claiming enforcement.
-Without that evidence, run `guard` as a self-check and record `ungated`.
+Without that evidence, run `guard` explicitly and disclose runtime enforcement
+as unverified separately from the lease mode.
 
-The board's `gated` / `ungated` column describes observed adapter enforcement,
-not a capability inferred from the host name. A functioning hook system by itself
-is not proof that this project's guarded edits are protected.
+The board's `gated` / `ungated` column describes lease arbitration: configured
+gating, a cross-machine Git lease and a reachable backend determine it. It does
+not prove that a hook ran or refused an edit. Record adapter registration and a
+planted refusal separately; neither the board nor host hook support proves runtime
+protection. See `scripts/agent_sync.py`: `Store.capabilities` and `Store.guard`.
 
 ## Contract
 

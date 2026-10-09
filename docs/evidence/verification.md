@@ -13,7 +13,7 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 The script path resolves from the active skill, including native/project/custom
 roots. Copied payload at an unrelated path with spaces: `agent_sync.py --help`
 exited 0 and listed status/guard. The shipped hook adapter stays Claude-specific;
-other hosts require independent registration and refusal evidence, or remain ungated.
+other hosts require independent registration and refusal evidence, or disclose unverified runtime enforcement.
 
 The first owner gate correctly refused an oversized draft body and missing current
 ledger entry. Both are corrected; final gate is pending. No native hook acceptance
