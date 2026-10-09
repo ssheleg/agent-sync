@@ -13,14 +13,15 @@
 
 ## The limit, first
 
-**Hooks exist only in Claude Code.** On Cursor, Codex and the other agents the
-skills CLI serves there is no `PreToolUse`, so nothing blocks a guarded edit. On
-those agents the same checks run as a self-check written into the skill body, and
-the run is recorded on the board as `ungated`.
+**This package ships a Claude Code hook adapter.** Other hosts can provide hooks,
+but their event names, payloads, registration and refusal semantics vary by version.
+A skills-directory install does not register this adapter. Detect the active host
+and installed adapter; require a planted refusal before claiming enforcement.
+Without that evidence, run `guard` as a self-check and record `ungated`.
 
-Never describe a project as protected when its agents run outside Claude Code. The
-board's `gated` / `ungated` column exists precisely so that an operator can tell an
-enforced run from a promised one.
+The board's `gated` / `ungated` column describes observed adapter enforcement,
+not a capability inferred from the host name. A functioning hook system by itself
+is not proof that this project's guarded edits are protected.
 
 ## Contract
 

@@ -1,3 +1,10 @@
+## v1.21.5 — portable paths and measured hook enforcement
+
+Resolve scripts from the active skill directory so native, project and custom
+installs work without assuming a shared global root. Hook guidance now distinguishes
+the shipped Claude adapter from other hosts' capabilities: unverified adapters
+remain `ungated`, with explicit self-checks.
+
 ## v1.21.4 — merge from a linked worktree
 
 `merge` run from a linked worktree failed with `could not check out main` whenever another

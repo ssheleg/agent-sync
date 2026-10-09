@@ -1,10 +1,10 @@
 ---
 name: agent-sync
 description: "Use when several coding agents work one repository at the same time and must not collide - claiming a task, reserving the next decision/question/ticket id, journaling a run, moving a cross-repo dependency, regenerating the board, or finishing work across a parent repo and its submodules - clean, pushed, and pointed at. Triggers - 'claim this task' / 'возьми задачу', 'who is working on' / 'кто сейчас делает', 'reserve an id' / 'зарезервируй id', 'sync the board' / 'обнови доску', 'set up agent coordination' / 'настрой координацию агентов', 'the submodule is pushed, the parent points at the old commit' / 'сабмодуль запушен, родитель на старом коммите', /agent-sync. Use it BEFORE editing any shared registry file (decisions, open questions, roadmap, workstreams, dependencies) in a project that has .claude/agent-sync.json, even when the user never mentions coordination - an unclaimed edit to those files is how two agents overwrite each other."
-compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. Enforcement hooks are Claude Code only - on other agents the same checks run as a self-check."
+compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
-  version: "1.21.4"
+  version: "1.21.5"
   author: ssheleg
 ---
 
@@ -44,8 +44,8 @@ edit. Land work with `merge`: conflicts computed **before** anything is touched,
 recorded in `docs/MERGES.md`, the `--key` lease released; `merges` says what landed while
 you were away. **Read `references/branching.md`** before merging.
 
-**3. Hooks exist only in Claude Code.** Elsewhere nothing blocks a guarded edit: run
-`guard` yourself and record the run as `ungated`. A mode's five capability fields
+**3. Verify the shipped Claude hook adapter.** Other hosts may support hooks;
+without verified enforcement, run `guard` yourself and record `ungated`. A mode's five capability fields
 live in ONE place — `references/adapter-contract.md` → *The status capability
 contract*, never restated here. Do not describe a project as protected when it is not.
 
@@ -185,10 +185,10 @@ npx sshlg-skills install
 | `scaffold [--full]` | Create only what is missing, never a line over what exists. `--full` also seeds the question register, index, dependency board, data model and docs gate |
 | `finish [--gates]` | Is the **work** finished — every repository clean, pushed and pointed at, nothing left held. `check` answers whether the project is wired right; this, whether you are done |
 
-`$SKILL_DIR` is this skill's own directory: `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` under
-the Claude Code plugin, `~/.agents/skills/agent-sync` elsewhere. Resolve it once per session
-and reuse it. Every command reads `.claude/agent-sync.json` from the project
-root and needs no arguments beyond those listed.
+Resolve `$SKILL_DIR` from the active `SKILL.md` location; confirm its
+`scripts/agent_sync.py` exists. `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` is a
+Claude text substitution, not a Bash environment guarantee. Reuse the absolute
+path; project config remains `.claude/agent-sync.json` on every host.
 
 ## One identity per session, and how it is decided
 
@@ -249,7 +249,8 @@ them — for when writes overlap so heavily a lock would just queue everyone. Wh
 does NOT promise is enforcement from a single task owner: holding *a* lease was never
 holding *this* file.
 
-Claude Code's `PreToolUse` hook runs this in the repo that owns the file. Elsewhere nothing does.
+The shipped Claude `PreToolUse` adapter runs this in the file's owning repo.
+Without a verified adapter, run it explicitly.
 
 ## Reserving an id
 

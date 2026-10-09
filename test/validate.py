@@ -2086,7 +2086,7 @@ def check_skill_gives_a_resolvable_script_path() -> None:
     if "$SKILL_DIR" not in md:
         return
     if not re.search(r"CLAUDE_PLUGIN_ROOT|\.agents/skills/agent-sync|"
-                     r"resolve .{0,40}\$SKILL_DIR|SKILL_DIR=", md):
+                     r"resolve .{0,40}\$SKILL_DIR|SKILL_DIR=", md, re.I):
         err("SKILL.md: uses $SKILL_DIR in every command example without giving one "
             "resolvable value or a way to find it — the agent guesses at the first step")
 
@@ -4118,7 +4118,8 @@ def self_test() -> int:
         "the script path is prose only": (
             "plugins/agent-sync/skills/agent-sync/SKILL.md",
             lambda t: re.sub(r"\$\{CLAUDE_PLUGIN_ROOT\}\S*", "the plugin directory",
-                             t).replace("~/.agents/skills/agent-sync", "the skill hub")),
+                             t).replace("~/.agents/skills/agent-sync", "the skill hub")
+             .replace("Resolve `$SKILL_DIR`", "Locate the directory")),
         # --- the scenarios that were only ever driven by hand ---
         # A live holder read as expired. BOTH guards have to go: `acquire` checks the
         # expiry, and `_steal_expired` re-checks it inside the critical section, so
