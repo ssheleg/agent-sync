@@ -10,11 +10,20 @@ Exit 0 prints `PASS: agent-sync vX.Y.Z — all checks green`. That covers the Ag
 Skills spec floor, this repo's house rules, version sync, and the two rules that
 exist because breaking them ships a secret.
 
+`npm test` runs that, then the claim-cell, SessionStart-hook and installer tests. It
+is the fast gate and the one to run on every change.
+
 Then prove the validator can still fail:
 
 ```bash
-python3 test/validate.py --self-test
+npm run test:negatives     # python3 test/validate.py --self-test
+npm run test:all           # npm test, then the self-test
 ```
+
+The self-test is **not** in the default `npm test`: it re-runs the whole validator once
+per planted defect (74 plants on 1.21.5), and locally that did not finish in 58 minutes.
+CI (`.github/workflows/validate.yml`) and the release workflow both run it directly on
+every push, pull request and tag, so it still gates every merge and every release.
 
 It copies the tree and injects one defect at a time — an over-cap description, a
 version drift, a leaked host name, a token passed in `argv`, a stray `SKILL.md`,

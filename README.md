@@ -476,9 +476,15 @@ These run **in a clone of this repository**. The published npm package ships no
 
 ```bash
 python3 test/validate.py             # manifests, version sync, no host/credential leaks
-python3 test/validate.py --self-test # the validator must still be able to fail
-npm test                             # both of the above
+npm test                             # the validator, then the claim-cell, hook and installer tests
+npm run test:negatives               # validate.py --self-test: the validator must still be able to fail
+npm run test:all                     # both of the above
 ```
+
+The default `npm test` is the fast gate. The self-test re-runs the whole validator once
+per planted defect, so it lives in `test:negatives`; CI (`validate.yml`) and the release
+workflow run it on every push and every tag, so nothing a merge or a release enforces
+moved.
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
 scripts, the slash command, `agent-sync.schema.json`, and eleven reference contracts the

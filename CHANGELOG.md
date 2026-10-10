@@ -1,3 +1,20 @@
+## v1.21.6 — a default gate that finishes, and a tag that must be annotated
+
+- **`npm test` no longer runs the validator's self-test.** The default gate ran
+  `python3 test/validate.py --self-test` — 74 planted defects, each a full validator run in
+  its own copy of the tree — and locally it did not finish in 58 minutes (measured
+  2026-10-10). The self-test moves to `npm run test:negatives`, as in the sibling members;
+  `npm run test:all` runs both. Nothing CI enforced moved: `validate.yml` and `release.yml`
+  already invoke `validate.py --self-test` directly, not through `npm test`.
+- **The release refuses a lightweight tag.** A new step right after checkout in
+  `release.yml` fails unless `git cat-file -t <tag>` is `tag`. `git describe` and
+  `git submodule status` see annotated tags only; on 2026-10-09 four family members cut
+  lightweight tags and the hub read each as its previous release. Same step, same wording,
+  in every member.
+- Not a code change: ssheleg/sshlg-skills#154 (reported against 1.21.0) was fixed in
+  1.21.2 — the guard asks the repository that owns the write. Its reproduction exits 2 on
+  the 1.21.0 plugin cache and 0 on 1.21.5 (verified 2026-10-10).
+
 ## v1.21.5 — portable paths and measured hook enforcement
 
 Resolve scripts from the active skill directory so native, project and custom

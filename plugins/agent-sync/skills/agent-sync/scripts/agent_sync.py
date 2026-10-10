@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.5"
+VERSION = "1.21.6"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
