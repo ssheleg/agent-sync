@@ -8,6 +8,19 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.6 — the default gate without the self-test; annotated tags only (candidate)
+
+Written before the tag; the numbers below are this tree's local runs on 2026-10-10.
+
+| Gate | Evidence |
+|---|---|
+| Default gate | `npm test` = `validate.py`, `claim_cell_test.py`, `hooks_session_test.py`, `installer_test.js`; no `--self-test` (`package.json` `scripts.test`) |
+| Self-test still enforced | `.github/workflows/validate.yml` step "Validator must still be able to fail" and `release.yml` step "Structural validator" both call `python3 test/validate.py --self-test` directly; neither runs `npm test`, so the split drops nothing CI or a release enforced |
+| Measured locally | after: `npm test` exit 0 in 807 s (`PASS: agent-sync v1.21.6 — all checks green`, claim cell 27, session hooks 13, installer 11) at load average ~370 on a shared machine; before: the same plus `--self-test`, which did not finish in 58 min (2026-10-10, same machine) |
+| Local equivalent | `npm run test:negatives` (self-test alone), `npm run test:all` (both) |
+| Annotated tag | `release.yml` step "The tag must be annotated" runs right after checkout and exits 1 unless `git cat-file -t <tag>` prints `tag` |
+| #154 | Not a code change: reported against 1.21.0, fixed in 1.21.2 (`check_guard_asks_the_repository_that_owns_the_file`, REQ-38). Reproduction exits 2 on the 1.21.0 plugin cache and 0 on 1.21.5 |
+
 ## v1.21.5 — portable skill paths and adapter scope (candidate)
 
 The script path resolves from the active skill, including native/project/custom
