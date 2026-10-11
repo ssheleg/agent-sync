@@ -12,6 +12,12 @@
   own and fell back to the shared identity. The walk now reads both.
 
 Two cases in `test/hooks_session_test.py`, both watched failing first.
+- **A direct `guard <path>` in a repository with no coordination allows.** `guard.sh`
+  already exited early there, but `agent_sync.py guard <path>` called directly still
+  exited 2 with a lease message no lease could satisfy. Recovered from the unmerged
+  2026-09-11 branch: a missing config is `NotCoordinated`, an answer the guard allows;
+  an unreadable config still denies. `test/guard_uncoordinated_test.py` (4 cases, 2
+  failing on 1.21.6) joins `npm test`.
 
 ## v1.21.6 — a default gate that finishes, and a tag that must be annotated
 
