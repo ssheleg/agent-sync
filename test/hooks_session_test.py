@@ -375,6 +375,57 @@ def the_fallback_watchdog_still_kills_an_overrun():
     assert "rc:0" not in proc.stdout, "a killed command reported success: %r" % proc.stdout
 
 
+# --- B-150 (reported 2026-10-11 from a linked worktree) -----------------------------------
+#
+# `acquire` from a shell with no session id ran under the SHARED fallback identity and
+# reported "won", while the guard hook — which does know its session — refused every edit
+# with "this run holds no lease". In a linked worktree the SessionStart stamp sat in the
+# MAIN checkout's state dir, so the walk never saw it.
+
+def _plain_env(root):
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=root)
+    for k in ("CLAUDE_SESSION_ID", "AGENT_SYNC_RUN_ID"):
+        env.pop(k, None)
+    return env
+
+
+def acquire_refuses_the_shared_identity_where_hooks_know_their_session():
+    root = _repo()
+    try:
+        sessions = os.path.join(root, ".agent-sync", "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        # A session the hook stamped for some OTHER process tree — not this shell's.
+        open(os.path.join(sessions, "999999"), "w").write("sess-elsewhere\n")
+        proc = subprocess.run([sys.executable, SCRIPT, "acquire", "K-150"], cwd=root,
+                              env=_plain_env(root), capture_output=True, text=True, timeout=60)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode != 0 and "won K-150" not in out, (
+            "acquire won under the shared fallback where hooks run with a session id: %s" % out)
+        assert "CLAUDE_SESSION_ID" in out, "the refusal names no remedy: %s" % out
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def a_linked_worktree_finds_the_main_checkouts_session_stamp():
+    root = _repo()
+    wt = tempfile.mkdtemp(prefix="agent-sync-wt-")
+    os.rmdir(wt)
+    cwd = os.getcwd()
+    try:
+        subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt], check=True)
+        _run_hook(root, json.dumps({"session_id": "sess-main"}))
+        os.chdir(wt)
+        key, how = _module()._session_key()
+        assert key == "session:sess-main", (
+            "from a linked worktree the walk resolved %r (%s) — the stamp in the main "
+            "checkout went unread" % (key, how))
+    finally:
+        os.chdir(cwd)
+        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(wt, ignore_errors=True)
+
+
 print("agent-sync — session hooks: SessionStart identity, SessionEnd budget")
 for name, fn in [
     ("the hook stamps the session from its stdin payload",
@@ -397,6 +448,10 @@ for name, fn in [
     ("the fallback watchdog releases a captured pipe at once",
      the_fallback_watchdog_releases_a_captured_pipe_at_once),
     ("the fallback watchdog still kills an overrun", the_fallback_watchdog_still_kills_an_overrun),
+    ("acquire refuses the shared identity where hooks know their session",
+     acquire_refuses_the_shared_identity_where_hooks_know_their_session),
+    ("a linked worktree finds the main checkout's session stamp",
+     a_linked_worktree_finds_the_main_checkouts_session_stamp),
 ]:
     case(name, fn)
 

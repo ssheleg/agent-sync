@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.6"
+VERSION = "1.21.7"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -352,6 +352,18 @@ class Fail(Exception):
     """A failure the caller must see. Never swallowed into a success."""
 
 
+class NotCoordinated(Fail):
+    """This repository has no coordination configured — an ANSWER, not a failure.
+
+    Every command that needs the config still refuses, because it cannot do its work.
+    The guard is the exception: with no coordination there is nothing for it to protect,
+    so it allows rather than denying every path. A config that EXISTS and cannot be read
+    is an ordinary Fail and still denies. (Recovered 2026-10-11 from the unmerged branch
+    fix/guard-allows-uncoordinated-repository: guard.sh exits early, but a direct
+    `agent_sync.py guard <path>` still exited 2 in a repository with no config.)
+    """
+
+
 _GLOB_CACHE: dict[str, re.Pattern[str]] = {}
 
 
@@ -514,7 +526,7 @@ def load_env_file(root: Path) -> None:
 def load_config(root: Path) -> dict[str, Any]:
     path = root / CONFIG_PATH
     if not path.exists():
-        raise Fail(
+        raise NotCoordinated(
             "no .claude/agent-sync.json in this project.\n"
             "Run `init` first — it asks which backend to use and writes the config.\n"
             "  agent_sync.py init --backend outline --url <instance-url>\n"
@@ -557,13 +569,13 @@ def _session_key() -> tuple[str, str]:
     # tried and failed — the throwaway shell this very command runs in carries claude paths in
     # its argv and matched every heuristic aimed at the CLI.
     try:
-        root = project_root()
-        sessions = root / STATE_DIR / "sessions"
+        dirs = _session_dirs()
         pid = os.getpid()
         for _ in range(10):
-            marker = sessions / str(pid)
-            if marker.exists():
-                return "session:" + marker.read_text().strip(), "the session that started this shell"
+            for sessions in dirs:
+                marker = sessions / str(pid)
+                if marker.exists():
+                    return "session:" + marker.read_text().strip(), "the session that started this shell"
             out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
                                  capture_output=True, text=True, timeout=5)
             ppid = out.stdout.strip()
@@ -574,6 +586,29 @@ def _session_key() -> tuple[str, str]:
         pass
 
     return "", "nothing — this identity is shared with any other session in this checkout"
+
+
+def _session_dirs() -> list[Path]:
+    """Where SessionStart stamps live: this checkout, then the MAIN checkout of a linked
+    worktree. A session started in the main checkout and working in a worktree stamped
+    the main checkout's state dir, so a walk that read only the worktree found nothing
+    and fell back to the shared identity (B-150, 2026-10-11)."""
+    root = project_root()
+    dirs = [root / STATE_DIR / "sessions"]
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common:
+        main = Path(common).parent
+        if main.resolve() != root.resolve():
+            dirs.append(main / STATE_DIR / "sessions")
+    return dirs
+
+
+def _sessions_stamped() -> bool:
+    """Has any hook stamped a session id in reach of this checkout?"""
+    try:
+        return any(d.is_dir() and any(d.iterdir()) for d in _session_dirs())
+    except OSError:
+        return False
 
 
 def run_id(root: Path) -> str:
@@ -4584,6 +4619,16 @@ def cmd_bootstrap(_args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- cli
 
 def cmd_acquire(args: argparse.Namespace) -> int:
+    # B-150: where hooks run with a session id, a lease won under the SHARED fallback is
+    # one the guard hook never recognises — "won" here, "this run holds no lease" on the
+    # next Edit. Refuse at the source and say how to share the hook's identity.
+    key, _how = _session_key()
+    if not key and _sessions_stamped():
+        print("refused: this shell has no session identity, so the lease would be won by the "
+              "shared fallback while the guard hook checks its own session and refuses every "
+              "edit. Re-run with CLAUDE_SESSION_ID=<this session's id> (or AGENT_SYNC_RUN_ID=<id> "
+              "for a non-Claude caller).", file=sys.stderr)
+        return 2
     s = Sync()
     won, holder = s.acquire(args.key)
     if won:
@@ -4983,6 +5028,11 @@ def cmd_guard(args: argparse.Namespace) -> int:
     so internal failures must also exit 2 rather than fail open."""
     try:
         allowed, reason = Sync().guard(args.path)
+    except NotCoordinated:
+        # Nothing to protect here. Denying made every path in an uncoordinated
+        # repository uncommittable, with a message about a lease no lease could satisfy.
+        print("agent-sync: coordination is not configured in this repository; nothing to guard")
+        return 0
     except Fail as exc:
         print(f"agent-sync guard: {exc}", file=sys.stderr)
         return 2

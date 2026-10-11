@@ -8,6 +8,15 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.21.7 — shared-identity acquire refused; worktree session stamps (candidate)
+
+| Gate | Evidence |
+|---|---|
+| B-150 refusal | `test/hooks_session_test.py` "acquire refuses the shared identity where hooks know their session" — failed before the fix (acquire printed `won K-150`) |
+| Worktree stamp | `test/hooks_session_test.py` "a linked worktree finds the main checkout's session stamp" — failed before the fix (resolved `''`) |
+| Uncoordinated guard | `test/guard_uncoordinated_test.py`: 4 cases; on 1.21.6 two failed (`lib/shell.mjs was denied in a repository with no coordination`) |
+| Default gate | `npm test` (see the result recorded in the PR) |
+
 ## v1.21.6 — the default gate without the self-test; annotated tags only (candidate)
 
 Written before the tag; the numbers below are this tree's local runs on 2026-10-10.
