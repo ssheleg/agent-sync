@@ -1,3 +1,18 @@
+## v1.21.7 — a lease the guard would not recognise is refused, and a worktree finds its session
+
+- **`acquire` refuses the shared fallback identity where hooks know their session.** From
+  a shell with no `CLAUDE_SESSION_ID`, `acquire` won the lease under the shared fallback,
+  while the PreToolUse guard — which runs with the session id — refused every edit with
+  "this run holds no lease" (reported 2026-10-11 from a linked worktree). When any session
+  stamp is in reach, `acquire` now exits 2 and names the remedy (`CLAUDE_SESSION_ID`, or
+  `AGENT_SYNC_RUN_ID` for a non-Claude caller). Where no hook stamps sessions, nothing
+  changes: CLI and hook share the fallback and agree.
+- **A linked worktree reads the main checkout's session stamp.** A session started in the
+  main checkout stamped that checkout's state dir; the walk from a worktree read only its
+  own and fell back to the shared identity. The walk now reads both.
+
+Two cases in `test/hooks_session_test.py`, both watched failing first.
+
 ## v1.21.6 — a default gate that finishes, and a tag that must be annotated
 
 - **`npm test` no longer runs the validator's self-test.** The default gate ran
