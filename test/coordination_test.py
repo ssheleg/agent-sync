@@ -1156,6 +1156,73 @@ def git_add_and_commit_in_one_call_is_guarded():
         shutil.rmtree(home, ignore_errors=True)
 
 
+def the_untokenisable_commit_fallback_reads_only_a_git_commit_command():
+    """AS-18 scope (1.22.1): when the command does not tokenise, the fallback counted ANY text
+    with `git … commit` in it as a commit — a PR body saying "every git commit" with a guarded
+    file staged and no lease was refused. Only a `git … commit` COMMAND before the first `$(` /
+    `<<` counts, in the repository its `-C` / `cd` names."""
+    f = _bash_writes()._untokenised_commit_dir
+    assert f('echo "x; git commit" "', "/r") is None, "a quoted `git commit` was a command"
+    assert f("# a git commit\ngh pr create \"$(", "/r") is None, "a comment was a command"
+    assert f('git log --grep commit "$(', "/r") is None, "`git log --grep commit` is no commit"
+    assert f('A=1 git -c a=b commit -m "$(', "/r") == "/r"
+    assert f('cd - && git commit -m "$(', "/r") == "/r", "an unknown dir falls back to cwd"
+    plan = _bash_writes().commit_plan
+    oddmsg = "git commit -m \"$(cat <<'EOF'\nfix the \"x thing\nEOF\n)\""
+    assert plan('git add "$(git ls-files -m)" && ' + oddmsg, "/r")[:2] == (True, "/r"), \
+        "a commit after a leading substitution was not a commit"
+    assert plan("cat > f <<'EOF'\nsay \"git commit\nEOF\ngh pr create --body \"$(cat f)\"",
+                "/r")[0] is False, "a heredoc body naming `git commit` was a commit"
+    root, other = _repo(), _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        for d in (root, other):
+            cfg = os.path.join(d, ".claude", "agent-sync.json")
+            c = json.load(open(cfg))
+            c["guardedFiles"] = ["notes.md"]
+            json.dump(c, open(cfg, "w"))
+        bash = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": root}
+        open(os.path.join(root, "notes.md"), "w").write("n\n")
+        subprocess.run(["git", "-C", root, "add", "notes.md"], check=True)
+        pr = ("gh pr create --title t --body \"$(cat <<'EOF'\n- every git commit\n"
+              "- a 12\" display\nEOF\n)\"")
+        r = _run_guard(root, bash(pr), home)
+        assert r.returncode == 0, "a PR body naming `git commit` was refused: %s" % r.stderr
+        odd = "git commit -m \"$(cat <<'EOF'\nfix the \"x thing\nEOF\n)\""
+        r = _run_guard(root, bash(odd), home)
+        assert r.returncode == 2, "a heredoc commit with an odd quote passed (%d)" % r.returncode
+        r = _run_guard(root, bash("cd %s && " % root + odd), home)
+        assert r.returncode == 2, "`cd <repo> && git commit` with an odd quote passed"
+        other_commit = ("git -C %s commit -m \"$(cat <<'EOF'\nfix: a 12\" display\n"
+                        "EOF\n)\"" % other)
+        r = _run_guard(root, bash(other_commit), home)
+        assert r.returncode == 0, "staged only in cwd, the -C commit was refused: %s" % r.stderr
+        subprocess.run(["git", "-C", root, "reset", "-q", "notes.md"], check=True)
+        open(os.path.join(other, "notes.md"), "w").write("n\n")
+        subprocess.run(["git", "-C", other, "add", "notes.md"], check=True)
+        r = _run_guard(root, bash(other_commit), home)
+        assert r.returncode == 2, "a -C commit staging a guarded file there passed (%d)" % (
+            r.returncode)
+        r = _run_guard(root, bash("cd %s && " % other + odd), home)
+        assert r.returncode == 2, "`cd <other> && git commit` read cwd's index (%d)" % r.returncode
+        # Blind reading of ea936ae: cutting at the FIRST `$(` / `<<` missed a commit after a
+        # leading substitution. Balanced `$(…)`, heredoc bodies and backticks are removed
+        # instead; a continuation line is joined first.
+        open(os.path.join(root, "notes.md"), "a").write("m\n")
+        subprocess.run(["git", "-C", root, "add", "notes.md"], check=True)
+        for cmd in ('cd "$(git rev-parse --show-toplevel)" && ' + odd,
+                    "MSG=\"$(cat <<'EOF'\nit's \"x\nEOF\n)\" && git commit -m \"$MSG\"",
+                    'git add "$(git ls-files -m)" && ' + odd,
+                    "git \\\n  commit -m \"$(cat <<'EOF'\nfix the \"x thing\nEOF\n)\"",
+                    "echo `date` && " + odd):
+            r = _run_guard(root, bash(cmd), home)
+            assert r.returncode == 2, "an untokenisable commit after a substitution passed " \
+                "(%d): %r" % (r.returncode, cmd)
+    finally:
+        for d in (root, other, home):
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def a_write_into_a_coordinated_repository_is_checked_from_any_session():
     """Seam S8: the Bash-write gate keyed on the SESSION's project, so a session rooted outside
     every coordinated repository that wrote into one was not checked until its commit."""
@@ -1345,6 +1412,7 @@ CASES = [
     the_hook_budget_survives_the_vault_reexec,
     a_host_without_fcntl_still_registers_and_never_crashes_acquire,
     git_add_and_commit_in_one_call_is_guarded,
+    the_untokenisable_commit_fallback_reads_only_a_git_commit_command,
     a_write_into_a_coordinated_repository_is_checked_from_any_session,
     the_shell_prefilter_reads_words_not_substrings,
     the_prefilters_copy_of_the_glob_agrees_with_the_coordinators,

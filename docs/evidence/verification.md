@@ -8,6 +8,20 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.22.1 — AS-18 fallback scope (re-certification reading of `517b4b6`)
+
+"Failed on `517b4b6`" means `test/coordination_test.py` run with `AGENT_SYNC_SCRIPT` and
+`AGENT_SYNC_PLUGIN` pointing at a `git archive 517b4b6 plugins`: 1 of 52 fails — the new case.
+Its direct assertions raise AttributeError there (the helper does not exist); each guard
+assertion was also run alone against that tree and failed as listed in the CHANGELOG.
+
+| Gate | Evidence |
+|---|---|
+| AS-18 scope | "the untokenisable commit fallback reads only a git commit command" — a `gh pr create` heredoc body naming `git commit` exits 0 with a guarded file staged and no lease; the odd-quote `git commit -m "$(cat <<'EOF'…)"` exits 2; `git -C <other> commit` and `cd <other> && git commit` read `<other>`'s index (exit 2 staged there, 0 staged only in cwd). Failed on `517b4b6` |
+| AS-18 scope, fix round (blind reading of `ea936ae`) | Same case: `cd "$(git rev-parse --show-toplevel)" && <odd commit>`, `MSG="$(cat <<'EOF'…)" && git commit -m "$MSG"`, `git add "$(git ls-files -m)" && <odd commit>` and a backslash-newline `git \ commit` each exit 2 — each exited 0 on `ea936ae`; `commit_plan` on the `git add "$(…)"` shape was `(False, None, [])` there, `(True, cwd, [])` now |
+| Docs | `references/hooks.md` "A commit" names the fallback; `guard.sh`'s capability matrix has the untokenisable-commit row; README `scheduledIntervalSeconds` row and the S9 row below say one JSON object (`systemMessage` + `hookSpecificOutput.additionalContext`) |
+
+
 ## v1.22.0 — fix round 2 (second blind reading of `e32c7c9`)
 
 `npm test` is `test/run_gate.py`: the five suites, every `test/audit_regressions/*.py` and
@@ -34,7 +48,7 @@ the extended parser case and the vault-cache case.
 | S6 | `renew.sh` on a 2 MB PostToolUse payload, uncoordinated repository, median of 15: 8.1 ms vs 89.1 ms on `e32c7c9`; with `~/.agent-sync/session-repos` present (head read) 29.0 vs 165.2 ms |
 | S7 / risk d | "the parser reads the write shapes agents use" — `mv` source, `<<\EOF`, `<( )`/`>( )`, `cd -P/-L`, `timeout`/`nice`/`stdbuf`/`xargs`, `sed --expression=`, `env -C`/`--chdir=`, piped and backgrounded `cd`, `<>`, absolute `cp` destination with `here` unknown. Failed on `e32c7c9` |
 | S8 | "a write into a coordinated repository is checked from any session" — CLAUDE_PROJECT_DIR unconfigured, `cd <repo> && echo x > notes.md` exits 2. Failed on `e32c7c9` |
-| S9 | "a lease held too long is said once where the session sees it" — the guard prints one `systemMessage`, then nothing. `e32c7c9` printed nothing |
+| S9 | "a lease held too long is said once where the session sees it" — the guard prints one JSON object (`systemMessage` for the person, `hookSpecificOutput.additionalContext` for the model), then nothing. `e32c7c9` printed nothing |
 | Risk c | "the main prefilter lets the tokeniser decide sed" — `sed 's/;/x/' -i f.md` through `main()`. Failed on `e32c7c9` |
 | Risk e | "only a keyless json object is flagged" — `payload_is_keyless` |
 | Risk k | "check refuses a scheduled interval below the schema minimum" — 30 refused. Failed on `e32c7c9` |

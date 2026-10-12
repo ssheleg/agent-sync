@@ -1,3 +1,46 @@
+## v1.22.1 — the AS-18 commit fallback reads only a command
+
+Patch from a re-certification reading of 1.22.0 (`517b4b6`).
+
+**A PR body that mentions `git commit` is no longer a commit.** When a Bash command does not
+tokenise (an odd-quote heredoc), 1.22.0's AS-18 fallback in `bash_writes.py` counted the
+payload as a commit if `git … commit` appeared ANYWHERE in it — so `gh pr create --body
+"$(cat <<'EOF' … every git commit … a 12" display … EOF)"` with a guarded file staged and no
+lease was refused with "this commit … stages a guarded file". The fallback now reads only
+command text: backslash-newline continuations joined, each balanced `$(…)` and backtick span
+removed (quote-aware, nested), each heredoc body removed (from the `<<DELIM` / `<<'DELIM'` /
+`<<-DELIM` line through the line that is exactly DELIM) and comments dropped; an opener that
+never closes ends the text there. In what remains, split into segments outside quotes, a
+commit counts only where a segment starts with `git … commit` (after env assignments, the
+usual prefixes and `git -C <dir>` / `-c k=v`).
+
+**The fallback checks the repository the commit runs in.** `git -C <dir> commit …` and
+`cd <dir> && git commit …` now name that repository's index, not the payload's cwd. A
+directory it cannot name (`cd -`, `cd "$(…)"`, a `$VAR`, a path that does not exist) falls
+back to cwd, as `guard.sh` already did for a repo that is not a directory.
+
+- `test/coordination_test.py`: case "the untokenisable commit fallback reads only a git
+  commit command" — **52 cases**. Against `517b4b6`, watched failing: the PR body exits 2
+  (want 0); `git -C <other> commit` with the guarded file staged only in cwd exits 2 (want 0)
+  and with it staged only in `<other>` exits 0 (want 2); `cd <other> && git commit` the same
+  (0, want 2). The existing odd-quote `git commit -m "$(cat <<'EOF'…)"` case stays exit 2.
+- Blind reading of the first candidate (`ea936ae`, PR #33) failed it: it cut the command at
+  the FIRST `$(` / `<<`, so a commit after a leading substitution was missed — main refused
+  these, the candidate passed them. Added, each watched exiting 0 on `ea936ae` (want 2):
+  `cd "$(git rev-parse --show-toplevel)" && git commit -m <odd heredoc>`,
+  `MSG="$(cat <<'EOF' … it's "x … EOF)" && git commit -m "$MSG"`,
+  `git add "$(git ls-files -m)" && git commit -m <odd heredoc>` (at the parser,
+  `(False, None)` on `ea936ae`, now a commit in cwd), and `git \<newline> commit -m <odd
+  heredoc>` (continuation). Regression guards that pass on both: ``echo `date` && git
+  commit -m <odd heredoc>`` exits 2; a heredoc body saying `git commit` is not a commit.
+- `references/hooks.md` "A commit" states the fallback; `guard.sh`'s capability matrix has
+  a row for an untokenisable commit. README's `scheduledIntervalSeconds` row and the
+  ledger's S9 row describe the held-too-long notice as one JSON object: `systemMessage` for
+  the person, `hookSpecificOutput.additionalContext` for the model.
+- Not covered: what an untokenisable command stages before its commit (only the index is
+  read); a `)` in a `case` pattern inside `$(…)` closes the span early; a heredoc opened
+  inside a `$(…)` that closes on the same line keeps its body as command text.
+
 ## v1.22.0 — coordination that Fabric and Observatory can lean on
 
 Integration wave 3 of the family's 2026-10-11 waves run (hub plan R17–R22), and two fix
