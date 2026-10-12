@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Pack and skill | `agent-sync` |
-| Version | `1.22.0` |
+| Version | `1.22.1` |
 | License | MIT |
 | Source | https://github.com/ssheleg/agent-sync |
 

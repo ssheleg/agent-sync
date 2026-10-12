@@ -512,6 +512,9 @@ def guarded_targets(targets: list[str]) -> list[tuple[str, str]]:
 # ------------------------------------------------------------------ AS-16: what a commit stages
 
 _COMMIT_WORDS = re.compile(r"\bgit\b[^\n]*\bcommit\b")
+_OPENER = re.compile(r"\$\(|<<")
+_LOOSE_WORD = re.compile(r"""\"([^\"]*)\"?|'([^']*)'?|(\S+)""")
+_SEGMENT_KEYWORDS = {"{", "!", "then", "do", "else"}
 _COMMIT_VALUED_SHORT = set("mFCct")
 _COMMIT_VALUED_LONG = {"--message", "--file", "--author", "--date", "--template",
                        "--reuse-message", "--reedit-message", "--fixup", "--squash",
@@ -556,11 +559,10 @@ def commit_plan(cmd: str, cwd: str) -> tuple[bool, str | None, list[tuple[str, s
     except ValueError:
         # The tokenizer closes a "…" string at the first inner quote, so a commit message
         # heredoc inside "$(…)" with an odd number of quotes does not parse (AS-18). Failing
-        # open there skipped the commit check entirely; it is still a commit in the payload's
-        # directory, whose index the hook reads. What the same command stages is not known.
-        if _COMMIT_WORDS.search(cmd or ""):
-            return True, cwd, []
-        return False, None, []
+        # open there skipped the commit check entirely. What the same command stages is not
+        # known; the hook still reads the index of the repository the commit runs in.
+        repo = _untokenised_commit_dir(cmd or "", cwd)
+        return (True, repo, []) if repo is not None else (False, None, [])
     _targets, commands = _walk(cmd, cwd)
     stages: list[tuple[str, str, list[str]]] = []
     for w, base in commands:
@@ -631,6 +633,79 @@ def commit_plan(cmd: str, cwd: str) -> tuple[bool, str | None, list[tuple[str, s
                 stages.append((d, "tracked", specs))
             return True, d, stages
     return False, None, []
+
+
+def _head_segments(head: str) -> list[str]:
+    """`head` split at `;`, `&&`, `||`, `|`, `&`, `(`, `)` and newlines outside quotes. The
+    head ends before the first `$(` / `<<`, so a quote it leaves open simply runs to its end."""
+    segs, cur, q, k = [], [], None, 0
+    while k < len(head):
+        ch = head[k]
+        if q is None and ch == "\\" and k + 1 < len(head):
+            cur.append(head[k:k + 2])
+            k += 2
+            continue
+        if q is not None:
+            if ch == q:
+                q = None
+            elif ch == "\\" and q == '"' and k + 1 < len(head):
+                cur.append(head[k:k + 2])
+                k += 2
+                continue
+        elif ch in "'\"":
+            q = ch
+        elif ch in ";&|()\n":
+            segs.append("".join(cur))
+            cur = []
+            k += 1
+            continue
+        cur.append(ch)
+        k += 1
+    segs.append("".join(cur))
+    return segs
+
+
+def _untokenised_commit_dir(cmd: str, cwd: str) -> str | None:
+    """The directory a `git … commit` COMMAND in an untokenisable `cmd` runs in, else None.
+
+    AS-18 scope (1.22.1): the fallback used to match `git … commit` ANYWHERE, so a PR body or
+    a heredoc that merely mentioned "every git commit" was read as a commit in cwd. Only the
+    text before the first `$(` / `<<` opener is command text here — everything after it may be
+    a heredoc body or a quoted argument. A commit counts only at a segment start (after env
+    assignments / prefixes and `git -C <dir>` / `-c k=v`); a preceding `cd <dir>` segment and
+    `-C <dir>` name the repository whose index the hook must read, not the payload's cwd.
+    """
+    if not _COMMIT_WORDS.search(cmd):
+        return None
+    m = _OPENER.search(cmd)
+    head = cmd[:m.start()] if m else cmd
+    here: str | None = cwd
+    for seg in _head_segments(head):
+        words = [next(g for g in mt.groups() if g is not None)
+                 for mt in _LOOSE_WORD.finditer(seg)]
+        while words and words[0] in _SEGMENT_KEYWORDS:
+            words = words[1:]
+        if not words or words[0].startswith("#"):
+            continue
+        words, chdir = _strip_prefixes(words)
+        if not words:
+            continue
+        if words[0] == "cd":
+            target = words[1] if len(words) > 1 else "~"
+            here = None if target == "-" else _resolve(target, here)
+            continue
+        r, sub, _args = _git_sub(words)
+        if sub != "commit":
+            continue
+        base = here if chdir is None else _resolve(chdir, here)
+        d = base if r is None else _resolve(r, base)
+        # A directory this cannot name (`cd -`, a `$VAR`, a path that does not exist) falls
+        # back to the payload's cwd: checking the wrong index is the lesser failure than
+        # checking none, and guard.sh applies the same fallback to a repo that is not a dir.
+        if d is None or not os.path.isdir(d):
+            return cwd
+        return os.path.normpath(d)
+    return None
 
 
 def staged_by_command(stages: list[tuple[str, str, list[str]]]) -> list[str]:

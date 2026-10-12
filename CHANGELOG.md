@@ -1,3 +1,34 @@
+## v1.22.1 — the AS-18 commit fallback reads only a command
+
+Patch from a re-certification reading of 1.22.0 (`517b4b6`).
+
+**A PR body that mentions `git commit` is no longer a commit.** When a Bash command does not
+tokenise (an odd-quote heredoc), 1.22.0's AS-18 fallback in `bash_writes.py` counted the
+payload as a commit if `git … commit` appeared ANYWHERE in it — so `gh pr create --body
+"$(cat <<'EOF' … every git commit … a 12" display … EOF)"` with a guarded file staged and no
+lease was refused with "this commit … stages a guarded file". The fallback now reads only the
+text before the first `$(` / `<<` opener, split into segments outside quotes, and counts a
+commit only where a segment starts with `git … commit` (after env assignments, the usual
+prefixes and `git -C <dir>` / `-c k=v`). A heredoc body, a quoted argument or a comment is
+not a command.
+
+**The fallback checks the repository the commit runs in.** `git -C <dir> commit …` and
+`cd <dir> && git commit …` now name that repository's index, not the payload's cwd. A
+directory it cannot name (`cd -`, a `$VAR`, a path that does not exist) falls back to cwd,
+as `guard.sh` already did for a repo that is not a directory.
+
+- `test/coordination_test.py`: case "the untokenisable commit fallback reads only a git
+  commit command" — **52 cases**. Against `517b4b6`, watched failing: the PR body exits 2
+  (want 0); `git -C <other> commit` with the guarded file staged only in cwd exits 2 (want 0)
+  and with it staged only in `<other>` exits 0 (want 2); `cd <other> && git commit` the same
+  (0, want 2). The existing odd-quote `git commit -m "$(cat <<'EOF'…)"` case stays exit 2.
+- `references/hooks.md` "A commit" states the fallback. README's `scheduledIntervalSeconds`
+  row and the ledger's S9 row describe the held-too-long notice as one JSON object:
+  `systemMessage` for the person, `hookSpecificOutput.additionalContext` for the model.
+- Not covered, by design of the spec: in an untokenisable command, a `git commit` that comes
+  AFTER the first `$(` / `<<` (e.g. after a heredoc that writes a file) is not seen — the
+  same fail-open 1.22.0 had before AS-18 for that shape.
+
 ## v1.22.0 — coordination that Fabric and Observatory can lean on
 
 Integration wave 3 of the family's 2026-10-11 waves run (hub plan R17–R22), and two fix

@@ -362,7 +362,7 @@ through and `release` restores exactly what was there, so one fact keeps one hom
 | `mirror` | which git files are rendered into the read-only mirror |
 | `integrationBranch` | where work lands and the only branch a claim is written on (default: the repo's own) |
 | `mergeLog` | `file` and `retentionDays` for the merge log (default `docs/MERGES.md`, 7) |
-| `scheduledIntervalSeconds` | the interval (integer, ≥ 60 — `check` enforces it) of a scheduled job that stands aside while a lease is held (Observatory's tick); `status`, and the guard once per lease as a `systemMessage`, warn when this run has held one longer. Absent: no warning |
+| `scheduledIntervalSeconds` | the interval (integer, ≥ 60 — `check` enforces it) of a scheduled job that stands aside while a lease is held (Observatory's tick); `status`, and the guard once per lease as one JSON object (`systemMessage` for the person, `hookSpecificOutput.additionalContext` for the model), warn when this run has held one longer. Absent: no warning |
 
 `.env.agent-sync` — gitignored, mode 600. It is looked for in this repository, then in
 each **superproject** above it (so one credentials file serves a tree of submodules), and
