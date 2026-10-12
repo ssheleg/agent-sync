@@ -492,6 +492,91 @@ def find_env_file(root: Path) -> Path | None:
     return None
 
 
+VAULT_REEXEC = "AGENT_SYNC_VAULT_REEXEC"
+VAULT_SECRET = "AGENT_SYNC_NOTION_TOKEN"
+VAULT_SLOT_CACHE_S = 3600
+# Where the record-plane token came from in this process: "env", "vault", "file" or None.
+TOKEN_SOURCE: str | None = None
+
+
+def vault_reexec_argv(backend: str, environ: dict[str, str], argv: list[str], python: str,
+                      script: str, use_secret: str | None, project: str,
+                      slot_exists: bool) -> list[str] | None:
+    """The command to re-run under the Observatory vault, or None (R20). Pure.
+
+    The record-plane token was read from a plaintext `.env.agent-sync` — fifteen of them
+    under one operator's `~/DATA` — while the machine's rule is vault-only. The value cannot
+    be fetched into this process without passing through something printable, so the tool
+    re-runs itself under `use_secret.py run --vault-only`, which puts the value in the
+    child's ENVIRONMENT and scrubs it from what the child prints. The value never reaches
+    argv. Only when every condition holds: the backend needs the token, nothing set it
+    explicitly, this is not already the re-run, the engine is installed, and the vault has
+    the slot. Otherwise the file is the fallback, reported as degraded.
+    """
+    if backend != "notion" or environ.get(VAULT_SECRET) or environ.get(VAULT_REEXEC):
+        return None
+    if not use_secret or not slot_exists:
+        return None
+    return [python, use_secret, "run", "--vault-only", project, VAULT_SECRET, "--",
+            python, script] + list(argv)
+
+
+def _observatory_use_secret() -> str | None:
+    try:
+        out = subprocess.run(["project-observatory", "full-path"], capture_output=True,
+                             text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path = Path(out.stdout.strip()) / "tools" / "use_secret.py"
+    return str(path) if out.returncode == 0 and path.is_file() else None
+
+
+def _vault_slot_exists(root: Path, use_secret: str, project: str) -> bool:
+    """`use_secret.py where --vault-only` answers 0 when the slot resolves — cached an hour,
+    because hooks run this tool on every edit and the check is a process spawn."""
+    cache = root / STATE_DIR / "vault-slot.json"
+    try:
+        c = json.loads(cache.read_text())
+        if c.get("project") == project and time.time() - float(c.get("at", 0)) < VAULT_SLOT_CACHE_S:
+            return bool(c.get("exists"))
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        r = subprocess.run([sys.executable, use_secret, "where", "--vault-only", project, VAULT_SECRET],
+                           capture_output=True, text=True, timeout=10)
+        exists = r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"project": project, "exists": exists, "at": time.time()}))
+    except OSError:
+        pass
+    return exists
+
+
+def _maybe_reexec_under_vault(root: Path, file_backend: str | None) -> None:
+    global TOKEN_SOURCE
+    if os.environ.get(VAULT_SECRET):
+        TOKEN_SOURCE = "vault" if os.environ.get(VAULT_REEXEC) else "env"
+        return
+    backend = os.environ.get("AGENT_SYNC_BACKEND") or file_backend or ""
+    if backend != "notion" or os.environ.get(VAULT_REEXEC):
+        return
+    use_secret = _observatory_use_secret()
+    if not use_secret:
+        return
+    project = root.name
+    argv = vault_reexec_argv(backend, dict(os.environ), sys.argv[1:], sys.executable,
+                             os.path.abspath(__file__), use_secret, project,
+                             _vault_slot_exists(root, use_secret, project))
+    if argv:
+        os.environ[VAULT_REEXEC] = "1"
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(argv[0], argv)
+
+
 def load_env_file(root: Path) -> None:
     """Read .env.agent-sync into the environment when it is not already there.
 
@@ -506,21 +591,29 @@ def load_env_file(root: Path) -> None:
     how it was invoked. An already-set variable always wins: explicit beats implicit,
     and an operator overriding a value for one command must not be undone here.
     """
+    global TOKEN_SOURCE
     path = find_env_file(root)
-    if path is None:
-        return
-    try:
-        text = path.read_text()
-    except OSError:
-        return
+    text = ""
+    if path is not None:
+        try:
+            text = path.read_text()
+        except OSError:
+            text = ""
+    pairs = []
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
+        pairs.append((key.strip(), value.strip().strip('"').strip("'")))
+    # R20: the vault is asked BEFORE the plaintext file can supply the token. An explicitly
+    # set variable still wins over both — explicit beats implicit, as below.
+    _maybe_reexec_under_vault(root, dict(pairs).get("AGENT_SYNC_BACKEND"))
+    for key, value in pairs:
         if key and value and key not in os.environ:
             os.environ[key] = value
+            if key == VAULT_SECRET:
+                TOKEN_SOURCE = "file"
 
 
 def load_config(root: Path) -> dict[str, Any]:
@@ -535,6 +628,45 @@ def load_config(root: Path) -> dict[str, Any]:
         return json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise Fail(f".claude/agent-sync.json is not valid JSON: {exc}") from exc
+
+
+def id_width(text: str, reg: str, default: int = 4) -> int:
+    """The register's own zero-padding, read from the ids already in it (AS-08).
+
+    Four digits were hardcoded, so a three-digit register (`CO-051`) was handed `CO-0051`
+    and every id it had was reported as a permanent phantom leak. The widest id in the
+    file decides; an empty register keeps the old default.
+    """
+    widths = [len(m) for m in re.findall(r"\b" + re.escape(reg) + r"-(\d+)\b", text)]
+    return max(widths) if widths else default
+
+
+def format_id(reg: str, value: int, width: int = 4) -> str:
+    return f"{reg}-{value:0{width}d}"
+
+
+def id_present(text: str, reg: str, value: int) -> bool:
+    """Whether `reg-<value>` appears at ANY zero-padding, as a whole id (AS-08)."""
+    return re.search(r"\b" + re.escape(reg) + r"-0*" + str(int(value)) + r"\b", text) is not None
+
+
+def _rid_from(text: str) -> str:
+    """A run id for a key, unique per key (R17, Observatory DECISIONS.md:2024).
+
+    The id was the first twelve `[a-z0-9]` characters of the key, so two keys sharing a
+    prefix — `observatory-tick-1` and `observatory-tick-2`, or any two ids a caller builds
+    from a common stem — were ONE run: the second process won a lease the first still held,
+    and the first's release then "succeeded" against a lease that was no longer its own.
+
+    A key that fits in twelve characters is kept whole, because it cannot collide and the
+    readable id is what `status` and the journal show. A longer one keeps six readable
+    characters and spends six on a digest of the WHOLE key, so keys that differ anywhere
+    differ here. Ids already stamped in a marker are read back unchanged.
+    """
+    flat = re.sub(r"[^a-z0-9]", "", text.lower())
+    if len(flat) <= 12:
+        return "r-" + flat
+    return "r-" + flat[:6] + hashlib.sha256(text.encode("utf-8")).hexdigest()[:6]
 
 
 def _session_key() -> tuple[str, str]:
@@ -627,7 +759,7 @@ def run_id(root: Path) -> str:
     """
     key, _how = _session_key()
     if key.startswith("env:"):
-        return "r-" + re.sub(r"[^a-z0-9]", "", key[4:].lower())[:12]
+        return _rid_from(key[4:])
 
     marker = root / STATE_DIR / "run-id"
     data: dict[str, Any] = {}
@@ -651,7 +783,7 @@ def run_id(root: Path) -> str:
         rid = entry["run"]
     else:
         session = os.environ.get("CLAUDE_SESSION_ID") or ""
-        rid = ("r-" + re.sub(r"[^a-z0-9]", "", session.lower())[:12]) if session else \
+        rid = _rid_from(session) if session else \
               "r-%06x%s" % (random.getrandbits(24), format(int(time.time()) & 0xFFF, "03x"))
         data["runs"][key or "shared"] = {"run": rid, "seen": now_iso()}
 
@@ -1371,6 +1503,40 @@ def claim_marker_re(template: str) -> "re.Pattern[str] | None":
     return re.compile(re.escape(head) + r"(?P<holder>[^|\s]+)" + re.escape(tail))
 
 
+LONG_EXPIRED_DAYS = 7
+
+
+def long_held(ages: dict[str, float], interval: int | None) -> list[tuple[str, float]]:
+    """Leases held longer than the repository's scheduled interval (R19).
+
+    Observatory's scheduled tick stands aside while any lease is held, so a session that
+    keeps one for hours makes every tick in that window a no-op — measured as a ledger
+    gone stale (project-observatory DECISIONS.md:12874). `scheduledIntervalSeconds` in the
+    config names that interval; without it there is nothing to compare against and nothing
+    is reported. Ages come from the lock's `since` (written at acquire, kept by renew), or
+    from `ts` on a lock written before `since` existed — which can only under-report.
+    """
+    if not interval or interval <= 0:
+        return []
+    return sorted(((k, a) for k, a in ages.items() if a > interval), key=lambda kv: -kv[1])
+
+
+def long_expired(entries: list[dict[str, Any]], older_than_s: int) -> list[dict[str, Any]]:
+    """Residue past every reasonable explanation (AS-11). Not Fabric's `abandoned`, which is a
+    claim whose OWNER reported an unrecoverable failure — this is time alone.
+
+    An expired lease carries no right — `renew` walks `held()`, which never returns one, and
+    `acquire` takes the key over — so what remains is a file, and M-50 keeps a RUN from
+    deleting a file it cannot prove is its own. `reap --long-expired` is the swept form of the
+    operator decision `--i-own-this` already is: the keys are the ones expired longer than
+    `older_than_s`, it is never automatic, it prints and journals each payload it removes,
+    and a live lease or one whose expiry cannot be established is never in the list.
+    """
+    return [e for e in entries
+            if e.get("state") != LIVE and e.get("expired_for") is not None
+            and e["expired_for"] >= older_than_s]
+
+
 def classify_lock(key: str, raw: str, *, rid: str, identity_is_strong: bool,
                   repo: str, host: str, default_ttl: int, at: float) -> dict[str, Any]:
     """One lock file, read as a live lease or as one of three kinds of residue.
@@ -1864,7 +2030,8 @@ class Sync:
                 return False, held.get("run")
 
         payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name(), "host": platform.node()})
+                              "repo": repo_name(), "host": platform.node(),
+                              "since": now_iso()})
         empty_tree = git("hash-object", "-t", "tree", os.devnull)
         # A lease object is plumbing, not authorship, so it must not depend on the
         # machine having a git identity. Without these `-c` flags `commit-tree`
@@ -2347,7 +2514,8 @@ class Sync:
         # had one fewer way to refuse, on 25 of the 25 locks this family had on disk
         # (2026-08-20). Absent stays legal: locks written before this line exist.
         payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),
-                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node()})
+                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node(),
+                              "since": now_iso()})
 
         # A lease another run took under 1.21.2's lock name is still that run's: the
         # upgrade must not hand the same key out a second time under the new name.
@@ -3016,6 +3184,25 @@ class Sync:
                 e["why"] = (f"the tag names run {e['holder']} while the live lease for "
                             f"`{e['key']}` is held by {holder}")
             out.append(e)
+        return out
+
+    def held_ages(self) -> dict[str, float]:
+        """Seconds each held lease has been held, from its `since` (or `ts`) — R19."""
+        d = self.root / STATE_DIR / "leases"
+        held = set(self.held())
+        out: dict[str, float] = {}
+        now = time.time()
+        for q in sorted(d.glob("*.lock") if d.exists() else []):
+            try:
+                h = json.loads(q.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            key = h.get("key") or q.stem
+            if key not in held or h.get("run") != self.rid:
+                continue
+            t = parse_iso_or_none(str(h.get("since") or h.get("ts") or ""))
+            if t is not None:
+                out[key] = max(0.0, now - t)
         return out
 
     def held(self) -> list[str]:
@@ -4183,7 +4370,7 @@ class Sync:
         ]
         leaks = self._leaks(res_events)
         lines += ["", "## Reserved ids not found in git", ""]
-        lines += ([f"- `{r}-{v:04d}` reserved by {run}" for r, v, run in leaks]
+        lines += ([f"- `{self.fmt_id(r, v)}` reserved by {run}" for r, v, run in leaks]
                   or ["- none"])
 
         findings = self.reconcile()
@@ -4194,6 +4381,15 @@ class Sync:
             lines.append(f"- {n}")
         return "\n".join(lines) + "\n"
 
+    def _register_text(self, reg: str) -> str:
+        spec = (self.cfg.get("idRegisters") or {}).get(reg) or {}
+        path = self.root / spec["file"] if spec.get("file") else None
+        return path.read_text() if path and path.exists() else ""
+
+    def fmt_id(self, reg: str, value: int) -> str:
+        """`CO-051` in a three-digit register, `B-0051` in a four-digit one (AS-08)."""
+        return format_id(reg, value, id_width(self._register_text(reg), reg))
+
     def _leaks(self, events: list[dict[str, str]]) -> list[tuple[str, int, str]]:
         out = []
         for reg, spec in (self.cfg.get("idRegisters") or {}).items():
@@ -4201,7 +4397,7 @@ class Sync:
             path = self.root / spec["file"]
             text = path.read_text() if path.exists() else ""
             for run, value in assignments:
-                if f"{reg}-{value:04d}" not in text:
+                if not id_present(text, reg, value):
                     out.append((reg, value, run))
         return out
 
@@ -4375,6 +4571,13 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"  record plane   : {ad.name}"
           f"{'' if ad.is_lease_authority else ' — local only, not shared between machines'}")
     print(f"  lease          : {s.lease_mode} — {headline}")
+    if TOKEN_SOURCE == "file":
+        print(f"  token          : degraded: plaintext token file {ENV_FILE} — move it to the "
+              f"Observatory vault:\n    python \"$(project-observatory full-path)/tools/vault.py\" "
+              f"put {s.root.name} local {VAULT_SECRET}   (a protected file on stdin), then "
+              f"delete the line from {ENV_FILE}")
+    elif TOKEN_SOURCE in ("vault", "env"):
+        print(f"  token          : from the {'Observatory vault' if TOKEN_SOURCE == 'vault' else 'environment'}")
     print(f"  runs recorded  : {'gated' if s.gated else 'UNGATED'}")
     print(f"  run id         : {s.rid}")
 
@@ -4398,6 +4601,14 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(f"\n✗ {exc}")
         return 1
     print(f"  leases held    : {', '.join(held) if held else 'none'}")
+    try:
+        interval = int(s.cfg.get("scheduledIntervalSeconds") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    for key, age in long_held(s.held_ages(), interval):
+        print(f"  ⚠ held too long: {key} for {since(int(age))} — longer than this repository's "
+              f"scheduled interval ({since(interval)}).\n    Scheduled jobs stand aside while "
+              "it is held; release it between batches.")
 
     # A run produces more than a diff, and what it leaves behind has to be reported by the
     # command every session runs. Until this line existed, `status` printed `leases held:
@@ -4411,6 +4622,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
     else:
         print(f"  expired locks  : {len(stale)} — {len(reapable)} this run's to clear, "
               f"{len(left_alone)} left alone")
+        gone = long_expired(stale, LONG_EXPIRED_DAYS * 86400)
+        if gone:
+            print(f"  long expired   : {len(gone)} expired more than {LONG_EXPIRED_DAYS} days ago "
+                  "— review: agent_sync.py reap --long-expired")
         print("\n  Expired leases still on disk. Nobody holds these: the TTL ended the "
               "lease\n  and left the file.")
         # Age splits the list, because age is what decides whether a line is news.
@@ -4713,7 +4928,7 @@ def cmd_reserve(args: argparse.Namespace) -> int:
         print(s.reserve_offline(args.register))
         return 0
     value = s.reserve(args.register, rkey=getattr(args, "rkey", None))
-    print(f"{args.register}-{value:04d}")
+    print(s.fmt_id(args.register, value))
     return 0
 
 
@@ -4823,6 +5038,9 @@ def cmd_residue(_args: argparse.Namespace) -> int:
 def cmd_reap(args: argparse.Namespace) -> int:
     """Clear this run's spent locks, and verify the teardown by reading the state again."""
     s = Sync()
+    if getattr(args, "long_expired", False):
+        return _reap_long_expired(s, int(getattr(args, "older_than_days", None) or LONG_EXPIRED_DAYS),
+                               bool(getattr(args, "apply", False)))
     if getattr(args, "own", False):
         return _reap_by_operator_decision(s, args.keys)
     result = s.reap(args.keys or None)
@@ -4876,7 +5094,40 @@ def cmd_reap(args: argparse.Namespace) -> int:
     return 1 if (result["remaining"] or result["refused"] or git_bad) else 0
 
 
-def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
+def _reap_long_expired(s: "Sync", days: int, apply: bool) -> int:
+    """`reap --long-expired` — AS-11: the sweep with an owner, never automatic.
+
+    Selects every lock, on both planes, expired more than `days` days ago (`long_expired()`),
+    prints them, and with `--apply` clears them through `_reap_by_operator_decision` — the
+    same refusals (live, unreadable), the same printed payload and the same journal line,
+    so a swept removal is exactly as auditable as a named one. Without `--apply` it only
+    lists: the default is the read.
+    """
+    if days < 1:
+        print("  --older-than-days must be at least 1", file=sys.stderr)
+        return 2
+    entries = list(s.residue())
+    if s.lease_mode == "git":
+        refs, why = s.git_residue()
+        if why is not None:
+            print(f"  ⚠ the git plane could not be read ({why}) — only the lock directory "
+                  "was swept.", file=sys.stderr)
+        entries += refs
+    gone = long_expired(entries, days * 86400)
+    if not gone:
+        print(f"  nothing expired more than {days} day(s) ago — nothing to sweep")
+        return 0
+    keys = sorted({e["key"] for e in gone})
+    for e in gone:
+        print(f"  · {e['key']} [{e.get('plane', 'fs')}] run {e.get('run') or '—'} · {spent(e)}")
+    if not apply:
+        print(f"\n  {len(keys)} key(s) expired more than {days} day(s) ago. Nothing was removed; "
+              "clear them with:\n    agent_sync.py reap --long-expired --apply")
+        return 0
+    return _reap_by_operator_decision(s, keys, why=f"long expired (> {days}d)")
+
+
+def _reap_by_operator_decision(s: "Sync", keys: list[str], why: str = "--i-own-this") -> int:
     """`--i-own-this` — the one path that clears state no RUN can prove is its own.
 
     AS-01b. The classifier is right to refuse: a run whose identity is the shared fallback
@@ -5001,11 +5252,11 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
                           "verified, whatever the call returned", file=sys.stderr)
                     rc = 1
                     continue
-            print(f"  cleared {e['key']} [{plane}] by operator decision — it held {had}")
+            print(f"  cleared {e['key']} [{plane}] by operator decision ({why}) — it held {had}")
             print(f"    the classifier called it `{e['state']}`, and that has not changed: this "
                   "was a person's\n    call, not a proof of ownership.")
             try:
-                s.journal(f"reap --i-own-this {e['key']} [{plane}] — was {had}, "
+                s.journal(f"reap {why} {e['key']} [{plane}] — was {had}, "
                           f"classified {e['state']}")
             except Exception:                            # noqa: BLE001 - the record plane is optional
                 pass
@@ -5072,7 +5323,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     if getattr(args, "set_baseline", False):
         stamped = s.set_baseline()
         for reg, top in stamped.items():
-            print(f"baseline {reg} = {reg}-{top:04d} — ids after this must carry an as-built record")
+            print(f"baseline {reg} = {s.fmt_id(reg, top)} — ids after this must carry an as-built record")
         return 0
     findings = s.reconcile()
     print("Intent (git) vs as-built (coordination plane)\n")
@@ -6236,6 +6487,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="clear the NAMED expired locks even though this run cannot prove "
                          "they are its own — an operator's decision, per key, recorded. "
                          "Refuses a live lease and refuses to run with no key.")
+    rp.add_argument("--long-expired", action="store_true",
+                    help="list locks on both planes expired more than --older-than-days "
+                         f"(default {LONG_EXPIRED_DAYS}); with --apply, clear them as an "
+                         "operator decision, each printed and journaled")
+    rp.add_argument("--older-than-days", type=int, dest="older_than_days")
+    rp.add_argument("--apply", action="store_true")
     rp.set_defaults(fn=cmd_reap)
 
     g = sub.add_parser("guard", help="may this run write that path? exit 2 = no")

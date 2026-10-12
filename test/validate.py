@@ -28,6 +28,7 @@ from pathlib import Path
 # a validator run must not leave build products in a tree people read as source (ASY-01).
 sys.dont_write_bytecode = True
 
+DESC_CAP = 970  # family house cap (audit_skill.py --house DESC_HEADROOM), AS-10
 ROOT = Path(__file__).resolve().parent.parent
 
 # Hosts a published file may legitimately name. Anything else is treated as an
@@ -124,8 +125,12 @@ def check_skill(skill_dir: Path) -> str | None:
     if not isinstance(desc, str) or not desc:
         err(f"{rel(md)}: description missing")
     else:
-        if len(desc) > 1024:
-            err(f"{rel(md)}: description is {len(desc)} chars, cap is 1024")
+        # 970, not the spec's 1024: CI runs the family auditor (`audit_skill.py --house`,
+        # DESC_HEADROOM), and a gate looser than CI's says green on a release CI then
+        # refuses — measured at 1017 chars on 2026-08-31 (AS-10).
+        if len(desc) > DESC_CAP:
+            err(f"{rel(md)}: description is {len(desc)} chars, cap is {DESC_CAP} "
+                "(the family house cap; the spec allows 1024)")
         if not desc.startswith("Use when"):
             err(f"{rel(md)}: description must start with 'Use when'")
         if not re.search(r"[а-яА-ЯёЁ]", desc):
@@ -3856,6 +3861,10 @@ def self_test() -> int:
         # The exact value that shipped 0.1.0 → 1.20.2, which Codex clamps with a warning.
         "SessionEnd timeout a host clamps": ("plugins/agent-sync/hooks/hooks.json",
                                              lambda t: t.replace('"timeout": 3\n', '"timeout": 20\n', 1)),
+        # AS-10: between the house cap and the spec cap — the band the old gate passed.
+        "description between house and spec cap": (
+            "plugins/agent-sync/skills/agent-sync/SKILL.md",
+            lambda t: t.replace('description: "Use when', 'description: "Use when' + "x" * 40, 1)),
         "description over cap": ("plugins/agent-sync/skills/agent-sync/SKILL.md",
                                  lambda t: t.replace("description: \"Use when",
                                                      "description: \"" + "x" * 1100 + " Use when")),
