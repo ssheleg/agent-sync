@@ -186,10 +186,9 @@ npx sshlg-skills install
 | `scaffold [--full]` | Create only what is missing, never a line over what exists. `--full` also seeds the question register, index, dependency board, data model and docs gate |
 | `finish [--gates]` | Is the **work** finished — every repository clean, pushed and pointed at, nothing left held. `check` answers whether the project is wired right; this, whether you are done |
 
-Resolve `$SKILL_DIR` from the active `SKILL.md` location; confirm its
-`scripts/agent_sync.py` exists. `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` is a
-Claude text substitution, not a Bash environment guarantee. Reuse the absolute
-path; project config remains `.claude/agent-sync.json` on every host.
+Resolve `$SKILL_DIR` from the active `SKILL.md` location and reuse the absolute path;
+`${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` is a Claude text substitution, not a Bash
+environment guarantee.
 
 ## One identity per session, and how it is decided
 
@@ -236,15 +235,15 @@ A denial names the other run **and its key**, because "r-x holds a lease" beside
 repeated as "r-x holds this file". Do not edit anyway, and do not "just fix one line" — a
 clobbered decision looks exactly like a decision.
 
-**A task lease authorizes the TASK, never the file**, so a guarded write also takes the
-FILE's resource claim (`res--<repo>--<canonical path>`, SY-04): two agents on one registry
-serialize on it, independent files never do — cross-machine only under
-`leaseBackend: "git"`. Where writes overlap so heavily a lock would queue everyone, use
-isolated worktrees and `merge` instead.
+**Two write modes.** A task lease authorizes the TASK, never the file, so a guarded write
+also takes the FILE's **resource claim** (`res--<repo>--<canonical path>`, SY-04) — the
+**short transaction lock**: one registry serializes, independent files never do;
+cross-machine only under `leaseBackend: "git"`. Heavy overlap: **isolated worktree + merge**.
+What the guard does NOT promise is enforcement from a single task owner.
 
-The shipped Claude `PreToolUse` adapter runs this in the file's owning repo for an
-Edit/Write, a `git commit`, and a Bash write parsed by `scripts/bash_writes.py` — a
-parser, not a sandbox. Without a verified adapter, run it explicitly.
+The shipped `PreToolUse` adapter runs this in the owning repo for an Edit/Write, a
+`git commit` (with what the same command stages) and a Bash write parsed by
+`scripts/bash_writes.py` — a parser, not a sandbox. No verified adapter: run it yourself.
 
 ## Reserving an id
 
@@ -300,8 +299,7 @@ a superproject, or at `AGENT_SYNC_ENV` — `check` prints which. The tool reads 
 do not `source` it. **A `notion` token belongs in the Observatory vault** (1.22.0) — `init`
 prints the `vault.py put` line; record-plane commands re-run under
 `use_secret.py run --vault-only`, and the guard never asks the vault. `outline` keeps the
-token in the file. `scheduledIntervalSeconds` names a scheduled job's interval; `status`
-warns when a lease is held longer.
+token in the file. `scheduledIntervalSeconds` (≥ 60): a lease held longer is warned once.
 
 Never write a host name or token into the config, a test, an example or a commit; never
 handle, echo or `argv`-pass a token value. Offered one in chat, point at that file instead.

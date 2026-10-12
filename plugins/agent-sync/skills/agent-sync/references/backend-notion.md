@@ -139,14 +139,19 @@ AGENT_SYNC_NOTION_PARENT=<the 32-character id ending the parent page's URL>
 AGENT_SYNC_NOTION_COLLECTION=<container page id, printed by `bootstrap`>
 ```
 
-Every command that touches the record plane — not `guard`, `whoami` or the Bash-write
-parse — asks `use_secret.py where --vault-only`, then probes `use_secret.py run` with a
-child that does nothing (`run` checks the grant, `where` does not), and only then re-runs
-itself under `run`, so the value is in the child's environment and never in argv. A
-refusal is reported by `status` and the command carries on without the vault. A positive
-`where` is cached for an hour in `.agent-sync/vault-slot.json`; a negative is reused only
-while the file still holds a token, so a slot created after deleting that line is seen at
-once.
+Every command that touches the record plane — not `guard`, `whoami`, `renew`, SessionEnd's
+`release --held` or the Bash-write parse — asks `use_secret.py where --vault-only`, then
+probes `use_secret.py run` with a child that does nothing (`run` checks the grant, `where`
+does not), and only then re-runs itself under `run`, so the value is in the child's
+environment and never in argv. The question is settled once per process, before any child
+starts. A refusal is reported by `status` and the command carries on without the vault.
+`renew` and `release --held` stay out because the lease they act on is a local lock or a
+git ref: the token would add one visibility line in the claims log (still published when
+the token is in the file), at the price of audit rows after every tool call and of
+SessionEnd's 2 s. In `.agent-sync/vault-slot.json`, a positive `where` and a passing `run`
+probe are cached for an hour; a missing slot and a refused probe for a minute (or, for the
+slot, the hour while the file still holds a token), so a slot or grant created later is
+seen within a minute.
 
 **Without Observatory** the token line in `.env.agent-sync` still works, and `status`
 says `degraded: plaintext token file`. Do not `source` the file: a token in the shell's

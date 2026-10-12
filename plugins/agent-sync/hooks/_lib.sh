@@ -2,9 +2,22 @@
 # Shared helpers for the agent-sync hooks. Sourced, never executed.
 
 # Every hook runs python3 against the shipped scripts/ directory, which people read
-# as source, not as a build product. Bytecode caching buys nothing at this call rate
-# and left scripts/__pycache__ regenerating forever (ASY-01).
-export PYTHONDONTWRITEBYTECODE=1
+# as source, not as a build product: bytecode written beside the scripts left
+# scripts/__pycache__ regenerating forever (ASY-01). It goes to a cache directory OUTSIDE
+# the tree instead. Disabling it outright cost a full compile of the 7,000-line coordinator
+# on every guarded write (~50 ms of a ~170 ms guard call, measured 2026-10-12, seam S5).
+# No HOME, no cache directory to name: no bytecode at all, as before.
+if [ -n "${XDG_CACHE_HOME:-}${HOME:-}" ]; then
+  export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/agent-sync/pycache"
+else
+  export PYTHONDONTWRITEBYTECODE=1
+fi
+# A bytecode write that cannot happen must not kill the interpreter. On a full disk Python
+# gets ENOSPC and carries on; under a file-size limit the kernel sends SIGXFSZ instead, whose
+# default action is to terminate — the guard's parser died and the guard failed closed
+# ("the guard needs no temp file to allow a harmless command", `ulimit -f 0`). Ignored, the
+# write returns EFBIG, which Python ignores too. Children inherit the ignored disposition.
+trap '' XFSZ 2>/dev/null || true
 
 # Run a command under a time limit, portably.
 #

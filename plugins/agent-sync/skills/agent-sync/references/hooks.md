@@ -83,16 +83,31 @@ session start). Moving it into the handler would make it real, and a real one sk
 parser in `guard.sh` was written to cover. So `guard.sh` runs on every Bash call, and
 the narrowing is its own, in two steps (1.22.0):
 
-1. **A Bash write (AS-09).** Only where the session's project is coordinated, or this
-   session holds leases in another repository, and only when the payload carries a write
-   shape (`>`, `tee`, `sed`, `cp `, `mv `), it starts `scripts/bash_writes.py` — the small
-   parser, not the coordinator — and asks `guard` about each target it prints. It
-   tokenises first and segments second, so a quoted `;` or a heredoc's body is never
-   read as a command. The shapes it reads and the ones it skips are listed in the
+0. **No interpreter for a Bash call that writes nothing and commits nothing.** The hook
+   recognises a Bash payload by its `tool_name` without starting python (a Bash call has
+   no file path to extract), so `ls` costs a bash start and nothing else.
+1. **A Bash write (AS-09).** In EVERY session — gated on the repository that owns each
+   target, not on the session's project (fix round 2, seam S8) — and only when the payload
+   carries a write shape (a `>` anywhere, or `tee`/`sed`/`cp`/`mv` as a word, so `used` and
+   `guarantee` do not match), it starts `scripts/bash_writes.py --guarded` — the small
+   parser, not the coordinator. That resolves each target's repository by walking to its
+   `.git`, drops every target no `guardedFiles` pattern of that repository matches, and
+   prints the rest; the hook then asks `guard` ONCE per owning repository with all of its
+   targets. It tokenises first and segments second, so a quoted `;` or a heredoc's body is
+   never read as a command. The shapes it reads and the ones it skips are listed in the
    capability matrix at the top of `guard.sh`; each is a case in
    `test/coordination_test.py`.
 2. **A commit.** A payload without the substring `commit` exits 0 there without
-   starting another interpreter; otherwise the commit parser decides.
+   starting another interpreter; otherwise `bash_writes.py --commit` decides — with the
+   same tokeniser — whether it is a commit, in which repository, and which files the SAME
+   command stages before it (`git add <specs>`/`-A`/`-u`/`.`, `git commit -a`,
+   `git commit <paths>`, resolved by `git ls-files`). Those files and the index are
+   checked together, in one `guard` call (AS-16): the hook runs before the command, so
+   `git add X && git commit` used to reach the commit with X not yet in the index.
+
+When `guard` allows a write while this run holds a lease longer than the repository's
+`scheduledIntervalSeconds`, the hook prints `{"systemMessage": …}` — R19's warning, once
+per lease per run (a marker under `.agent-sync/warned/`).
 
 **Which repository decides (since v1.21.2): the one that owns the write.** For
 `Edit`/`Write`/`MultiEdit`/`NotebookEdit` that is `git -C <dirname of the path>
@@ -105,8 +120,9 @@ was, so a configured session blocked commits in repositories without a config (t
 coordinator there exits 2 for "no config", read as "no lease"), judged another
 repository's files by the session's globs, and a session rooted in an unconfigured
 project guarded nothing anywhere. The guard still fails closed when its parser (python3)
-or git cannot run, but only in a session whose own project is configured — elsewhere the
-owning repository cannot be named without them, and the hook says so in its matrix.
+or git cannot run — and when `bash_writes.py` itself fails — but only in a session whose
+own project is configured: elsewhere the owning repository cannot be named without them,
+and the hook says so in its matrix.
 
 The lifecycle hooks below act on the session's project **and, since 1.22.0, on every
 other repository this session took a lease in (AS-07).** `acquire` lists the repository
@@ -131,13 +147,22 @@ a machine where no session ever left its project pays nothing.
 ## Performance
 
 `renew.sh` runs after **every** tool call, asynchronously. It must be a no-op in the
-common case: it reads one timestamp file and returns. A session with leases in other
-repositories also starts one child process per listed repository, each the same
-throttled no-op until a renewal is due. It touches the network at most once per
-`renewIntervalSeconds` (default 300 s) per repository. With the `notion` backend and a
-vault slot, a renewal that is due re-runs under `use_secret.py run` after a no-op probe
-of it — the cost of keeping the token out of a plaintext file. If it ever becomes slower than that, the
-throttle is broken — fix the throttle rather than removing the hook.
+common case: it reads one timestamp file and returns. Its payload carries the tool's whole
+response, so it decides WITHOUT reading stdin wherever it can — an unconfigured project
+with no `~/.agent-sync/session-repos` exits at once — and otherwise reads only the first
+4 KB, where the host writes `session_id` (fix round 2, seam S6: a 2 MB Read result cost
+89 ms per tool call before, 8 ms after). A session with leases in other repositories also
+starts one child process per listed repository, each the same throttled no-op until a
+renewal is due. It touches the network at most once per `renewIntervalSeconds` (default
+300 s) per repository. `renew` and SessionEnd's `release --held` never ask the Observatory
+vault: the lease they act on is a local lock or a git ref, and the token would add only a
+visibility line in the Notion claims log (published whenever the token is in the file).
+If it ever becomes slower than that, the throttle is broken — fix the throttle rather than
+removing the hook.
+
+Hooks cache Python bytecode under `${XDG_CACHE_HOME:-~/.cache}/agent-sync/pycache`
+(`PYTHONPYCACHEPREFIX`), never beside the shipped scripts (ASY-01); with no HOME they
+write none.
 
 ## Debugging
 

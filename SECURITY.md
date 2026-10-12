@@ -21,6 +21,8 @@ Review what you are installing before you run the installer. Specifically:
 | `<project>/.claude/agent-sync.json` | created by `init`, committed, contains no secrets |
 | `<project>/.env.agent-sync` | created by `init`, mode 600, added to `.gitignore` |
 | `<project>/.agent-sync/` | run state and, in degraded mode, lease files; `vault-slot.json` caches where Observatory's `use_secret.py` is and whether this project's vault slot exists — never a value |
+| `${XDG_CACHE_HOME:-~/.cache}/agent-sync/pycache/` | since 1.22.0: the hooks' Python bytecode (`PYTHONPYCACHEPREFIX`), kept out of the shipped `scripts/` tree; regenerated at will, safe to delete. Not written when HOME is unset |
+| `<project>/.agent-sync/warned/` | since 1.22.0: a marker per (run, lease), holding the time it was written, once the guard has warned that the lease is held past `scheduledIntervalSeconds` — so it warns once |
 | `~/.agent-sync/session-repos/` | since 1.22.0 (AS-07): one `<sha256 of the session key>.json` per session that took a lease outside its own project, listing those repositories' paths so the renew and SessionEnd hooks reach them; removed when empty. A `.lock` file serialises writers. No credentials |
 
 The hooks it registers can **deny** tool calls (`PreToolUse` returning exit 2). They
@@ -28,9 +30,12 @@ never allow a call that would otherwise be denied. The lifecycle hooks exit 0
 immediately in a session whose project has no `.claude/agent-sync.json` and that holds no
 lease in another repository (a file test under `~/.agent-sync/session-repos/`); the
 guard exits 0 for any write whose owning git repository has none — there it runs only
-`git rev-parse --show-toplevel` and a test for that file's existence. In a coordinated
-session the guard also parses Bash commands for file writes (`scripts/bash_writes.py`):
-it reads the command text, executes nothing from it.
+`git rev-parse --show-toplevel` and a test for that file's existence. For a Bash call
+whose text carries a write shape the guard parses it for file writes
+(`scripts/bash_writes.py`, in every session since 1.22.0's fix round 2): it reads the
+command text, executes nothing from it, and finds each target's repository by looking for
+`.git` and `.claude/agent-sync.json` on disk. For a `git commit` it also runs
+`git ls-files` with the pathspecs the same command stages (AS-16) — reads only.
 
 ## How credentials are handled
 

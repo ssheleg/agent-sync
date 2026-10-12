@@ -11,7 +11,7 @@ contract moves, re-read it, update the pin, and re-run the test.
 
 | Contract operation | Command | Notes |
 |---|---|---|
-| `claim(workId, owner, scopes, ttl)` | `acquire` | Owner is the run id (hashed per key since 1.22.0); ttl is `leaseTtlSeconds`. Atomic: a git-ref compare-and-swap in `git` lease mode, an exclusive create in `fs`. |
+| `claim(workId, owner, scopes, ttl)` | `acquire` | Owner is the run id (hashed per key since 1.22.0); ttl is `leaseTtlSeconds`. Atomic: a git-ref compare-and-swap in `leaseBackend: git`; an exclusive create in `local` lease mode — one machine only; cross-machine exclusion needs `leaseBackend: git`. |
 | `renew(claimId, owner, ttl)` | `renew` | Only this run's LIVE leases (`held()`); an expired lease cannot be renewed. |
 | `release(claimId, owner, outcome)` | `release` | `release` takes no outcome (see the gaps); one is recorded beside it by `merge` (landed) or `journal` (stopped). `release --held` releases everything this run holds. |
 | `reserveId(namespace, owner, count, ttl)` | `reserve` | One id per call, no reservation ttl (see the gaps); `release-id` returns an unused one. Ids are printed at the register's own width. |
@@ -23,7 +23,12 @@ contract moves, re-read it, update the pin, and re-run the test.
 The contract's scopes map to `guardedFiles` in `.claude/agent-sync.json`:
 - `guard` answers whether this run may write a path (exit 2 means no).
 - The PreToolUse hook asks `guard` before every Edit/Write.
-- Bash writes are checked by the guard's command parser (1.22.0).
+- Bash writes are checked by the guard's command parser (1.22.0), in every session, for
+  every target inside a repository whose `guardedFiles` match it — the shapes it reads are
+  the capability matrix in `hooks/guard.sh`; what it cannot read is listed there as
+  UNPARSED or UNSUPPORTED and is not enforced.
+- A commit is checked against the index AND what the same command stages (`git add X &&
+  git commit`, 1.22.0 AS-16).
 
 ## Lifecycle and residue
 
@@ -41,6 +46,13 @@ and journals it. Nothing is cleared silently, as the contract requires.
 ## Not yet conformant
 
 These are said here rather than implied by the table:
+- **`claim` is atomic across machines only in `leaseBackend: git`.** In the default `local`
+  lease mode the exclusive create is a mutex between processes on ONE machine; two
+  machines on a shared or synced checkout are separated only by the lock's `host` field
+  (classified `foreign`), not by an atomic operation.
+- **Write scopes are enforced only where a hook can see the write.** A language runtime's
+  own file write, `perl -i`, `awk`, `dd` and the other UNSUPPORTED rows of `guard.sh`'s
+  matrix are outside the boundary; the contract's scope is advisory there.
 - **Idempotency key per command.** Only `reserve` takes one (`--rkey`). `acquire` is
   idempotent for its own holder, but it takes no key.
 - **Residue categories `uncommitted-files`, `unpushed-commit`, `open-pr` and

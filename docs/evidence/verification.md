@@ -8,6 +8,39 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.22.0 — fix round 2 (second blind reading of `e32c7c9`)
+
+`npm test` is `test/run_gate.py`: the five suites, every `test/audit_regressions/*.py` and
+the installer test, each with its own temporary HOME and without CLAUDE_CODE_SESSION_ID /
+CLAUDE_SESSION_ID / AGENT_SYNC_RUN_ID, then a before/after comparison of the starting
+HOME's `~/.agent-sync`. "Failed on `e32c7c9`" means `test/coordination_test.py` was run
+with `AGENT_SYNC_SCRIPT` and `AGENT_SYNC_PLUGIN` pointing at a `git archive e32c7c9
+plugins`: 19 of 50 fail — all 17 new cases (11 on an assertion, 6 with an exception) plus
+the extended parser case and the vault-cache case.
+
+| Gate | Evidence |
+|---|---|
+| FIX-SY-04.02 (CI red) | `test/audit_regressions/fix-sy-04.02.py` — "SKILL.md documents both write modes" was the failing case on `e32c7c9` (CI `validate`), passes now; the regressions run inside `npm test` |
+| Test isolation (B2, S1) | `claim_cell_test.py` "the suite never writes the HOME it was given (B2)" — with isolation removed, run on a sentinel HOME with CLAUDE_CODE_SESSION_ID=probe-1: `FAIL … the suite runs with the HOME it was given`, and the sentinel received 3 files. `run_gate.py` ends with the real-HOME comparison line |
+| B1 status label | "status names a token read from the file" — failed on `e32c7c9` (printed "from the environment") |
+| AS-16 | "git add and commit in one call is guarded" — six shapes (`git add X &&`, `-A`, `.`, `commit -am`, `commit <path>`, `cd docs && git add`) exit 2 without a lease; an unguarded add exits 0; with the lease, 0. Failed on `e32c7c9` |
+| Item 5 init text | `check_init_never_tells_the_operator_to_source_the_env_file` (validate.py) over outline, notion and fs. `e32c7c9`'s `init --backend outline` printed `set -a && . ./.env.agent-sync && set +a` (line 11 of its output) |
+| Item 6 snapshot | "the wiring snapshot names the vault first for notion" — fake allowing vault, `setup`, the vault slot line precedes "DEGRADED fallback". Failed on `e32c7c9` |
+| Risk a / S3 budget | "session end stays inside its budget under a slow vault" — two listed notion repositories, `where` sleeping 3 s: `release --held --session-repos` under 2 s, both released, the vault never called. Failed on `e32c7c9`. "the hook budget survives the vault reexec" — `_hook_started_at` and the child env |
+| Risk b | "the vault question is decided once per process" (in-process, refusal-then-allow, exec forbidden) and "a refuse then allow vault is probed once by status" (process). Both failed on `e32c7c9` |
+| S2 / risk g | "renew never asks the vault" — 10 renews, 0 `run` calls; `release --held` 0 calls. "a record plane command probes once per hour not per call" — two `residue`: one probe; a missing slot: one `where`. "a vault slot created later is seen…" — a negative reused inside the minute, asked again after it. All failed on `e32c7c9` |
+| S4 | "a host without fcntl still registers and never crashes acquire" (`sys.modules['fcntl'] = None`) — `e32c7c9` raised ImportError |
+| S5 cost | "the shell prefilter reads words not substrings", "the prefilters copy of the glob agrees with the coordinators". Interleaved A/B against `e32c7c9` (`guard.sh`, 21 rounds, load average ~45, so absolute ms are noisy and the spawn counts are the evidence): coordinated two-target redirect with the lease held 244 ms (git 2, python3 3) vs 477 ms (git 10, python3 4); redirect into unguarded files 78 ms (git 0, python3 2) vs 413 ms (git 6, python3 4); uncoordinated `ls` 39 vs 45 ms; `echo used guarantee` 39 ms (python3 1) vs 84 ms (python3 2). The <150 ms target for the lease-held case is NOT shown on this machine at this load |
+| S6 | `renew.sh` on a 2 MB PostToolUse payload, uncoordinated repository, median of 15: 8.1 ms vs 89.1 ms on `e32c7c9`; with `~/.agent-sync/session-repos` present (head read) 29.0 vs 165.2 ms |
+| S7 / risk d | "the parser reads the write shapes agents use" — `mv` source, `<<\EOF`, `<( )`/`>( )`, `cd -P/-L`, `timeout`/`nice`/`stdbuf`/`xargs`, `sed --expression=`, `env -C`/`--chdir=`, piped and backgrounded `cd`, `<>`, absolute `cp` destination with `here` unknown. Failed on `e32c7c9` |
+| S8 | "a write into a coordinated repository is checked from any session" — CLAUDE_PROJECT_DIR unconfigured, `cd <repo> && echo x > notes.md` exits 2. Failed on `e32c7c9` |
+| S9 | "a lease held too long is said once where the session sees it" — the guard prints one `systemMessage`, then nothing. `e32c7c9` printed nothing |
+| Risk c | "the main prefilter lets the tokeniser decide sed" — `sed 's/;/x/' -i f.md` through `main()`. Failed on `e32c7c9` |
+| Risk e | "only a keyless json object is flagged" — `payload_is_keyless` |
+| Risk k | "check refuses a scheduled interval below the schema minimum" — 30 refused. Failed on `e32c7c9` |
+| Self-test plants | "the guard stops seeing commits" and "a piped commit slips past the guard" re-anchored on `bash_writes.py` (the commit parser moved there) |
+| House audit | make-skill `5ca5c36` (CI's pin) and `60ca8e2` (local): `0 GAP` — description 936/970, body 4726/4750 tokens |
+
 ## v1.22.0 — coordination fixes, integration wave 3 (candidate)
 
 All rows are cases in `test/coordination_test.py` (33), run by `npm test`. "Failed on X"

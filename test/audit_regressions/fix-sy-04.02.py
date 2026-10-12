@@ -21,14 +21,18 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, __import__("os").path.dirname(
+    __import__("os").path.dirname(__import__("os").path.abspath(__file__))))
+import _sandbox  # noqa: E402 - a temp HOME and no inherited session id, before anything runs
+_sandbox.isolate()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.join(HERE, os.pardir, os.pardir, "plugins", "agent-sync", "skills",
                      "agent-sync", "SKILL.md")
 SCRIPT = os.path.join(HERE, os.pardir, os.pardir, "plugins", "agent-sync", "skills",
                       "agent-sync", "scripts", "agent_sync.py")
-STACK_DOC = os.path.expanduser(
-    "~/DATA/agent-stack/plugins/agent-stack/skills/agent-orchestrator/"
+STACK_DOC = os.path.join(_sandbox.REAL_HOME,
+    "DATA/agent-stack/plugins/agent-stack/skills/agent-orchestrator/"
     "references/memory-architecture.md")
 
 _spec = importlib.util.spec_from_file_location("agent_sync", SCRIPT)

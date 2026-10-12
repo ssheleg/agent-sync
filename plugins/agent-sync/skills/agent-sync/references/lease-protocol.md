@@ -178,13 +178,18 @@ are one note; the second is refused rather than allowed to overwrite the first.
 
 The one window left: a run still on 1.21.2 and a run on 1.21.3 taking the SAME path key
 (one with a character outside `[A-Za-z0-9._-]`) at the same moment, when neither ref
-exists yet, push to two different refs. Update every machine; task ids made of safe
+exists yet, push to two different refs. Restart every session that predates the upgrade —
+CLAUDE_PLUGIN_ROOT pins the plugin cache a session started with, so an updated machine
+still runs 1.21.2 in a session that began before the update. Task ids made of safe
 characters never had two names and are unaffected. **That window is not hypothetical**
 (AS-14, open): on 2026-10-12 the Fabric remote held
 `refs/agent-sync/leases/docs-architecture-report-workspace.md` — no `key` in its payload,
 written 2026-10-08 by `r-d8d027823`, a week after 1.21.3 shipped — beside the same path's
-1.21.3 ref `docs%2Farchitecture%2Freport-workspace.md`. Since 1.22.0 `residue` flags every
-lease ref without a `key`, which is the signal that such a writer is still alive.
+1.21.3 ref `docs%2Farchitecture%2Freport-workspace.md`. Its host is `MacBook-Pro.local`, a
+machine whose plugin cache still holds 1.21.0–1.21.2. Since 1.22.0 `residue` flags every
+lease ref whose payload is a JSON object without a `key`, with its timestamp: that dates a
+≤1.21.2 write, it does not prove the writer is still running. The drop of this window is
+the operator's decision.
 
 **`release` says `released` only after reading the remote again.** It deletes the ref
 with `--force-with-lease`, then reads it back with a strict `ls-remote`: the ref still

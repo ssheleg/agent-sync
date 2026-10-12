@@ -17,7 +17,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "python3 test/validate.py && python3 test/claim_cell_test.py && python3 test/hooks_session_test.py && python3 test/guard_uncoordinated_test.py && python3 test/coordination_test.py && node test/installer_test.js",
+    "test": "python3 test/run_gate.py",
     "test:negatives": "python3 test/validate.py --self-test",
     "test:all": "npm test && npm run test:negatives",
     "prepublishOnly": "python3 test/validate.py"

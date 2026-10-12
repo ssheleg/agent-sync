@@ -32,6 +32,9 @@ import time
 # The `import agent_sync` below compiles bytecode into the shipped scripts/ directory;
 # a test run must not leave build products in a tree people read as source (ASY-01).
 sys.dont_write_bytecode = True
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+import _sandbox  # noqa: E402 - a temp HOME and no inherited session id, before anything runs
+_sandbox.isolate()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, os.pardir, "plugins", "agent-sync", "skills", "agent-sync",
@@ -305,6 +308,28 @@ def residue_names_the_git_plane_it_read():
         f"a project with no remote must read as `could not look`, not as empty: {out}"
     assert "INCOMPLETE IN THIS MODE" not in out, \
         "still prints the half-closed disclosure over a sweep that now runs"
+
+
+def the_suite_never_writes_the_home_it_was_given():
+    """Unit B2 (2026-10-12): `cli()` passed the real HOME and the live CLAUDE_CODE_SESSION_ID
+    through, so every acquire here registered itself in the operator's
+    `~/.agent-sync/session-repos` (14 files from one run). With a session id deliberately set,
+    the acquire registers — in the sandbox HOME — and the HOME this process was started with
+    is byte-for-byte as it was."""
+    started = _sandbox.STARTED_HOME
+    before = _sandbox.agent_sync_files(started)
+    os.environ["CLAUDE_CODE_SESSION_ID"] = "probe-b2"
+    try:
+        d = project(["| B-77 | a thing | open |\n"])
+        r = cli(d, "acquire", "B-77")
+        assert r.returncode == 0, r.stdout + r.stderr
+    finally:
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+    assert os.environ["HOME"] != started, "the suite runs with the HOME it was given"
+    assert _sandbox.agent_sync_files(_sandbox.HOME), \
+        "the acquire registered nowhere — this case proved nothing"
+    assert _sandbox.agent_sync_files(started) == before, \
+        f"the suite wrote into {started}/.agent-sync"
 
 
 def git_project(rows, *, run="r-other", ttl=2, ts=None, keys=("B-01",)):
@@ -591,6 +616,8 @@ CASES = [
     ("the override still refuses a live git lease", the_override_still_refuses_a_live_git_lease),
     ("an unreachable remote does not read as a missing key",
      an_unreachable_remote_does_not_read_as_a_missing_key),
+    ("the suite never writes the HOME it was given (B2)",
+     the_suite_never_writes_the_home_it_was_given),
 ]
 for n, f in CASES:
     case(n, f)

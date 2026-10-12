@@ -28,6 +28,9 @@ import importlib.util
 # The module import below compiles bytecode into the shipped scripts/ directory;
 # a test run must not leave build products in a tree people read as source (ASY-01).
 sys.dont_write_bytecode = True
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+import _sandbox  # noqa: E402 - a temp HOME and no inherited session id, before anything runs
+_sandbox.isolate()
 # These cases model a shell that knows NO session — the walk to a SessionStart stamp is what
 # they test. Run from inside Claude Code, every child would inherit the session's
 # CLAUDE_CODE_SESSION_ID, which `_session_key()` reads before the walk since 1.22.0 (AS-07),
