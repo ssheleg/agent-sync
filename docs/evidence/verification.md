@@ -40,6 +40,8 @@ the extended parser case and the vault-cache case.
 | Risk k | "check refuses a scheduled interval below the schema minimum" — 30 refused. Failed on `e32c7c9` |
 | Self-test plants | "the guard stops seeing commits" and "a piped commit slips past the guard" re-anchored on `bash_writes.py` (the commit parser moved there) |
 | House audit | make-skill `5ca5c36` (CI's pin) and `60ca8e2` (local): `0 GAP` — description 936/970, body 4726/4750 tokens |
+| Local gate (`53516c9`'s tree, 2026-10-12) | `npm test` with CLAUDE_CODE_SESSION_ID set in the calling shell: `PASS: 19 suite(s), each in its own HOME; /Users/sshlg/.agent-sync untouched (0 file(s) before and after)` — validate.py all green, claim cell 28, session hooks 15, uncoordinated guard 4, coordination 50, 13 audit regressions all green, installer 11. `python3 test/validate.py --self-test`: `SELF-TEST PASS: every injected defect was caught (75 fixtures, 8 at a time)`. Under `/usr/bin/python3` 3.9.6 (CI's floor): coordination 50, claim cell 28, every audit regression green. One earlier gate run, at load average ~60, failed "a bash acquire in a second repository is released by the real session end hook" on its last assertion (the lease released, the list not yet dropped when the 2 s hook budget ran out); the next three runs of the suite passed it |
+| CI (`53516c9`) | run 38222746461 (`pull_request`): `validate` job 114722714682 **success** — it now also runs `guard_uncoordinated_test.py` and `coordination_test.py` — and `House skill audit` job 114722714270 **success** |
 
 ## v1.22.0 — coordination fixes, integration wave 3 (candidate)
 
@@ -71,7 +73,7 @@ means this file was copied into a `git archive` of X and run there on 2026-10-12
 | AS-10 | self-test plant "description between house and spec cap" |
 | Self-test plants | All 75 plants were checked to still change their file (a plant that no-ops reports MISSED); one did not on `27f485a` — "a local lock records no host" — re-anchored and run by hand on a copy: `FAIL: a lock taken in local mode records no host … (AS-03)`, 1 problem. The full `npm run test:negatives` (~1 h) is left to CI |
 | House audit | `audit_skill.py --house`: `0 GAP, 19 PASS` — description 936/970, body 4745/4750 tokens |
-| Default gate | `npm test`: see the PR for this tree's run |
+| Default gate | superseded by the fix round 2 rows above (`npm test` = `test/run_gate.py`; CI run 38222746461) |
 
 ## v1.21.7 — shared-identity acquire refused; worktree session stamps (candidate)
 

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 
+sys.dont_write_bytecode = True       # no test/__pycache__ in a tree people read as source (ASY-01)
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
