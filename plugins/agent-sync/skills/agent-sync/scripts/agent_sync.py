@@ -7149,8 +7149,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global RECORD_PLANE_COMMAND, INVOKED_ARGV
+    global RECORD_PLANE_COMMAND, INVOKED_ARGV, _GIT_MEMO, TOKEN_SOURCE, VAULT_DEGRADED
     args = build_parser().parse_args(argv)
+    # Per-invocation state: `main()` called twice in one process (the tests do) must not
+    # see the previous call's git answers or token source.
+    _GIT_MEMO, TOKEN_SOURCE, VAULT_DEGRADED = None, None, None
     # The vault re-run repeats exactly what THIS invocation was given — `main(argv)` called
     # in-process is not `sys.argv` — and only for a command that touches the record plane.
     INVOKED_ARGV = list(argv) if argv is not None else sys.argv[1:]

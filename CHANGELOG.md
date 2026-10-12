@@ -12,7 +12,7 @@ Against the second candidate `e32c7c9`, the 17 cases added in the second fix rou
 (11 on an assertion, 6 with an exception — three call a function that does not exist there, one a function whose signature changed, one hits the very ImportError it pins, one parses the hook's empty output), as do the
 extended parser case and the vault-cache case.
 
-**`npm test` is now the whole CI gate, sandboxed.** It runs `test/run_gate.py`: every suite
+**`npm test` now runs every CI test suite, sandboxed.** It runs `test/run_gate.py`: every suite
 CI runs — the five it ran before, every `test/audit_regressions/*.py` (CI ran them and
 `npm test` did not, so CI went red on FIX-SY-04.02 behind a green local gate) and the
 installer test — each with its own temporary HOME and without CLAUDE_CODE_SESSION_ID,
@@ -85,6 +85,24 @@ now, so the two gates run the same set.
   ≤1.21.2 (ts …)" — a date, not proof of a live writer; citations of project-observatory
   DECISIONS.md corrected to :2023 and :12873.
 
+### Final polish (third blind reading of `6ab4c47`)
+
+- **`git commit --gpg-sign <path>` is guarded.** The AS-16 parser took `--gpg-sign` as an
+  option with a value, so the pathspec after it was swallowed and the commit passed with a
+  guarded file unleased; the key id attaches only as `--gpg-sign=<keyid>`. Case added to
+  "git add and commit in one call is guarded" (it fails on `6ab4c47`: the plan staged nothing).
+- **A heredoc commit message with an odd number of quotes is still a commit (AS-18).** The
+  tokenizer closes a `"…"` string at the first inner quote, so such a message did not parse
+  and the commit check was skipped, staged guarded files included (1.21.x skipped every
+  heredoc commit). It is now checked against the index of the payload's directory. Case
+  added; on `6ab4c47` `commit_plan` answered "not a commit".
+- **`main()` starts clean.** The git answer memo, the token source and the vault-degraded
+  note are reset per invocation, so a second in-process call never sees the first's.
+- **Docs.** `fabric-coordination.md` names the real flag (`reserve <register> --key <k>`,
+  not `--rkey`); this entry's feature list sits under its own heading. `npm test` runs every
+  CI *test suite*: the validator self-test, the coordinator smoke test, the stray-SKILL.md
+  check, `claude plugin validate --strict` and the `skill-audit` job stay CI-only.
+
 ### Upgrading to 1.22.0 mid-flight
 
 - **A session's run id changes.** Claude Code exports CLAUDE_CODE_SESSION_ID to every Bash
@@ -107,6 +125,8 @@ now, so the two gates run the same set.
   restart those sessions; a keyless lease ref is what they write.
 - **Observatory's own config has no `scheduledIntervalSeconds`**, so R19's warning cannot
   fire there yet. Adding it is the Observatory owner's change (backlog AS-17).
+
+### What changed
 
 - **A run id is unique per key (R17).** It was the first twelve `[a-z0-9]` of the key, so
   `observatory-scheduled-tick-1` and `-2` were one run (`r-observatorys`). Now a key that

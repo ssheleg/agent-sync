@@ -53,7 +53,7 @@ These are said here rather than implied by the table:
 - **Write scopes are enforced only where a hook can see the write.** A language runtime's
   own file write, `perl -i`, `awk`, `dd` and the other UNSUPPORTED rows of `guard.sh`'s
   matrix are outside the boundary; the contract's scope is advisory there.
-- **Idempotency key per command.** Only `reserve` takes one (`--rkey`). `acquire` is
+- **Idempotency key per command.** Only `reserve` takes one (`reserve <register> --key <k>`). `acquire` is
   idempotent for its own holder, but it takes no key.
 - **Residue categories `uncommitted-files`, `unpushed-commit`, `open-pr` and
   `merged-unreconciled`.** These are reported by `finish` (clean, pushed, pointed at)

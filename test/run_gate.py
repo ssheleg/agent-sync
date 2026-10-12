@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The local gate — every suite CI runs, each in a sandbox, then a check that the operator's
+"""The local gate — every test suite CI runs (the validator self-test, the smoke test and
+`claude plugin validate` stay CI-only), each in a sandbox, then a check that the operator's
 own `~/.agent-sync` is exactly as it was.
 
 `npm test` runs this. It used to run five suites and not `test/audit_regressions/*.py`, which

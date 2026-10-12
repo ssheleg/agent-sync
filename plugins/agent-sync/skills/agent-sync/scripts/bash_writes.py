@@ -511,10 +511,13 @@ def guarded_targets(targets: list[str]) -> list[tuple[str, str]]:
 
 # ------------------------------------------------------------------ AS-16: what a commit stages
 
+_COMMIT_WORDS = re.compile(r"\bgit\b[^\n]*\bcommit\b")
 _COMMIT_VALUED_SHORT = set("mFCct")
 _COMMIT_VALUED_LONG = {"--message", "--file", "--author", "--date", "--template",
                        "--reuse-message", "--reedit-message", "--fixup", "--squash",
-                       "--cleanup", "--trailer", "--pathspec-from-file", "--gpg-sign"}
+                       "--cleanup", "--trailer", "--pathspec-from-file"}
+# `--gpg-sign` is absent on purpose: its key id attaches only as `--gpg-sign=<keyid>`, so the
+# word after a bare `--gpg-sign` is a pathspec or another option, never its value.
 
 
 def _git_sub(w: list[str]) -> tuple[str | None, str | None, list[str]]:
@@ -548,6 +551,16 @@ def commit_plan(cmd: str, cwd: str) -> tuple[bool, str | None, list[tuple[str, s
     specs), "tracked" (modified tracked files under the specs) — an empty spec list means
     the whole tree. Only staging that comes BEFORE the commit in the command counts.
     """
+    try:
+        _tokens(cmd or "")
+    except ValueError:
+        # The tokenizer closes a "…" string at the first inner quote, so a commit message
+        # heredoc inside "$(…)" with an odd number of quotes does not parse (AS-18). Failing
+        # open there skipped the commit check entirely; it is still a commit in the payload's
+        # directory, whose index the hook reads. What the same command stages is not known.
+        if _COMMIT_WORDS.search(cmd or ""):
+            return True, cwd, []
+        return False, None, []
     _targets, commands = _walk(cmd, cwd)
     stages: list[tuple[str, str, list[str]]] = []
     for w, base in commands:

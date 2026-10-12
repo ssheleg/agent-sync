@@ -1134,11 +1134,18 @@ def git_add_and_commit_in_one_call_is_guarded():
                     "git add . && git commit -m x",
                     "git commit -am x",
                     "git commit -m x docs/DECISIONS.md",
-                    "cd docs && git add DECISIONS.md && git commit -m x"):
+                    "cd docs && git add DECISIONS.md && git commit -m x",
+                    "git commit --gpg-sign docs/DECISIONS.md -m x"):
             r = _run_guard(root, bash(cmd), home)
             assert r.returncode == 2, "`%s` passed with no lease (%d): %s" % (cmd, r.returncode, r.stderr)
         r = _run_guard(root, bash("git add README.md && git commit -m x"), home)
         assert r.returncode == 0, "an unguarded add was refused: %s" % r.stderr
+        # AS-18: a heredoc message with an odd number of quotes does not tokenize; the
+        # commit must still be checked against what is already staged.
+        subprocess.run(["git", "-C", root, "add", "docs/DECISIONS.md"], check=True)
+        odd = "git commit -m \"$(cat <<'EOF'\nfix the \"x thing\nEOF\n)\""
+        r = _run_guard(root, bash(odd), home)
+        assert r.returncode == 2, "a heredoc commit with an odd quote passed (%d)" % r.returncode
         env = _clean_env(HOME=home, AGENT_SYNC_RUN_ID="coordtest-guard")
         won = _py(root, env, "acquire", "T-16")
         assert won.returncode == 0, won.stdout + won.stderr

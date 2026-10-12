@@ -498,7 +498,7 @@ These run **in a clone of this repository**. The published npm package ships no
 
 ```bash
 python3 test/validate.py             # manifests, version sync, no host/credential leaks
-npm test                             # every suite CI runs, each in a temporary HOME (test/run_gate.py)
+npm test                             # every CI test suite, each in a temporary HOME (test/run_gate.py); self-test, smoke and plugin validate stay CI-only
 npm run test:negatives               # validate.py --self-test: the validator must still be able to fail
 npm run test:all                     # both of the above
 ```
