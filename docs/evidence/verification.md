@@ -10,19 +10,35 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 
 ## v1.22.0 — coordination fixes, integration wave 3 (candidate)
 
+All rows are cases in `test/coordination_test.py` (33), run by `npm test`. "Failed on X"
+means this file was copied into a `git archive` of X and run there on 2026-10-12: 1.21.7
+(`210ce1b`) → 30 of 33 fail; the first candidate (`27f485a`) → 16 of 33 fail.
+
 | Gate | Evidence |
 |---|---|
-| R17 run id | `test/coordination_test.py` "two keys sharing a prefix are two runs" — failed on 1.21.7 (`r-observatorys` for both) |
+| R17 run id | "two keys sharing a prefix are two runs" — failed on 1.21.7 (`r-observatorys` for both) |
 | AS-08 width | "a three digit register does not leak ids it holds" — failed on 1.21.7 |
 | R19 long-held | "a lease held past the scheduled interval is reported", "no interval means nothing to report" |
-| AS-11 sweep | "a long expired foreign lock is listed then cleared only with apply" (real CLI, fs plane) |
-| R20 token | "the vault is asked before the plaintext file", "a token from the file is reported as degraded" |
+| R19 config key | "the config key for the scheduled interval passes check" — failed on `27f485a` (`check`: "not in the schema"); `check_config_round_trip` asserts CONFIG_KEYS = schema |
+| AS-11 sweep | "a long expired foreign lock is listed then cleared only with apply" (real CLI, fs plane); "a sweep by age shows each verdict and refuses a zero threshold" — failed on `27f485a` (`0` became 7, exit 0) |
+| R20 vault gating | "a refusing vault never locks the guard" — fake `project-observatory` whose `where`=0 and `run`=2: `agent_sync.py guard` and `guard.sh` (Edit) exit 0, the vault is never asked by the guard, `residue` probes once and falls back. Failed on `27f485a` (guard exit 2) |
+| R20 re-run | "an allowing vault reruns with the same argv and the main worktrees project" — probe + re-run, argv passed through, project = main worktree folder from a linked worktree. Failed on `27f485a` (project = the worktree's folder) |
+| R20 caches | "a vault slot created later is seen and the engine path is cached". The old negative cache shown by hand on `27f485a`: `_vault_slot_exists` → False, slot created, → False again |
+| R20 token report | "the vault is asked before the plaintext file", "a token from the file is reported as degraded" |
 | R21 map | "every command the fabric map names exists" |
-| AS-07 | "a lease in a second repository is released from the session project" |
-| AS-09 | "a bash write into a guarded file without a lease is refused" (real `guard.sh`); 1.21.7 allowed it |
+| AS-07 end to end | "a bash acquire in a second repository is released by the real session end hook" — `acquire` with only `CLAUDE_CODE_SESSION_ID`, then `session-end.sh` with the id only in its payload. Failed on `27f485a` (nothing registered) |
+| AS-07 isolation | "a second repository is released with its own record plane" — two stub Outline servers; X's release reaches X's collection with X's token, P's server sees nothing. Failed on `27f485a` (P's server got X's release) |
+| AS-07 sessions | "two sessions keep their own lists of a shared repository" — failed on `27f485a` (A's release took B's list) |
+| AS-07 robustness | "a listed repository that cannot be acted on never strands the rest" |
+| AS-07 slug | "the session list name agrees between bash and python" — 300-char and Cyrillic keys under `LC_ALL=C` and UTF-8. The old slug's disagreement shown by hand on `27f485a`: a 309-char path and `/Users/x/проект` each named two different files in Python and bash |
+| AS-07 identity | "a bash call and its hook resolve one session in an unstamped repository" |
+| AS-09 | "a bash write into a guarded file without a lease is refused" (real `guard.sh`); 1.21.7 allowed it. "a heredoc body is never read as commands" — failed on `27f485a` (guard exit 2 on a heredoc naming `docs/ROADMAP.md`); "the parser reads the write shapes agents use", "what the parser cannot resolve it skips" |
+| AS-14 check | "a keyless lease ref on the remote is flagged" — bare remote, a ref with no `key`; `residue` names it. Failed on `27f485a`. The live measurement is on the board |
 | Disk-full lockout | "the guard needs no temp file to allow a harmless command" (`ulimit -f 0`); 1.21.7 refused `df -h` with "could not run its parser" |
 | AS-10 | self-test plant "description between house and spec cap" |
-| Default gate | `npm test`: `PASS: agent-sync v1.22.0 — all checks green` + every suite, recorded in the PR |
+| Self-test plants | All 75 plants were checked to still change their file (a plant that no-ops reports MISSED); one did not on `27f485a` — "a local lock records no host" — re-anchored and run by hand on a copy: `FAIL: a lock taken in local mode records no host … (AS-03)`, 1 problem. The full `npm run test:negatives` (~1 h) is left to CI |
+| House audit | `audit_skill.py --house`: `0 GAP, 19 PASS` — description 936/970, body 4745/4750 tokens |
+| Default gate | `npm test`: see the PR for this tree's run |
 
 ## v1.21.7 — shared-identity acquire refused; worktree session stamps (candidate)
 

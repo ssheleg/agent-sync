@@ -80,9 +80,19 @@ The `Bash` group has no `if` filter, and that is deliberate. Until v1.20.1 it de
 the group level, so it was never evaluated (and 2.1.270 started saying so at every
 session start). Moving it into the handler would make it real, and a real one skips
 `git -C <dir> commit`, `env X=1 git commit` and `cd d && git commit` — the forms the
-parser in `guard.sh` was written to cover. So `guard.sh` runs on every Bash call, exits
-0 without starting an interpreter when the payload does not contain `commit`, and the
-parser is the whole narrowing after that.
+parser in `guard.sh` was written to cover. So `guard.sh` runs on every Bash call, and
+the narrowing is its own, in two steps (1.22.0):
+
+1. **A Bash write (AS-09).** Only where the session's project is coordinated, or this
+   session holds leases in another repository, and only when the payload carries a write
+   shape (`>`, `tee`, `sed`, `cp `, `mv `), it starts `scripts/bash_writes.py` — the small
+   parser, not the coordinator — and asks `guard` about each target it prints. It
+   tokenises first and segments second, so a quoted `;` or a heredoc's body is never
+   read as a command. The shapes it reads and the ones it skips are listed in the
+   capability matrix at the top of `guard.sh`; each is a case in
+   `test/coordination_test.py`.
+2. **A commit.** A payload without the substring `commit` exits 0 there without
+   starting another interpreter; otherwise the commit parser decides.
 
 **Which repository decides (since v1.21.2): the one that owns the write.** For
 `Edit`/`Write`/`MultiEdit`/`NotebookEdit` that is `git -C <dirname of the path>
@@ -98,22 +108,35 @@ project guarded nothing anywhere. The guard still fails closed when its parser (
 or git cannot run, but only in a session whose own project is configured — elsewhere the
 owning repository cannot be named without them, and the hook says so in its matrix.
 
-The lifecycle hooks below keep the session's project as their scope: they register,
-renew and release **this session's** run there. A lease taken in a second repository is
-therefore not renewed or released by them — backlog AS-07.
+The lifecycle hooks below act on the session's project **and, since 1.22.0, on every
+other repository this session took a lease in (AS-07).** `acquire` lists the repository
+under the SESSION — `~/.agent-sync/session-repos/<sha256 of the session key>.json`, the key
+being `env:<AGENT_SYNC_RUN_ID>` or `session:<id>` from `CLAUDE_SESSION_ID`,
+`CLAUDE_CODE_SESSION_ID` (what a Bash call carries) or the hook payload's `session_id`.
+`renew.sh` and `session-end.sh` pass `--session-repos`, which starts one child process per
+listed repository, in parallel, from the environment the hook started with — so each
+reads its own `.env.agent-sync` and vault slot — inside the hook's budget (2 s at
+SessionEnd, for all of them). A repository where this run then holds nothing leaves the
+list. Two sessions in one project keep two lists. A file test (`[ -f ]` on that hash)
+decides whether a session with no config of its own runs the lifecycle hooks at all, so
+a machine where no session ever left its project pays nothing.
 
 | Hook | Job |
 |---|---|
 | `session-start.sh` | Register the run, print the board summary and the one next action |
 | `guard.sh` | Deny an edit to a `guardedFiles[]` path, or a commit staging one, without a live lease — judged by the repository that owns the file |
-| `renew.sh` | Renew the lease — moves the timestamp expiry is computed from, throttled to `renewIntervalSeconds`, a no-op most calls |
-| `session-end.sh` | Release every lease this run holds. That is all it does — it writes no journal entry and closes nothing else |
+| `renew.sh` | Renew the lease — moves the timestamp expiry is computed from, throttled to `renewIntervalSeconds`, a no-op most calls; here and in this session's other listed repositories |
+| `session-end.sh` | Release every lease this run holds, here and in this session's other listed repositories. That is all it does — it writes no journal entry and closes nothing else |
 
 ## Performance
 
-`renew.sh` runs after **every** tool call. It must be a no-op in the common case:
-it reads one timestamp file and returns. It touches the network at most once per
-`renewIntervalSeconds` (default 300 s). If it ever becomes slower than that, the
+`renew.sh` runs after **every** tool call, asynchronously. It must be a no-op in the
+common case: it reads one timestamp file and returns. A session with leases in other
+repositories also starts one child process per listed repository, each the same
+throttled no-op until a renewal is due. It touches the network at most once per
+`renewIntervalSeconds` (default 300 s) per repository. With the `notion` backend and a
+vault slot, a renewal that is due re-runs under `use_secret.py run` after a no-op probe
+of it — the cost of keeping the token out of a plaintext file. If it ever becomes slower than that, the
 throttle is broken — fix the throttle rather than removing the hook.
 
 ## Debugging

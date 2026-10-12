@@ -10,6 +10,7 @@ when two agents disagree about who holds something.
 - [Expiry and stealing](#expiry-and-stealing)
 - [Releasing](#releasing)
 - [Residue — what expiry leaves behind](#residue--what-expiry-leaves-behind)
+  - [A sweep by age — an operator's decision (2026-10-12)](#a-sweep-by-age--an-operators-decision-2026-10-12)
 - [Id reservation](#id-reservation)
 - [The lease is not the claim](#the-lease-is-not-the-claim)
 
@@ -178,7 +179,12 @@ are one note; the second is refused rather than allowed to overwrite the first.
 The one window left: a run still on 1.21.2 and a run on 1.21.3 taking the SAME path key
 (one with a character outside `[A-Za-z0-9._-]`) at the same moment, when neither ref
 exists yet, push to two different refs. Update every machine; task ids made of safe
-characters never had two names and are unaffected.
+characters never had two names and are unaffected. **That window is not hypothetical**
+(AS-14, open): on 2026-10-12 the Fabric remote held
+`refs/agent-sync/leases/docs-architecture-report-workspace.md` — no `key` in its payload,
+written 2026-10-08 by `r-d8d027823`, a week after 1.21.3 shipped — beside the same path's
+1.21.3 ref `docs%2Farchitecture%2Freport-workspace.md`. Since 1.22.0 `residue` flags every
+lease ref without a `key`, which is the signal that such a writer is still alive.
 
 **`release` says `released` only after reading the remote again.** It deletes the ref
 with `--force-with-lease`, then reads it back with a strict `ls-remote`: the ref still
@@ -337,7 +343,8 @@ that matters.
 
 `reap` never touches `foreign` or `ambiguous` state, including when it is named on the
 command line: naming one is refused out loud with a non-zero exit, because an operator
-reads a silent zero as done.
+reads a silent zero as done. The one exception is an operator's, not a run's, and it is
+dated below: [a sweep by age](#a-sweep-by-age--an-operators-decision-2026-10-12).
 
 ### Why `release <KEY>` may reap a foreign corpse and `reap` may not
 
@@ -352,6 +359,37 @@ asked to release *their* lease and is getting somebody else's corpse cleared as 
 owns is how one run destroys another's only record of work in progress — an agent that
 stopped renewing may still be running. So the sweep refuses, and the two verbs keep two
 contracts on purpose. Do not "align" them by widening `reap`.
+
+### A sweep by age — an operator's decision (2026-10-12)
+
+**This amends the two paragraphs above, and only in the way stated here.** 1.22.0 added
+`reap --long-expired` (AS-11), which can clear `foreign` and `ambiguous` locks — state the
+classifier refuses and the sweep above must never touch. It is not the classifier
+widened, and nothing about a RUN's `reap` changed: `reap [KEY…]` still clears only what
+this run proves it owns.
+
+What makes it admissible is the same thing that makes `--i-own-this` admissible: **a
+person decides.** Expiry does not prove the writer stopped — an agent that stopped
+renewing may still be running (Fabric's coordination contract says the same) — so a
+removal by age is a judgement about the world outside this tool, and it belongs to
+the operator. The limits:
+
+- **Age alone, at least seven days by default.** `--older-than-days N` moves the
+  threshold; `N < 1` is refused, because a sweep reaching a lease expired minutes ago
+  is not residue clearing. A live lease, and a lock whose expiry cannot be established,
+  are never selected.
+- **The default is the read.** Without `--apply` it lists each lock on BOTH planes with
+  the classifier's verdict and reason, unchanged — so the operator sees exactly what no
+  run could prove before deciding — and removes nothing.
+- **`--apply` is the operator's call, never an agent's.** An agent may run the listing
+  and show it; it does not pass `--apply` on its own initiative, and `SKILL.md` says so.
+- **Each removal is attributable.** `--apply` goes through the `--i-own-this` path: the
+  same refusals, the payload it destroyed printed beside the classifier's verdict, a
+  journal line where a record plane is configured, and teardown verified by a second
+  read on both planes. Only the entries the listing showed are cleared: a younger entry
+  of the same key on the other plane is left and said so.
+- **Never automatic.** No hook, no `status`, no scheduled job runs `--apply`. `status`
+  only counts the lock directory's candidates; `residue` and the listing sweep the remote.
 
 ## Id reservation
 

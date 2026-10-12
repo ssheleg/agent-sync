@@ -122,14 +122,38 @@ A personal access token from Notion's developer portal — Personal access token
 New token. It begins `ntn_`. No integration and no page-sharing dance is required:
 the token acts as the person who made it.
 
+**Where it lives (1.22.0): the Observatory vault, not the file.** The operator writes
+ONLY the token — one line, no `AGENT_SYNC_NOTION_TOKEN=` prefix — into a mode-600 file
+outside the repository and stores it:
+
+```bash
+python3 "$(project-observatory full-path)/tools/vault.py" put <project> local AGENT_SYNC_NOTION_TOKEN < that-file
 ```
-AGENT_SYNC_NOTION_TOKEN=<created by the operator, pasted by the operator>
+
+then deletes that file. `<project>` is the folder name of the repository's **main**
+checkout — not a linked worktree's folder — or, for a submodule, its remote's name; `init`
+and `status` print the command with it filled in. `.env.agent-sync` keeps the rest:
+
+```
 AGENT_SYNC_NOTION_PARENT=<the 32-character id ending the parent page's URL>
 AGENT_SYNC_NOTION_COLLECTION=<container page id, printed by `bootstrap`>
 ```
 
-The operator creates it and pastes it themselves. Do not ask for the value in chat,
-do not read it back, and do not write it anywhere in the repository.
+Every command that touches the record plane — not `guard`, `whoami` or the Bash-write
+parse — asks `use_secret.py where --vault-only`, then probes `use_secret.py run` with a
+child that does nothing (`run` checks the grant, `where` does not), and only then re-runs
+itself under `run`, so the value is in the child's environment and never in argv. A
+refusal is reported by `status` and the command carries on without the vault. A positive
+`where` is cached for an hour in `.agent-sync/vault-slot.json`; a negative is reused only
+while the file still holds a token, so a slot created after deleting that line is seen at
+once.
+
+**Without Observatory** the token line in `.env.agent-sync` still works, and `status`
+says `degraded: plaintext token file`. Do not `source` the file: a token in the shell's
+environment is explicit, and explicit wins over the vault.
+
+The operator creates the token and stores it themselves. Do not ask for the value in
+chat, do not read it back, and do not write it anywhere in the repository.
 
 ## Sharing the plane with another person
 

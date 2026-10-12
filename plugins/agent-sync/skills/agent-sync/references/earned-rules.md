@@ -10,11 +10,19 @@ Both ends of getting this wrong have happened: deriving the id from `CLAUDE_SESS
 and keeping one id per checkout gave **two sessions one identity**, which is worse because it is
 silent. Both acquired as one run, both were guarded as one run, `whoami` reported a lease that
 belonged to somebody else, and `release` would have taken it. The resolution order is
-`AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` · the session that started this shell · shared, and where
-none can be established the run says so instead of presenting a shared entry as separation.
+`AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` · `CLAUDE_CODE_SESSION_ID` · the session that started
+this shell · shared, and where none can be established the run says so instead of presenting a
+shared entry as separation.
 
-The third position is the one that needs explaining, because the obvious implementation of it is
-wrong. A plain shell command carries no session id; a hook does. So `SessionStart` stamps
+The third position (1.22.0) is what Claude Code exports to every Bash tool call: the same id a hook
+reads from its payload. It answers in a repository no `SessionStart` ever stamped — a second
+repository a session took a lease in (AS-07) — where the walk below finds nothing and the shell
+used to fall back to the shared entry while its hook resolved the session. Hooks hand the payload's
+id to the coordinator for the same reason, and a new run id is derived from the session the key
+names, so a shell and a hook mint the same id in a checkout neither has written to yet.
+
+The fourth position is the one that needs explaining, because the obvious implementation of it is
+wrong. Outside Claude Code a plain shell command carries no session id; a hook does. So `SessionStart` stamps
 `.agent-sync/sessions/<CLI pid>` with the session it knows, and any later command finds itself by
 walking its own **process ancestry** to a stamped pid, removing stamps whose process is gone. It is
 deliberately not command-line parsing: the throwaway shell every tool call runs in carries claude

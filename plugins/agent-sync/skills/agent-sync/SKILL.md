@@ -1,6 +1,6 @@
 ---
 name: agent-sync
-description: "Use when several coding agents work one repository at the same time and must not collide - claiming a task, reserving the next decision/question/ticket id, journaling a run, moving a cross-repo dependency, regenerating the board, or finishing work across a parent repo and its submodules - clean, pushed, and pointed at. Triggers - 'claim this task' / 'возьми задачу', 'who is working on' / 'кто сейчас делает', 'reserve an id' / 'зарезервируй id', 'sync the board' / 'обнови доску', 'set up agent coordination' / 'настрой координацию агентов', 'the submodule is pushed, the parent points at the old commit' / 'сабмодуль запушен, родитель на старом коммите', /agent-sync. Use it BEFORE editing any shared registry file (decisions, open questions, roadmap, workstreams, dependencies) in a project that has .claude/agent-sync.json, even when the user never mentions coordination - an unclaimed edit to those files is how two agents overwrite each other."
+description: "Use when several coding agents work one repository at once and must not collide - claiming a task, reserving the next decision/question/ticket id, journaling a run, moving a cross-repo dependency, regenerating the board, or finishing work across a parent repo and its submodules - clean, pushed, and pointed at. Triggers - 'claim this task' / 'возьми задачу', 'who is working on' / 'кто сейчас делает', 'reserve an id' / 'зарезервируй id', 'sync the board' / 'обнови доску', 'set up agent coordination' / 'настрой координацию агентов', 'the submodule is pushed, the parent points at the old commit' / 'сабмодуль запушен, родитель на старом коммите', /agent-sync. Use it BEFORE editing any shared registry file (decisions, open questions, roadmap, workstreams, dependencies) in a project with .claude/agent-sync.json, even when the user never mentions coordination - an unclaimed edit to those files lets two agents overwrite each other."
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
@@ -61,7 +61,7 @@ silent pre-filter: a `continue` before the regex hides bad lines from the counte
 scaffold  → create the documentation architecture, only where it is absent
 adopt     → read the repository, propose a config, write nothing
 init      → write the approved config + the gitignored env file
-            (operator pastes the token — never you)
+            (operator places the token — never you)
 reconcile --set-baseline    → make history a counted backlog, once
 setup     → generate the snapshot that describes this project's wiring
 check     → validate the whole thing; non-zero if it is not healthy
@@ -71,7 +71,7 @@ check     → validate the whole thing; non-zero if it is not healthy
 rule that protects nothing (a register, guard glob, claim pattern, gate or mirror source
 pointing at what is not there), on missing credentials, on an env file **tracked by git** —
 the one unrecoverable mistake here — on a stale snapshot, or on a register with no baseline.
-It names each one; every one failed for real during this tool's own adoption. Run it after
+It names each one. Run it after
 adopting, after changing the config, and in CI.
 
 **`scaffold` never overwrites.** It seeds a decision register and an `AGENTS.md` pointing at
@@ -123,7 +123,7 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend fs
 
 `init` writes `.claude/agent-sync.json` (shape, committed) and `.env.agent-sync` with an
 **empty** token line (identity, mode 600), gitignores both, and prints the one step that is
-the operator's — creating the token and pasting it into that line. Never overwrites either
+the operator's — creating the token and placing it (`notion`: the vault). Never overwrites either
 file without `--force`. **Relay those closing instructions verbatim**; the design depends on
 the token staying theirs.
 
@@ -177,6 +177,7 @@ npx sshlg-skills install
 | `whoami` | Print this run's id and its held leases |
 | `residue` | What a run left behind in BOTH planes: expired locks on disk, and claim tags with no live lease behind them |
 | `reap [KEY…]` | Clear only what this run **proves** it owns and has spent, then re-read the directory to confirm it went |
+| `reap --long-expired` | List locks expired 7+ days on both planes, each with its verdict. `--apply` clears them by age alone — **the operator's call, never yours** |
 | `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
 | `adopt` | Inspect an existing project and **propose** a config — writes nothing |
 | `merge` | Land this branch: conflicts checked **before** anything is touched, merge log written, the `--key` lease released after the push. `--summary`, `--dry-run`, `--push` |
@@ -192,18 +193,12 @@ path; project config remains `.claude/agent-sync.json` on every host.
 
 ## One identity per session, and how it is decided
 
-A lease is only a lease if two agents get two identities, and both ends have bitten:
-`CLAUDE_SESSION_ID` alone gave **one session two identities** — it acquired as one and was denied by
-its own guard as the other — and one id per checkout gave **two sessions one identity**, silently,
-so `release` took a lease the caller never had.
-
-The order is: `AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` · **the session that started this shell** ·
-shared. The third exists because a plain shell command has no session id and a hook does, so
-`SessionStart` stamps `.agent-sync/sessions/<CLI pid>` and a later command walks its own process
-ancestry to it. Why that and not command-line parsing: `references/earned-rules.md`.
-
-When none of the four can be established the run says so — *"this identity is shared with any other
-session in this checkout"* — rather than presenting a shared entry as separation.
+A lease is only a lease if two agents get two identities; both failure ends have shipped
+(`references/earned-rules.md`). The order: `AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` ·
+`CLAUDE_CODE_SESSION_ID` (every Claude Code Bash call carries it) · **the session that
+started this shell** (`SessionStart` stamps `.agent-sync/sessions/<CLI pid>`; a command walks
+its process ancestry to it) · shared — and a shared identity is said out loud, never
+presented as separation.
 
 ## Claiming — the shape that matters
 
@@ -213,6 +208,8 @@ acquire → do the work → release
 
 Never skip `release`, including on failure: an abandoned lease blocks the task until its
 TTL expires, and the next agent cannot tell "in progress" from "crashed an hour ago".
+A lease taken in **another repository** is listed under this session, and the renew and
+SessionEnd hooks act there too (AS-07).
 
 **The lease is not the claim.** The lease says who holds it *now* and expires; the durable
 claim is the tag in git, written through by `acquire` and cleared by `release`. One fact,
@@ -239,18 +236,15 @@ A denial names the other run **and its key**, because "r-x holds a lease" beside
 repeated as "r-x holds this file". Do not edit anyway, and do not "just fix one line" — a
 clobbered decision looks exactly like a decision.
 
-**Two write modes, and the tool does not promise the wrong one.** A task lease authorizes
-the TASK, never the file — so a guarded write also takes the FILE's own **resource claim**
-(`res--<repo>--<canonical path>`, SY-04). That is the **short transaction lock**: two agents
-on one shared registry serialize on it, independent files never serialize, honest
-cross-machine only under `leaseBackend: "git"` (advisory otherwise). The other mode is
-**isolated worktree + merge** — each agent a private checkout, a merge policy reconciling
-them — for when writes overlap so heavily a lock would just queue everyone. What the guard
-does NOT promise is enforcement from a single task owner: holding *a* lease was never
-holding *this* file.
+**A task lease authorizes the TASK, never the file**, so a guarded write also takes the
+FILE's resource claim (`res--<repo>--<canonical path>`, SY-04): two agents on one registry
+serialize on it, independent files never do — cross-machine only under
+`leaseBackend: "git"`. Where writes overlap so heavily a lock would queue everyone, use
+isolated worktrees and `merge` instead.
 
-The shipped Claude `PreToolUse` adapter runs this in the file's owning repo.
-Without a verified adapter, run it explicitly.
+The shipped Claude `PreToolUse` adapter runs this in the file's owning repo for an
+Edit/Write, a `git commit`, and a Bash write parsed by `scripts/bash_writes.py` — a
+parser, not a sandbox. Without a verified adapter, run it explicitly.
 
 ## Reserving an id
 
@@ -301,14 +295,13 @@ Two files, and the split between them is the whole security model.
 **`.claude/agent-sync.json`** — *shape*, committed: which backend, TTLs, which files
 are guarded, which registers exist, which gates to run.
 
-**`.env.agent-sync`** — *identity*, written by `init` with the keys already in it, mode
-600, gitignored. The operator fills the token line and nobody else; `bootstrap` prints
-the collection id to paste beside it. Found here, or in a superproject, or wherever
-`AGENT_SYNC_ENV` points — `check` prints which. Load it before running agents:
-
-```bash
-set -a && . ./.env.agent-sync && set +a
-```
+**`.env.agent-sync`** — *identity*, written by `init`, mode 600, gitignored; found here, in
+a superproject, or at `AGENT_SYNC_ENV` — `check` prints which. The tool reads it itself:
+do not `source` it. **A `notion` token belongs in the Observatory vault** (1.22.0) — `init`
+prints the `vault.py put` line; record-plane commands re-run under
+`use_secret.py run --vault-only`, and the guard never asks the vault. `outline` keeps the
+token in the file. `scheduledIntervalSeconds` names a scheduled job's interval; `status`
+warns when a lease is held longer.
 
 Never write a host name or token into the config, a test, an example or a commit; never
 handle, echo or `argv`-pass a token value. Offered one in chat, point at that file instead.
