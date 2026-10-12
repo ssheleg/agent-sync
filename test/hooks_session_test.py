@@ -28,6 +28,11 @@ import importlib.util
 # The module import below compiles bytecode into the shipped scripts/ directory;
 # a test run must not leave build products in a tree people read as source (ASY-01).
 sys.dont_write_bytecode = True
+# These cases model a shell that knows NO session — the walk to a SessionStart stamp is what
+# they test. Run from inside Claude Code, every child would inherit the session's
+# CLAUDE_CODE_SESSION_ID, which `_session_key()` reads before the walk since 1.22.0 (AS-07),
+# and the walk would never be reached. CI has no such variable; locally it is removed here.
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)

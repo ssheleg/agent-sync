@@ -4261,13 +4261,16 @@ def self_test() -> int:
         "a local lock records no host": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
             # Anchored on the LOCAL acquire's payload (it gained `key` in 1.21.3, #25, and
-            # the old anchor stopped matching — a plant that no-ops reports MISSED).
+            # `since` in 1.22.0, R19 — each time the old anchor stopped matching, and a plant
+            # that no-ops reports MISSED).
             lambda t: t.replace(
                 '        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),\n'
-                '                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node()})\n\n'
+                '                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node(),\n'
+                '                              "since": now_iso()})\n\n'
                 "        # A lease another run took under 1.21.2's lock name",
                 '        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),\n'
-                '                              "ttl": self.ttl, "repo": repo_name()})\n\n'
+                '                              "ttl": self.ttl, "repo": repo_name(),\n'
+                '                              "since": now_iso()})\n\n'
                 "        # A lease another run took under 1.21.2's lock name")),
         # The ledger back to naming a version that is not the one that shipped — the exact
         # state found at 1.14.0, where the newest section cited v1.13.0 under a v1.14.0 tag.

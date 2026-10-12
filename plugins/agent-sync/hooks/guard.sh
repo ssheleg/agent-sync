@@ -12,16 +12,22 @@ set -uo pipefail
 #
 #   Write / Edit / MultiEdit / NotebookEdit   COVERED  (file_path matcher)
 #   Bash: git commit (incl. -C, env, compound) COVERED (parsed below)
-#   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
-#   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
-#   Bash: sed -i                                COVERED* (bash_writes.py, 1.22.0, AS-09)
-#   Bash: > / >> redirect, tee, cp, mv          COVERED* (bash_writes.py, 1.22.0, AS-09)
-#   Bash: perl -i, awk, dd, install, rsync      UNSUPPORTED (not parsed)
-#   * when this session is coordinated or holds leases elsewhere; an uncoordinated
-#     session's write into another repository is caught at its `git commit` instead.
 #   Bash: git -C <dir> commit                   COVERED (repo resolved from -C)
 #   Bash: env VAR=x git commit                  COVERED (env prefix skipped)
 #   Bash: compound (a && git commit)            COVERED (each segment parsed)
+#   Bash writes, parsed by scripts/bash_writes.py (1.22.0, AS-09) -- COVERED*, and only
+#   these shapes, each a case in test/coordination_test.py:
+#     > >> >| &> &>> and `>& FILE` redirects; tee [-a]; sed -i (GNU and BSD); cp; mv
+#     (`-t DIR` too); after `cd DIR`, inside `( ... )`, behind VAR=x / env / sudo /
+#     nohup / time / command / exec prefixes; quoted ; and | stay in their word;
+#     heredoc bodies are data, never commands
+#   Bash: a target holding $VAR, a backtick or a glob   UNPARSED (skipped)
+#   Bash: a relative target after `cd -`, `cd`, `cd $X` UNPARSED (directory unknown)
+#   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
+#   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
+#   Bash: perl -i, awk, dd, install, rsync      UNSUPPORTED (not parsed)
+#   * when this session is coordinated or holds leases elsewhere; an uncoordinated
+#     session's write into another repository is caught at its `git commit` instead.
 #
 # WHICH repository decides (v1.21.2): the one that owns the write -- for an
 # Edit/Write, `git -C <dirname of the path> rev-parse --show-toplevel`; for a
@@ -53,6 +59,9 @@ S="$AGENT_SYNC_PY"
 # project, and the guard's question is about the repository the write lands in. See
 # agent_sync_owner in _lib.sh and the matrix above.
 input=$(cat)
+# The payload's session id, for a coordinator that would otherwise walk to a stamp this
+# repository does not have (AS-07). The environment, when it names a session, still wins.
+agent_sync_export_session "$input"
 
 # The parser IS the guard: hooks.json carries no `if` filter (the one it declared until
 # v1.20.1 sat at the group level, where Claude Code never evaluated it, and a handler-level
@@ -100,7 +109,7 @@ if [ -z "$path" ]; then
   # small bash_writes.py (median 28 ms) rather than the coordinator (109 ms, measured
   # 2026-10-12). A write from an uncoordinated session into another repository is still
   # caught at its `git commit`, below. What the parse cannot read, it skips.
-  if agent_sync_configured || agent_sync_has_session_repos; then
+  if agent_sync_configured || agent_sync_has_session_repos "$input"; then
     case "$input" in
       *'>'*|*tee*|*sed*|*'cp '*|*'mv '*)
         targets=$(printf '%s' "$input" | python3 "${S%/*}/bash_writes.py" 2>/dev/null) || targets=""
