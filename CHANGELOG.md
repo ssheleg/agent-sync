@@ -37,6 +37,13 @@ Integration wave 3 of the family's 2026-10-11 waves run (hub plan R17–R22).
   `sed -i`, `cp` and `mv` into a guarded file need a lease. The parse lives in the small
   `scripts/bash_writes.py`, measured at a 28 ms median against 109 ms for the coordinator,
   because the hook runs on every Bash call. What it cannot parse it skips.
+- **A full disk no longer locks every Bash call (found live, 2026-10-12).** `guard.sh` fed
+  its parsers through bash here-strings, and bash 3.2 (macOS) writes a here-string to a temp
+  file. With the disk full, the parser read nothing and the guard failed closed: every Bash call
+  was refused, including the cleanup that would have freed space. Payloads now travel through
+  pipes and process substitution, which need no file. The case "the guard needs no temp file to
+  allow a harmless command" runs under `ulimit -f 0`, and 1.21.7 failed it with the exact
+  message seen live.
 - **Fabric conformance map (R21).** `references/fabric-coordination.md` maps each operation
   of `fabric-agent-contract@bcada4a` `coordination.md` to its command. A test checks every
   named command exists. What is not yet conformant is listed there.

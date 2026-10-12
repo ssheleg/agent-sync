@@ -70,7 +70,7 @@ parser_or_die() {
   exit 2
 }
 
-path=$(python3 -c '
+path=$(printf '%s' "$input" | python3 -c '
 import json,sys
 try:
     d=json.load(sys.stdin)
@@ -78,7 +78,7 @@ except Exception:
     sys.exit(0)
 ti=d.get("tool_input") or {}
 print(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
-' <<<"$input" 2>/dev/null)
+' 2>/dev/null)
 parser_or_die $?
 
 # The owning repository is resolved with git, so git is part of the parser.
@@ -103,7 +103,7 @@ if [ -z "$path" ]; then
   if agent_sync_configured || agent_sync_has_session_repos; then
     case "$input" in
       *'>'*|*tee*|*sed*|*'cp '*|*'mv '*)
-        targets=$(python3 "${S%/*}/bash_writes.py" <<<"$input" 2>/dev/null) || targets=""
+        targets=$(printf '%s' "$input" | python3 "${S%/*}/bash_writes.py" 2>/dev/null) || targets=""
         while IFS= read -r target; do
           [ -n "$target" ] || continue
           owner=$(agent_sync_owner "$(dirname "$target")") || continue
@@ -111,7 +111,7 @@ if [ -z "$path" ]; then
             echo "agent-sync: this command writes '$target' in $owner and this run holds no lease on it. Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>) first. ${why}" >&2
             exit 2
           fi
-        done <<<"$targets"
+        done < <(printf '%s\n' "$targets")
         ;;
     esac
   fi
@@ -126,7 +126,7 @@ if [ -z "$path" ]; then
   #
   # Tokenised in python rather than globbed in shell: `git log --grep=commit` must not match, and
   # `git -c user.name=x -C dir commit` must.
-  parsed=$(python3 -c '
+  parsed=$(printf '%s' "$input" | python3 -c '
 import json, shlex, sys
 try:
     d = json.load(sys.stdin)
@@ -167,9 +167,9 @@ for seg in cmd.replace("&&", "\n").replace("||", "\n").replace("|&", "\n").repla
             repo = r
         break
 print(is_commit, repo)
-' <<<"$input" 2>/dev/null)
+' 2>/dev/null)
   parser_or_die $?
-  read -r is_commit repo <<<"$parsed"
+  is_commit="${parsed%% *}"; repo="${parsed#* }"
   [ -n "${is_commit:-}" ] || is_commit=0
   [ -n "${repo:-}" ] || repo="."
   [ -d "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$PWD}"

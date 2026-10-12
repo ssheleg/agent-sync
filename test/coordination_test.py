@@ -388,7 +388,35 @@ def a_bash_write_into_a_guarded_file_without_a_lease_is_refused():
         shutil.rmtree(home, ignore_errors=True)
 
 
+# ----------------------------------------------------------------- no temp space, no lockout
+
+def the_guard_needs_no_temp_file_to_allow_a_harmless_command():
+    """A full disk turned every Bash call into a refusal, the cleanup included: bash 3.2 writes
+    a here-string to a temp file, the parser saw nothing, and the guard failed closed
+    (measured 2026-10-12 on the operator's machine). Reproduced with an unwritable TMPDIR."""
+    root = _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        plugin = os.path.join(REPO, "plugins", "agent-sync")
+        env = dict(os.environ, CLAUDE_PLUGIN_ROOT=plugin, CLAUDE_PROJECT_DIR=root, HOME=home,
+                   AGENT_SYNC_RUN_ID="coordtest-tmp", TMPDIR="/nonexistent-agent-sync-tmp")
+        env.pop("CLAUDE_SESSION_ID", None)
+        for payload in ({"tool_name": "Bash", "tool_input": {"command": "df -h"}, "cwd": root},
+                        {"tool_name": "Edit", "tool_input": {"file_path": os.path.join(root, "README.md")}}):
+            # `ulimit -f 0` makes every file write fail, as a full disk does; TMPDIR alone does
+            # not, because bash falls back to /tmp (watched: the old guard passed that version).
+            r = subprocess.run(["bash", "-c", 'ulimit -f 0; exec bash "$0"',
+                                os.path.join(plugin, "hooks", "guard.sh")], cwd=root, env=env,
+                               input=json.dumps(payload), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0, "refused %s with no temp space (%d): %s" % (
+                payload["tool_name"], r.returncode, r.stderr[-300:])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(home, ignore_errors=True)
+
+
 CASES = [
+    the_guard_needs_no_temp_file_to_allow_a_harmless_command,
     the_parser_reads_the_write_shapes_agents_use,
     the_parser_ignores_what_is_not_a_file_write,
     a_bash_write_into_a_guarded_file_without_a_lease_is_refused,

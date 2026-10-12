@@ -20,6 +20,7 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 | R21 map | "every command the fabric map names exists" |
 | AS-07 | "a lease in a second repository is released from the session project" |
 | AS-09 | "a bash write into a guarded file without a lease is refused" (real `guard.sh`); 1.21.7 allowed it |
+| Disk-full lockout | "the guard needs no temp file to allow a harmless command" (`ulimit -f 0`); 1.21.7 refused `df -h` with "could not run its parser" |
 | AS-10 | self-test plant "description between house and spec cap" |
 | Default gate | `npm test`: `PASS: agent-sync v1.22.0 — all checks green` + every suite, recorded in the PR |
 
