@@ -118,15 +118,34 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 # Forward the coordinator's one-line notice (R19's held-too-long warning, at most once per
-# lease per run) as the host's `systemMessage`. Pure bash: no process spent on the common path.
+# lease per run). Each is one JSON object carrying `systemMessage` (the person sees it) and
+# `hookSpecificOutput.additionalContext` (the model sees it). The host parses stdout as ONE
+# object — two lines are a parse failure that drops both — so notices are collected and
+# printed once, on a successful exit only. Pure bash unless two repositories both had one.
+notices=()
 forward_notice() {
   case "$1" in
     *"AGENT_SYNC_NOTICE "*)
       local n="${1#*AGENT_SYNC_NOTICE }"
-      printf '%s\n' "${n%%$'\n'*}"
+      notices+=("${n%%$'\n'*}")
       ;;
   esac
 }
+flush_notices() {
+  local rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  case ${#notices[@]} in
+    0) ;;
+    1) printf '%s\n' "${notices[0]}" ;;
+    *) printf '%s\n' "${notices[@]}" | python3 -c '
+import json, sys
+msgs = [json.loads(l)["systemMessage"] for l in sys.stdin if l.strip()]
+m = "\n".join(msgs)
+print(json.dumps({"systemMessage": m, "hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "additionalContext": m}}, ensure_ascii=True))' ;;
+  esac
+}
+trap flush_notices EXIT
 
 # A Bash call: its writes, then its commit.
 if [ -z "$path" ]; then

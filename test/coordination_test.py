@@ -1289,13 +1289,50 @@ def a_lease_held_too_long_is_said_once_where_the_session_sees_it():
         payload = {"tool_name": "Edit", "tool_input": {"file_path": os.path.join(root, "notes.md")}}
         first = _run_guard(root, payload, home)
         assert first.returncode == 0, first.stderr
-        msg = json.loads(first.stdout.strip().splitlines()[-1])["systemMessage"]
+        # The host parses stdout as ONE JSON object; `systemMessage` reaches only the person,
+        # `hookSpecificOutput.additionalContext` reaches the model (hooks reference).
+        out = json.loads(first.stdout)
+        msg = out["systemMessage"]
         assert "LONG-1 held for" in msg and "release it between batches" in msg, msg
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse" and hso["additionalContext"] == msg, out
         again = _run_guard(root, payload, home)
         assert again.returncode == 0 and not again.stdout.strip(), "said twice: %r" % again.stdout
     finally:
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(home, ignore_errors=True)
+
+
+def a_write_into_two_repositories_says_both_notices_in_one_object():
+    """A Bash write into two coordinated repositories, each with a lease held too long, printed
+    two JSON lines; the host reads two objects as a parse failure and drops both (hooks
+    reference, "Exit code 0")."""
+    mod = _module()
+    p, q = _repo(), _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        env = _clean_env(HOME=home, AGENT_SYNC_RUN_ID="coordtest-guard")
+        for root, task in ((p, "LONG-P"), (q, "LONG-Q")):
+            cfg = os.path.join(root, ".claude", "agent-sync.json")
+            c = json.load(open(cfg))
+            c.update({"guardedFiles": ["notes.md"], "scheduledIntervalSeconds": 60})
+            json.dump(c, open(cfg, "w"))
+            won = _py(root, env, "acquire", task)
+            assert won.returncode == 0, won.stdout + won.stderr
+            lock = os.path.join(root, ".agent-sync", "leases", mod.lease_name(task) + ".lock")
+            body = json.load(open(lock))
+            body["since"] = "2026-01-01T00:00:00Z"
+            json.dump(body, open(lock, "w"))
+        cmd = "echo x > %s/notes.md && echo y > %s/notes.md" % (p, q)
+        r = _run_guard(p, {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": p}, home)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout)
+        for task in ("LONG-P", "LONG-Q"):
+            assert task in out["systemMessage"], out
+            assert task in out["hookSpecificOutput"]["additionalContext"], out
+    finally:
+        for d in (p, q, home):
+            shutil.rmtree(d, ignore_errors=True)
 
 
 CASES = [
@@ -1316,6 +1353,7 @@ CASES = [
     check_refuses_a_scheduled_interval_below_the_schema_minimum,
     the_wiring_snapshot_names_the_vault_first_for_notion,
     a_lease_held_too_long_is_said_once_where_the_session_sees_it,
+    a_write_into_two_repositories_says_both_notices_in_one_object,
     a_refusing_vault_never_locks_the_guard,
     an_allowing_vault_reruns_with_the_same_argv_and_the_main_worktrees_project,
     a_vault_slot_created_later_is_seen_and_the_engine_path_is_cached,

@@ -5912,8 +5912,10 @@ def cmd_guard(args: argparse.Namespace) -> int:
         print(f"agent-sync guard: {exc}", file=sys.stderr)
         return 2
     if notice:
-        # One JSON line the hook forwards as the host's `systemMessage` (R19, seam S9).
-        print(NOTICE_MARK + json.dumps({"systemMessage": notice}, ensure_ascii=True))
+        # One JSON line the hook forwards (R19, seam S9): `systemMessage` reaches the person,
+        # PreToolUse `additionalContext` the model, which is the one holding the lease.
+        print(NOTICE_MARK + json.dumps({"systemMessage": notice, "hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "additionalContext": notice}}, ensure_ascii=True))
     return 0
 
 

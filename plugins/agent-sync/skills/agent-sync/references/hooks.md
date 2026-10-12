@@ -106,8 +106,11 @@ the narrowing is its own, in two steps (1.22.0):
    `git add X && git commit` used to reach the commit with X not yet in the index.
 
 When `guard` allows a write while this run holds a lease longer than the repository's
-`scheduledIntervalSeconds`, the hook prints `{"systemMessage": …}` — R19's warning, once
-per lease per run (a marker under `.agent-sync/warned/`).
+`scheduledIntervalSeconds`, the hook prints R19's warning once per lease per run (a marker
+under `.agent-sync/warned/`) as ONE JSON object: `systemMessage` for the person and
+`hookSpecificOutput.additionalContext` for the model — Claude Code shows a `systemMessage`
+to the person only. A Bash write into several repositories merges their notices into that
+one object: the host reads two JSON lines as a parse failure and drops both.
 
 **Which repository decides (since v1.21.2): the one that owns the write.** For
 `Edit`/`Write`/`MultiEdit`/`NotebookEdit` that is `git -C <dirname of the path>

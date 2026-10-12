@@ -76,7 +76,8 @@ now, so the two gates run the same set.
   no longer misses `sed 's/;/x/' -i f` (risk c).
 - **A lease held too long is said where the session sees it (seam S9).** R19's warning
   printed only from `status` at SessionStart, when a fresh session holds nothing. The guard
-  now emits it once per lease per run as the host's `systemMessage`.
+  now emits it once per lease per run, as one JSON object with `systemMessage` (the person)
+  and PreToolUse `additionalContext` (the model) — see the final polish below.
 - **Smaller corrections.** `init --backend outline` no longer says `set -a && . ./.env.agent-sync`
   (every command and hook reads the file itself); the generated wiring snapshot names the
   vault slot first for `notion`, the file only as a degraded fallback; `check` enforces the
@@ -96,6 +97,13 @@ now, so the two gates run the same set.
   and the commit check was skipped, staged guarded files included (1.21.x skipped every
   heredoc commit). It is now checked against the index of the payload's directory. Case
   added; on `6ab4c47` `commit_plan` answered "not a commit".
+- **The held-too-long notice reaches the model, once (AS-21).** Claude Code shows a
+  `systemMessage` to the person only, and it reads two JSON lines on stdout as a parse
+  failure that drops both — which a Bash write into two repositories, each with a lease held
+  too long, printed. The guard now prints one object with `systemMessage` and
+  `hookSpecificOutput.additionalContext`, merging several repositories' notices. Cases "a
+  lease held too long is said once where the session sees it" (extended) and "a write into
+  two repositories says both notices in one object" — both failed on `7009bb9`.
 - **`main()` starts clean.** The git answer memo, the token source and the vault-degraded
   note are reset per invocation, so a second in-process call never sees the first's.
 - **Docs.** `fabric-coordination.md` names the real flag (`reserve <register> --key <k>`,
