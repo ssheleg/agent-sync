@@ -28,6 +28,9 @@ import tempfile
 import shutil
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+import _sandbox  # noqa: E402 - a temp HOME and no inherited session id, before anything runs
+_sandbox.isolate()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)

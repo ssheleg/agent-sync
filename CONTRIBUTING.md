@@ -10,8 +10,11 @@ Exit 0 prints `PASS: agent-sync vX.Y.Z — all checks green`. That covers the Ag
 Skills spec floor, this repo's house rules, version sync, and the two rules that
 exist because breaking them ships a secret.
 
-`npm test` runs that, then the claim-cell, SessionStart-hook and installer tests. It
-is the fast gate and the one to run on every change.
+`npm test` runs that, then the claim-cell, SessionStart-hook, uncoordinated-guard and
+coordination suites, every `test/audit_regressions/*.py` and the installer test — what CI
+runs — each with its own temporary HOME and no inherited session id (`test/run_gate.py`),
+and fails if the operator's own `~/.agent-sync` changed. It is the fast gate and the one
+to run on every change.
 
 Then prove the validator can still fail:
 

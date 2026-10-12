@@ -1,3 +1,231 @@
+## v1.22.0 — coordination that Fabric and Observatory can lean on
+
+Integration wave 3 of the family's 2026-10-11 waves run (hub plan R17–R22), and two fix
+rounds after blind verifiers failed the first candidate (`27f485a`) and the second
+(`e32c7c9`, PR #32). `test/coordination_test.py` joins `npm test` with **50 cases**. Against
+1.21.7, 30 of the first 33 fail (13 on an assertion, 17 because the code they call does not
+exist there) and 3 pass — "an id really missing is still a leak", "a short key keeps its
+readable id" and "the same key is the same run every time" are regression guards. Against
+the first candidate `27f485a`, the 14 cases added in the first fix round all fail, as do the
+extended parser case and the long-expired case (its message changed from `> 7d` to `>= 7d`).
+Against the second candidate `e32c7c9`, the 17 cases added in the second fix round all fail
+(11 on an assertion, 6 with an exception — three call a function that does not exist there, one a function whose signature changed, one hits the very ImportError it pins, one parses the hook's empty output), as do the
+extended parser case and the vault-cache case.
+
+**`npm test` now runs every CI test suite, sandboxed.** It runs `test/run_gate.py`: every suite
+CI runs — the five it ran before, every `test/audit_regressions/*.py` (CI ran them and
+`npm test` did not, so CI went red on FIX-SY-04.02 behind a green local gate) and the
+installer test — each with its own temporary HOME and without CLAUDE_CODE_SESSION_ID,
+CLAUDE_SESSION_ID or AGENT_SYNC_RUN_ID, then checks that the HOME it was started with has
+the same `~/.agent-sync` files as before. A test run had written 14 files into the
+operator's real `~/.agent-sync/session-repos`: `claim_cell_test.py`'s `cli()` passed the
+real HOME and the live session id through, and `SESSION_REPOS_DIR` was resolved at import.
+Every suite now calls `test/_sandbox.py` first (a temp HOME that also holds its `mkdtemp`
+fixtures, removed at exit), `session_repos_dir()` reads HOME at each call, and the case
+"the suite never writes the HOME it was given" fails without the sandbox (watched: a
+sentinel HOME received 3 files). The other direction too: CI's `validate` job had never run
+`guard_uncoordinated_test.py` or `coordination_test.py`, which `npm test` did; it runs both
+now, so the two gates run the same set.
+
+### Fix round 2 (second blind reading of `e32c7c9`)
+
+- **SKILL.md states the two write modes again (FIX-SY-04.02, CI red).** The compaction
+  had dropped the paragraph its audit regression pins: a task lease authorizes the TASK,
+  never the file; the resource claim is the short transaction lock; heavy overlap takes an
+  isolated worktree + merge; the guard does NOT promise enforcement from a single task
+  owner. Body 4726/4750 tokens (the `$SKILL_DIR` paragraph and the interval line trimmed).
+- **`git add X && git commit` in one call is guarded (AS-16).** The hook reads the index
+  before the command runs, so X was not staged yet and the commit passed. The commit parser
+  moved into `bash_writes.py --commit` (the same tokeniser as the write parse) and reads
+  what the same command stages — `git add <specs>`, `-A`, `-u`, `.`, `git commit -a`,
+  `git commit <paths>` — asking `git ls-files` which files that is; those are checked with
+  the index in ONE coordinator call.
+- **`status` names a token read from the file as degraded (unit B1).** `status` loaded the
+  file, then Sync() loaded it again, found the token in the environment and relabelled it
+  "from the environment". The source is now assigned once per process.
+- **The vault is asked once per process, and only where a token is used.** The decision is
+  memoised per root before any child starts (risk b). `renew` and `release --held` no longer
+  ask at all (seam S2/S3): the lease they act on is a local lock or a git ref, and what the
+  token would add is one visibility line in the Notion claims log, whose readers apply the
+  TTL anyway — while renew.sh runs after every tool call (two `use` audit rows per call
+  once a slot existed) and SessionEnd has 2 s, which a probe and a re-run consumed. With the
+  token in the plaintext file they still publish. A re-run keeps the hook's clock: the first
+  process records its start in `AGENT_SYNC_HOOK_T0` before `execv` (risk a). The `run` probe
+  is cached beside the slot answer (a pass for the hour, a refusal for a minute), and a
+  missing slot is asked again after a minute even with no file token (risk g).
+- **A host without `fcntl`** no longer crashes `acquire` after the lease was won (seam S4).
+- **The guard is cheaper and gated on the repository that owns the write (seam S5/S6/S8).**
+  `bash_writes.py --guarded` resolves each target's repository by walking to `.git`, drops
+  every target no `guardedFiles` pattern matches, and the hook runs the coordinator once per
+  owning repository with all its targets; `guard` memoises its read-only git questions; a
+  Bash call spawns no interpreter until its payload carries a write shape (a `>`, or
+  tee/sed/cp/mv as a WORD — `used` and `guarantee` no longer match) or `commit`; hook
+  bytecode is cached under `~/.cache/agent-sync/pycache` instead of recompiled. Because
+  the owner decides, a session rooted outside every coordinated repository that writes into
+  one is refused at the write. renew.sh decides without reading stdin wherever it can and
+  reads only the payload's first 4 KB otherwise. Measured interleaved against `e32c7c9`
+  under load average ~45 (absolute numbers on this machine are noisy; the spawn counts are
+  not): a coordinated two-target redirect with the lease held 244 ms (git 2, python3 3) vs
+  477 ms (git 10, python3 4); renew.sh on a 2 MB PostToolUse payload in an uncoordinated
+  repository 8.1 ms vs 89.1 ms (medians of 15).
+- **`mv` writes its source too (seam S7)**, and the parser reads `<<\EOF`, `<( … )` and
+  `>( … )`, `cd -L/-P`, `timeout`/`nice`/`stdbuf`/`xargs` prefixes, `sed --expression=`,
+  `env -C DIR`, a `cd` in a pipeline or behind `&` (no move), `<>` (a write), and an absolute
+  `cp`/`mv` destination directory whatever the current directory is (risk d). What it still
+  skips is listed as UNPARSED in `guard.sh` and the module docstring. Its `main()` prefilter
+  no longer misses `sed 's/;/x/' -i f` (risk c).
+- **A lease held too long is said where the session sees it (seam S9).** R19's warning
+  printed only from `status` at SessionStart, when a fresh session holds nothing. The guard
+  now emits it once per lease per run, as one JSON object with `systemMessage` (the person)
+  and PreToolUse `additionalContext` (the model) — see the final polish below.
+- **Smaller corrections.** `init --backend outline` no longer says `set -a && . ./.env.agent-sync`
+  (every command and hook reads the file itself); the generated wiring snapshot names the
+  vault slot first for `notion`, the file only as a degraded fallback; `check` enforces the
+  schema's `scheduledIntervalSeconds` minimum of 60; a lease ref is flagged keyless only when
+  its payload parses as a JSON object without `key`, and the warning says it "was written by
+  ≤1.21.2 (ts …)" — a date, not proof of a live writer; citations of project-observatory
+  DECISIONS.md corrected to :2023 and :12873.
+
+### Final polish (third blind reading of `6ab4c47`)
+
+- **`git commit --gpg-sign <path>` is guarded.** The AS-16 parser took `--gpg-sign` as an
+  option with a value, so the pathspec after it was swallowed and the commit passed with a
+  guarded file unleased; the key id attaches only as `--gpg-sign=<keyid>`. Case added to
+  "git add and commit in one call is guarded" (it fails on `6ab4c47`: the plan staged nothing).
+- **A heredoc commit message with an odd number of quotes is still a commit (AS-18).** The
+  tokenizer closes a `"…"` string at the first inner quote, so such a message did not parse
+  and the commit check was skipped, staged guarded files included (1.21.x skipped every
+  heredoc commit). It is now checked against the index of the payload's directory. Case
+  added; on `6ab4c47` `commit_plan` answered "not a commit".
+- **The held-too-long notice reaches the model, once (AS-21).** Claude Code shows a
+  `systemMessage` to the person only, and it reads two JSON lines on stdout as a parse
+  failure that drops both — which a Bash write into two repositories, each with a lease held
+  too long, printed. The guard now prints one object with `systemMessage` and
+  `hookSpecificOutput.additionalContext`, merging several repositories' notices. Cases "a
+  lease held too long is said once where the session sees it" (extended) and "a write into
+  two repositories says both notices in one object" — both failed on `7009bb9`.
+- **`main()` starts clean.** The git answer memo, the token source and the vault-degraded
+  note are reset per invocation, so a second in-process call never sees the first's.
+- **Docs.** `fabric-coordination.md` names the real flag (`reserve <register> --key <k>`,
+  not `--rkey`); this entry's feature list sits under its own heading. `npm test` runs every
+  CI *test suite*: the validator self-test, the coordinator smoke test, the stray-SKILL.md
+  check, `claude plugin validate --strict` and the `skill-audit` job stay CI-only.
+
+### Upgrading to 1.22.0 mid-flight
+
+- **A session's run id changes.** Claude Code exports CLAUDE_CODE_SESSION_ID to every Bash
+  call, and 1.22.0 reads it: a session whose Bash calls used the shared identity under
+  1.21.x now resolves to its own id, so a lease it took under the shared id looks like
+  another run's. Release before upgrading, or let it expire. 1.22.0 does NOT adopt the
+  shared entry's id on first sight of a session key — that would merge this session with
+  whichever session last wrote the shared entry, the collision B-150 removed.
+- **The session list moved.** 1.22.0 keys the list of other repositories by the session
+  (`~/.agent-sync/session-repos/<sha256>.json`); a list keyed by project slug from a
+  pre-release build is not read. Leases listed only there are renewed and released by hand.
+- **Observatory's tick changes identity across the upgrade.** `tools/tick.sh` exports
+  `AGENT_SYNC_RUN_ID="ti$$-observatory-tick"`, and `tools/tick_lease.py` acquires and
+  releases in separate processes, each importing the HIGHEST cached plugin version. That id
+  is longer than twelve characters, so 1.22.0 derives a different run id from it (R17): a
+  release under 1.22.0 of a lease acquired under 1.21.7 is refused as another run's until
+  the TTL. Upgrade between ticks — let the running tick release first.
+- **Sessions started before the upgrade keep the old plugin.** CLAUDE_PLUGIN_ROOT pins the
+  cache directory a session started with (1.21.0–1.21.2 are still in this machine's cache):
+  restart those sessions; a keyless lease ref is what they write.
+- **Observatory's own config has no `scheduledIntervalSeconds`**, so R19's warning cannot
+  fire there yet. Adding it is the Observatory owner's change (backlog AS-17).
+
+### What changed
+
+- **A run id is unique per key (R17).** It was the first twelve `[a-z0-9]` of the key, so
+  `observatory-scheduled-tick-1` and `-2` were one run (`r-observatorys`). Now a key that
+  fits in twelve characters is kept whole, and a longer one keeps six readable characters
+  plus six hex of a sha256 of the whole key (project-observatory DECISIONS.md:2023).
+  Ids already stamped in a marker read back unchanged. **Upgrade effect:** a process that
+  derives its id from a long `AGENT_SYNC_RUN_ID` (or session id) with no marker entry gets
+  a different id than 1.21.7 gave it, so a lease 1.21.7 took under the old id is not this
+  run's after the upgrade — release it before upgrading, or let it expire. A new session
+  entry is also derived from the session id rather than minted at random.
+- **Ids print and match at the register's own width (AS-08).** A three-digit register
+  (`CO-051`) was handed `CO-0051`, and every id it held was reported as a permanent leak.
+- **The description cap is the family's 970 (AS-10)**, not the spec's 1024, with a
+  self-test plant in the band between the two.
+- **A lease held past the repository's scheduled interval is reported (R19).** The new
+  optional `scheduledIntervalSeconds` names the interval; it is in `CONFIG_KEYS` and the
+  schema, so `check` accepts it (the first candidate's `check` called it unknown).
+  `status` warns when a held lease is older, measured from `since`, which `acquire` now
+  writes and `renew` keeps. Observatory's scheduled tick stands aside while a lease is
+  held (DECISIONS.md:12873).
+- **`reap --long-expired` (AS-11) — a sweep by age, and the operator's decision.** It
+  lists locks on both planes expired at least seven days ago (`--older-than-days N`, at
+  least 1 — `0` used to become 7 silently), each with the classifier's verdict and reason,
+  and with `--apply` clears exactly those through the `--i-own-this` path: live leases
+  refused, each payload printed and journaled, a younger entry of the same key on the
+  other plane left alone. `--apply` or `--older-than-days` without `--long-expired` is
+  refused. `references/lease-protocol.md` carries the dated amendment — reap otherwise
+  never touches foreign state — and `SKILL.md` says `--apply` is never an agent's call.
+  `status` counts candidates in the lock directory only, and says so.
+- **The `notion` token comes from the Observatory vault first (R20).** A command that
+  touches the record plane, with no token in the environment, re-runs itself under
+  `use_secret.py run --vault-only <project> AGENT_SYNC_NOTION_TOKEN`, so the value never
+  reaches argv. Fixed after the first candidate: `guard`, `write-targets` and `whoami`
+  (and since fix round 2 `renew` and `release --held`) never ask the vault (a vault whose `where` said yes and whose `run` refused locked every
+  Edit, Write and commit with exit 2); `run` is probed with a no-op child before the
+  re-run, and a refusal falls back to the file and is reported; the project is the main
+  worktree's folder (or the remote's name), not the checkout's, so a linked worktree finds
+  its slot; a positive `where` is cached for the hour (a negative for a minute, or the hour
+  while the file still holds a token), and the `use_secret.py` path is cached too; the config's own
+  `backend` counts; the argv of this invocation is the one re-run. A token read from
+  `.env.agent-sync` is reported by `status` as `degraded: plaintext token file` with the
+  `vault.py put` command. `init --backend notion` prints vault-first steps and no longer
+  tells anyone to `source` the file. Vault-first is `notion`-only in this release; `outline`
+  is an open board row.
+- **A lease in a second repository is renewed and released (AS-07).** `acquire` lists the
+  repository under the SESSION — `~/.agent-sync/session-repos/<sha256 of the session
+  key>.json` — and the renew and SessionEnd hooks pass `--session-repos`. Fixed after the
+  first candidate, which keyed the list by `CLAUDE_PROJECT_DIR` (absent from a Bash tool
+  call, so nothing was ever registered from one, and shared by two sessions, so one's
+  SessionEnd dropped the other's repository) and ran every repository in one process (so
+  repository X inherited P's backend, URL, collection and token): each listed repository
+  now runs in its own child process, in parallel, from the environment the hook started
+  with, inside the hook's budget; one failing repository never strands the rest. The
+  identity order gains `CLAUDE_CODE_SESSION_ID` — what Claude Code exports to every Bash
+  call — and the hooks hand the payload's session id to the coordinator, so a shell and
+  a hook resolve one run in a repository no SessionStart stamped. bash and Python name
+  the list file identically for long and non-ASCII keys under any locale.
+- **The guard sees Bash writes (AS-09).** Into a coordinated repository, `>`, `>>`, `>|`,
+  `&>`, `>& FILE`, `tee`, `sed -i`, `cp` and `mv` into a guarded file need a lease. The
+  parse lives in the small `scripts/bash_writes.py`, because the hook runs on every Bash
+  call. Fixed after the first candidate: it tokenises before it segments, so a heredoc's
+  body (`cat > notes.md <<'EOF'` followed by `> docs/ROADMAP.md`) and a quoted `;` or `|`
+  are no longer read as commands; `( … )` subshells, `cd -` (stop following),
+  `env`/`sudo`/`nohup` prefixes are handled. `$VAR`, backtick and glob targets stay
+  unparsed, and the capability matrix in `guard.sh` lists exactly the shapes the tests
+  cover.
+- **A full disk no longer locks every Bash call (found live, 2026-10-12).** `guard.sh` fed
+  its parsers through bash here-strings, and bash 3.2 (macOS) writes a here-string to a temp
+  file. With the disk full, the parser read nothing and the guard failed closed: every Bash call
+  was refused, including the cleanup that would have freed space. Payloads now travel through
+  pipes and process substitution, which need no file. The case "the guard needs no temp file to
+  allow a harmless command" runs under `ulimit -f 0`, and 1.21.7 failed it with the exact
+  message seen live.
+- **Fabric conformance map (R21).** `references/fabric-coordination.md` maps each operation
+  of `fabric-agent-contract@bcada4a` `coordination.md` to the command that implements it
+  (Fabric names no reference implementation). A test checks every named command exists.
+  The gaps are listed: idempotency keys, `release` without an outcome, `reserveId` without
+  count or ttl, scope containment, residue categories, and the contract's "expiry does not
+  prove the writer stopped" against `acquire`'s steal and the age sweep.
+- **AS-14 reopened, not dropped.** The first candidate dropped it on the premise that no
+  1.21.2-or-older writer is alive. The Fabric remote disproves that: on 2026-10-12 it held
+  `refs/agent-sync/leases/docs-architecture-report-workspace.md`, with no `key`, written
+  2026-10-08 by `r-d8d027823`, beside the same path's 1.21.3 ref. That dates a write; it
+  does not prove a live writer — the ref's host is this machine, whose plugin cache still
+  holds 1.21.0–1.21.2, which a session started before an upgrade keeps running. The remedy
+  is to restart such sessions. The drop stays a proposal pending the operator's decision;
+  `residue` flags every lease ref without a `key` in one line, with its timestamp.
+- **A self-test plant had gone blind.** `since` in the local lock payload moved the anchor
+  of "a local lock records no host", so on the first candidate that plant changed nothing
+  and would have reported MISSED. Re-anchored, run by hand on a copy: detected.
+
 ## v1.21.7 — a lease the guard would not recognise is refused, and a worktree finds its session
 
 - **`acquire` refuses the shared fallback identity where hooks know their session.** From

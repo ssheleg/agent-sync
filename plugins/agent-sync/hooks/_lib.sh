@@ -2,9 +2,22 @@
 # Shared helpers for the agent-sync hooks. Sourced, never executed.
 
 # Every hook runs python3 against the shipped scripts/ directory, which people read
-# as source, not as a build product. Bytecode caching buys nothing at this call rate
-# and left scripts/__pycache__ regenerating forever (ASY-01).
-export PYTHONDONTWRITEBYTECODE=1
+# as source, not as a build product: bytecode written beside the scripts left
+# scripts/__pycache__ regenerating forever (ASY-01). It goes to a cache directory OUTSIDE
+# the tree instead. Disabling it outright cost a full compile of the 7,000-line coordinator
+# on every guarded write (~50 ms of a ~170 ms guard call, measured 2026-10-12, seam S5).
+# No HOME, no cache directory to name: no bytecode at all, as before.
+if [ -n "${XDG_CACHE_HOME:-}${HOME:-}" ]; then
+  export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/agent-sync/pycache"
+else
+  export PYTHONDONTWRITEBYTECODE=1
+fi
+# A bytecode write that cannot happen must not kill the interpreter. On a full disk Python
+# gets ENOSPC and carries on; under a file-size limit the kernel sends SIGXFSZ instead, whose
+# default action is to terminate — the guard's parser died and the guard failed closed
+# ("the guard needs no temp file to allow a harmless command", `ulimit -f 0`). Ignored, the
+# write returns EFBIG, which Python ignores too. Children inherit the ignored disposition.
+trap '' XFSZ 2>/dev/null || true
 
 # Run a command under a time limit, portably.
 #
@@ -58,6 +71,56 @@ run_limited() {
 # whatever repository a write lands in (see agent_sync_owner below).
 agent_sync_configured() {
   [ -f "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/agent-sync.json" ]
+}
+
+# AS-07: the repositories this session took leases in, listed by agent_sync.py at acquire
+# time under the SESSION's key -- never the project directory, which a Bash tool call does
+# not carry and two sessions in one project share. The key is computed exactly as
+# `_session_key()` in agent_sync.py does: AGENT_SYNC_RUN_ID, CLAUDE_SESSION_ID,
+# CLAUDE_CODE_SESSION_ID, else the hook payload's session_id. Pass the payload as $1.
+agent_sync_payload_session() {
+  local re='"session_id"[[:space:]]*:[[:space:]]*"([^"]+)"'
+  [[ ${1:-} =~ $re ]] && printf '%s' "${BASH_REMATCH[1]}"
+}
+
+agent_sync_session_key() {
+  if [ -n "${AGENT_SYNC_RUN_ID:-}" ]; then printf 'env:%s' "$AGENT_SYNC_RUN_ID"; return 0; fi
+  if [ -n "${CLAUDE_SESSION_ID:-}" ]; then printf 'session:%s' "$CLAUDE_SESSION_ID"; return 0; fi
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'session:%s' "$CLAUDE_CODE_SESSION_ID"; return 0; fi
+  local sid; sid=$(agent_sync_payload_session "${1:-}")
+  [ -n "$sid" ] && printf 'session:%s' "$sid"
+}
+
+# A hook knows its session from the payload even when the environment does not; hand it to
+# the coordinator, so the guard and the lifecycle hooks resolve the same run in a repository
+# no SessionStart stamped as the Bash call that acquired there (CLAUDE_CODE_SESSION_ID).
+agent_sync_export_session() {
+  [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}${AGENT_SYNC_RUN_ID:-}" ] && return 0
+  local sid; sid=$(agent_sync_payload_session "${1:-}")
+  [ -n "$sid" ] && export CLAUDE_SESSION_ID="$sid"
+  return 0
+}
+
+# sha256 of stdin's bytes, hex. The same digest agent_sync.py takes of the key's raw bytes, so
+# the file name agrees for any key -- long, non-ASCII, under LC_ALL=C. A file name made by
+# substituting characters disagreed with Python's for both (truncation, multibyte classes).
+agent_sync_sha256() {
+  local out
+  if command -v sha256sum >/dev/null 2>&1; then out=$(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then out=$(shasum -a 256)
+  elif command -v openssl >/dev/null 2>&1; then out=$(openssl dgst -sha256 -r)
+  else return 1; fi
+  printf '%s' "${out%% *}"
+}
+
+# A directory test first, so a machine where no session ever left its project pays nothing.
+agent_sync_has_session_repos() {
+  local d="$HOME/.agent-sync/session-repos" key h
+  [ -d "$d" ] || return 1
+  key=$(agent_sync_session_key "${1:-}") || return 1
+  [ -n "$key" ] || return 1
+  h=$(printf '%s' "$key" | agent_sync_sha256) || return 1
+  [ -n "$h" ] && [ -f "$d/$h.json" ]
 }
 
 # The repository that OWNS a path decides whether a write to it is coordinated -- never the

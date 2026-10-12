@@ -27,7 +27,11 @@ from pathlib import Path
 # The importlib loads below compile bytecode into the shipped scripts/ directory;
 # a validator run must not leave build products in a tree people read as source (ASY-01).
 sys.dont_write_bytecode = True
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+import _sandbox  # noqa: E402 - a temp HOME and no inherited session id, before anything runs
+_sandbox.isolate()
 
+DESC_CAP = 970  # family house cap (audit_skill.py --house DESC_HEADROOM), AS-10
 ROOT = Path(__file__).resolve().parent.parent
 
 # Hosts a published file may legitimately name. Anything else is treated as an
@@ -124,8 +128,12 @@ def check_skill(skill_dir: Path) -> str | None:
     if not isinstance(desc, str) or not desc:
         err(f"{rel(md)}: description missing")
     else:
-        if len(desc) > 1024:
-            err(f"{rel(md)}: description is {len(desc)} chars, cap is 1024")
+        # 970, not the spec's 1024: CI runs the family auditor (`audit_skill.py --house`,
+        # DESC_HEADROOM), and a gate looser than CI's says green on a release CI then
+        # refuses — measured at 1017 chars on 2026-08-31 (AS-10).
+        if len(desc) > DESC_CAP:
+            err(f"{rel(md)}: description is {len(desc)} chars, cap is {DESC_CAP} "
+                "(the family house cap; the spec allows 1024)")
         if not desc.startswith("Use when"):
             err(f"{rel(md)}: description must start with 'Use when'")
         if not re.search(r"[а-яА-ЯёЁ]", desc):
@@ -3235,6 +3243,30 @@ def check_init_notion_writes_its_env_keys() -> None:
                 "container is never created and every later command reports it missing")
 
 
+def check_init_never_tells_the_operator_to_source_the_env_file() -> None:
+    """`init --backend outline` printed `set -a && . ./.env.agent-sync` while every doc said
+    never to source it (fix round 2, item 5): sourcing puts the token in every process the
+    shell starts. Every command and hook reads the file itself — no backend's NEXT steps may
+    say otherwise."""
+    if not shutil.which("git"):
+        notes.append("git not found — init sourcing check skipped")
+        return
+    for backend, extra in (("outline", ["--url", "https://wiki.example.com"]), ("notion", []),
+                           ("fs", [])):
+        with tempfile.TemporaryDirectory() as project:
+            _git_project(project)
+            r = _run_script(project, "init", "--backend", backend, *extra)
+            if r.returncode != 0:
+                err(f"init --backend {backend} failed: {r.stderr.strip()[:200]}")
+                continue
+            if re.search(r"(^|\s)(\.|source)\s+\S*\.env\.agent-sync", r.stdout) or "set -a" in r.stdout:
+                err(f"init --backend {backend} tells the operator to source .env.agent-sync — "
+                    "every command and hook reads the file itself")
+            if backend == "outline" and "reads .env.agent-sync itself" not in r.stdout:
+                err("init --backend outline no longer says that every command and hook reads "
+                    "the env file itself")
+
+
 def check_bootstrap_follows_the_configured_backend() -> None:
     """`bootstrap` built an Outline collection whatever the project was configured for.
 
@@ -3813,6 +3845,7 @@ def main() -> int:
     _guarded(check_no_adapter_claims_a_lease_it_cannot_decide)
     _guarded(check_notion_retries_only_what_can_succeed)
     _guarded(check_init_notion_writes_its_env_keys)
+    _guarded(check_init_never_tells_the_operator_to_source_the_env_file)
     _guarded(check_bootstrap_follows_the_configured_backend)
     _guarded(check_check_accepts_every_shipped_backend)
     _guarded(check_baseline_is_not_poisoned_by_the_next_free_line)
@@ -3856,6 +3889,10 @@ def self_test() -> int:
         # The exact value that shipped 0.1.0 → 1.20.2, which Codex clamps with a warning.
         "SessionEnd timeout a host clamps": ("plugins/agent-sync/hooks/hooks.json",
                                              lambda t: t.replace('"timeout": 3\n', '"timeout": 20\n', 1)),
+        # AS-10: between the house cap and the spec cap — the band the old gate passed.
+        "description between house and spec cap": (
+            "plugins/agent-sync/skills/agent-sync/SKILL.md",
+            lambda t: t.replace('description: "Use when', 'description: "Use when' + "x" * 40, 1)),
         "description over cap": ("plugins/agent-sync/skills/agent-sync/SKILL.md",
                                  lambda t: t.replace("description: \"Use when",
                                                      "description: \"" + "x" * 1100 + " Use when")),
@@ -4148,19 +4185,18 @@ def self_test() -> int:
                 "    try:\n        _ok, _warn, setup_problems = check_setup(root)")),
         # The commit branch of the guard stops recognising a commit — the shape of the
         # defect that let a full day of commits reach guarded registers.
+        # Since 1.22.0's fix round 2 the commit parser is `bash_writes.py --commit` (AS-16).
         "the guard stops seeing commits": (
-            "plugins/agent-sync/hooks/guard.sh",
-            lambda t: t.replace('if k < len(toks) and toks[k] == "commit":',
-                                'if k < len(toks) and toks[k] == "kommit":')),
-        # ASY-05 planted back exactly as it shipped: the comment kept claiming `|` while
-        # the chain consumed only `||`, so `echo msg | git commit -F -` was one segment
-        # and never guarded. Anchored on the replace chain, the value the check drives.
+            "plugins/agent-sync/skills/agent-sync/scripts/bash_writes.py",
+            lambda t: t.replace('        if sub == "commit":', '        if sub == "kommit":')),
+        # ASY-05 planted back: the single pipe stops separating commands, so
+        # `echo msg | git commit -F -` is one command whose first word is `echo`, and the
+        # commit is never guarded. Anchored on the tokeniser's separator set, the value the
+        # check drives (the shipped 1.21 defect was the same pipe, in a replace chain).
         "a piped commit slips past the guard": (
-            "plugins/agent-sync/hooks/guard.sh",
-            lambda t: t.replace(
-                'cmd.replace("&&", "\\n").replace("||", "\\n").replace("|&", "\\n")'
-                '.replace(";", "\\n").replace("|", "\\n")',
-                'cmd.replace("&&", "\\n").replace(";", "\\n").replace("||", "\\n")')),
+            "plugins/agent-sync/skills/agent-sync/scripts/bash_writes.py",
+            lambda t: t.replace('_SEPARATORS = {"&&", "||", ";", "|", "|&", "&", ";;", "\\n"}',
+                                '_SEPARATORS = {"&&", "||", ";", "|&", "&", ";;", "\\n"}')),
         # ASY-07 planted back: parser_or_die stops dying, so a machine without python3
         # is back to a guard that exits 0 and says nothing.
         "an absent interpreter fails open": (
@@ -4252,13 +4288,16 @@ def self_test() -> int:
         "a local lock records no host": (
             "plugins/agent-sync/skills/agent-sync/scripts/agent_sync.py",
             # Anchored on the LOCAL acquire's payload (it gained `key` in 1.21.3, #25, and
-            # the old anchor stopped matching — a plant that no-ops reports MISSED).
+            # `since` in 1.22.0, R19 — each time the old anchor stopped matching, and a plant
+            # that no-ops reports MISSED).
             lambda t: t.replace(
                 '        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),\n'
-                '                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node()})\n\n'
+                '                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node(),\n'
+                '                              "since": now_iso()})\n\n'
                 "        # A lease another run took under 1.21.2's lock name",
                 '        payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),\n'
-                '                              "ttl": self.ttl, "repo": repo_name()})\n\n'
+                '                              "ttl": self.ttl, "repo": repo_name(),\n'
+                '                              "since": now_iso()})\n\n'
                 "        # A lease another run took under 1.21.2's lock name")),
         # The ledger back to naming a version that is not the one that shipped — the exact
         # state found at 1.14.0, where the newest section cited v1.13.0 under a v1.14.0 tag.

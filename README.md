@@ -218,14 +218,33 @@ The agent asks where coordination state should live — a knowledge cloud, or lo
 | `.env.agent-sync` | **identity** — instance URL, token, collection id | **no** — mode 600, added to `.gitignore` |
 
 The token line is written **empty**. Creating the API token in your own instance and
-pasting it into that line is your step, and it stays yours: the tool never asks for a
-token in chat, never echoes one, and never passes one as a command-line argument.
+placing it is your step, and it stays yours: the tool never asks for a token in chat,
+never echoes one, and never passes one as a command-line argument.
 
-Load the environment before running agents:
+**Where the token goes depends on the backend (1.22.0).**
 
-```bash
-set -a && . ./.env.agent-sync && set +a
-```
+- **`notion` — the Observatory vault first.** Write only the token (one line, no `NAME=`)
+  into a mode-600 file outside the repository, then
+
+  ```bash
+  python3 "$(project-observatory full-path)/tools/vault.py" put <project> local AGENT_SYNC_NOTION_TOKEN < that-file
+  ```
+
+  and delete that file and the `AGENT_SYNC_NOTION_TOKEN` line of `.env.agent-sync`.
+  **In a submodule tree, put EVERY repository's slot first, then delete the line.** One
+  `.env.agent-sync` in the superproject serves each submodule below it, but the vault is
+  asked per repository (each one's own project name): delete the shared line before each
+  submodule has its slot and those submodules lose the token, falling back to `fs`.
+  `<project>` is the folder name of the repository's **main** checkout (a linked worktree's
+  folder is not a project); `init` and `status` print the exact command. Every command
+  that touches the record plane then re-runs itself under
+  `use_secret.py run --vault-only`, so the value reaches the process environment and
+  never argv. The guard, `renew` and SessionEnd's `release --held` never ask the vault (the
+  lease is a local lock or a git ref; the token would only publish a visibility line). Do **not** `source` `.env.agent-sync`: a
+  token in your shell's environment wins over the vault. Without Observatory, the file
+  line still works and `status` reports it as `degraded: plaintext token file`.
+- **`outline` — `.env.agent-sync`** in 1.22.0; vault-first for it is an open board row.
+  Every command and hook reads the file itself, so nothing needs to be sourced.
 
 Then create the container the coordination log lives in, once per project, and paste the
 id it prints into `AGENT_SYNC_OUTLINE_COLLECTION`:
@@ -268,6 +287,7 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" <command>
 | `whoami` | Print this run's id and its held leases |
 | `residue` | Expired locks still on disk, classified — this run's spent ones, and the foreign or ambiguously owned ones it reports and leaves alone |
 | `reap [KEY…]` | Clear only the locks this run can prove it owns and has spent, then re-read the directory to confirm the teardown |
+| `reap --long-expired [--older-than-days N] [--apply]` | List locks on both planes expired at least N days ago (default 7), each with the classifier's verdict; `--apply` clears them. A sweep by age alone — **the operator's decision, never an agent's** ([lease protocol](plugins/agent-sync/skills/agent-sync/references/lease-protocol.md#a-sweep-by-age--an-operators-decision-2026-10-12)) |
 | `merge` | Land this branch on the integration branch: conflicts checked first, merge log written, lease released |
 | `merges` | What landed while you were on your branch |
 
@@ -331,7 +351,7 @@ through and `release` restores exactly what was there, so one fact keeps one hom
 
 | Key | Meaning |
 |---|---|
-| `backend` | `outline` or `fs` (required) |
+| `backend` | `outline`, `notion` or `fs` (required) |
 | `leaseTtlSeconds` | how long a lease survives without a renew (default 2700) |
 | `renewIntervalSeconds` | how often a live run renews (default 300) |
 | `gated` | whether runs may be recorded as enforced at all |
@@ -342,6 +362,7 @@ through and `release` restores exactly what was there, so one fact keeps one hom
 | `mirror` | which git files are rendered into the read-only mirror |
 | `integrationBranch` | where work lands and the only branch a claim is written on (default: the repo's own) |
 | `mergeLog` | `file` and `retentionDays` for the merge log (default `docs/MERGES.md`, 7) |
+| `scheduledIntervalSeconds` | the interval (integer, ≥ 60 — `check` enforces it) of a scheduled job that stands aside while a lease is held (Observatory's tick); `status`, and the guard once per lease as a `systemMessage`, warn when this run has held one longer. Absent: no warning |
 
 `.env.agent-sync` — gitignored, mode 600. It is looked for in this repository, then in
 each **superproject** above it (so one credentials file serves a tree of submodules), and
@@ -400,7 +421,8 @@ Installing globally changes nothing in repositories without `.claude/agent-sync.
 The lifecycle hooks (`SessionStart`, `PostToolUse`, `SessionEnd`) act on the session's
 project and exit immediately when it has no config. The `PreToolUse` guard asks a
 different question — **the repository that owns the write decides**: for an edit, the
-git repository containing the file; for a commit, the one named by `-C` or `cd`. No
+git repository containing the file; for a Bash write, the repository of each target; for a
+commit, the one named by `-C` or `cd`. No
 config there → allowed; config there → checked from that repository's root, against its
 `guardedFiles` and its leases, whatever the session's own project is. A path inside no
 git repository is allowed. The guard can **deny** a tool call and never grants one that
@@ -409,9 +431,9 @@ would otherwise be denied.
 | Hook | Runs | Effect |
 |---|---|---|
 | `SessionStart` | startup, resume | `status` — the board summary, other runs, one next action |
-| `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and every `Bash` call — of which only a parsed `git commit` is acted on | Denies the edit (exit 2) when the path is guarded **in the repository that owns it** and this run holds no lease there; a `git commit` is checked against every staged path of the repository it commits to |
-| `PostToolUse` | every tool call | Throttled `renew` — touches the network at most once per `renewIntervalSeconds` |
-| `SessionEnd` | session end | Releases every lease this run holds |
+| `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and every `Bash` call — a parsed `git commit`, and (1.22.0) a Bash write by `>`/`>>`/`>\|`/`&>`, `tee`, `sed -i`, `cp` or `mv` | Denies the call (exit 2) when the path is guarded **in the repository that owns it** and this run holds no lease there; a `git commit` is checked against every staged path of the repository it commits to **and every file the same command stages** (`git add X && git commit`, `git commit -a`, AS-16). Bash writes are parsed in every session and checked in the repository that owns each target; what the parse cannot resolve (`$VAR` targets, the arguments `xargs` reads from stdin, `perl -i`, a runtime's own write) it skips — the capability matrix in `guard.sh` lists each shape |
+| `PostToolUse` | every tool call | Throttled `renew` — touches the network at most once per `renewIntervalSeconds`; also in every other repository this session took a lease in |
+| `SessionEnd` | session end | Releases every lease this run holds — here, and (1.22.0) in every other repository this session took a lease in, each by its own process inside the same 2 s |
 
 Details and removal:
 [`references/hooks.md`](plugins/agent-sync/skills/agent-sync/references/hooks.md).
@@ -476,7 +498,7 @@ These run **in a clone of this repository**. The published npm package ships no
 
 ```bash
 python3 test/validate.py             # manifests, version sync, no host/credential leaks
-npm test                             # the validator, then the claim-cell, hook and installer tests
+npm test                             # every CI test suite, each in a temporary HOME (test/run_gate.py); self-test, smoke and plugin validate stay CI-only
 npm run test:negatives               # validate.py --self-test: the validator must still be able to fail
 npm run test:all                     # both of the above
 ```
@@ -487,7 +509,7 @@ workflow run it on every push and every tag, so nothing a merge or a release enf
 moved.
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
-scripts, the slash command, `agent-sync.schema.json`, and eleven reference contracts the
+scripts, the slash command, `agent-sync.schema.json`, and twelve reference contracts the
 agent loads on their own trigger rather than by default:
 
 | Reference | Read it when |
@@ -503,6 +525,7 @@ agent loads on their own trigger rather than by default:
 | [`earned-rules.md`](plugins/agent-sync/skills/agent-sync/references/earned-rules.md) | why identity is resolved the way it is, and why `finish` exists — the two failures that produced both |
 | [`roadmap.md`](plugins/agent-sync/skills/agent-sync/references/roadmap.md) | configuring `claimTags`, taking or closing a task, or re-planning a board |
 | [`branching.md`](plugins/agent-sync/skills/agent-sync/references/branching.md) | starting work that will produce commits, merging a branch, or asking what landed while you were away |
+| [`fabric-coordination.md`](plugins/agent-sync/skills/agent-sync/references/fabric-coordination.md) | mapping Fabric's coordination contract to commands, and what is not conformant yet |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md). Everyone
 taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).

@@ -8,6 +8,73 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.22.0 — fix round 2 (second blind reading of `e32c7c9`)
+
+`npm test` is `test/run_gate.py`: the five suites, every `test/audit_regressions/*.py` and
+the installer test, each with its own temporary HOME and without CLAUDE_CODE_SESSION_ID /
+CLAUDE_SESSION_ID / AGENT_SYNC_RUN_ID, then a before/after comparison of the starting
+HOME's `~/.agent-sync`. "Failed on `e32c7c9`" means `test/coordination_test.py` was run
+with `AGENT_SYNC_SCRIPT` and `AGENT_SYNC_PLUGIN` pointing at a `git archive e32c7c9
+plugins`: 19 of 50 fail — all 17 new cases (11 on an assertion, 6 with an exception) plus
+the extended parser case and the vault-cache case.
+
+| Gate | Evidence |
+|---|---|
+| FIX-SY-04.02 (CI red) | `test/audit_regressions/fix-sy-04.02.py` — "SKILL.md documents both write modes" was the failing case on `e32c7c9` (CI `validate`), passes now; the regressions run inside `npm test` |
+| Test isolation (B2, S1) | `claim_cell_test.py` "the suite never writes the HOME it was given (B2)" — with isolation removed, run on a sentinel HOME with CLAUDE_CODE_SESSION_ID=probe-1: `FAIL … the suite runs with the HOME it was given`, and the sentinel received 3 files. `run_gate.py` ends with the real-HOME comparison line |
+| B1 status label | "status names a token read from the file" — failed on `e32c7c9` (printed "from the environment") |
+| AS-16 | "git add and commit in one call is guarded" — six shapes (`git add X &&`, `-A`, `.`, `commit -am`, `commit <path>`, `cd docs && git add`) exit 2 without a lease; an unguarded add exits 0; with the lease, 0. Failed on `e32c7c9` |
+| Item 5 init text | `check_init_never_tells_the_operator_to_source_the_env_file` (validate.py) over outline, notion and fs. `e32c7c9`'s `init --backend outline` printed `set -a && . ./.env.agent-sync && set +a` (line 11 of its output) |
+| Item 6 snapshot | "the wiring snapshot names the vault first for notion" — fake allowing vault, `setup`, the vault slot line precedes "DEGRADED fallback". Failed on `e32c7c9` |
+| Risk a / S3 budget | "session end stays inside its budget under a slow vault" — two listed notion repositories, `where` sleeping 3 s: `release --held --session-repos` under 2 s, both released, the vault never called. Failed on `e32c7c9`. "the hook budget survives the vault reexec" — `_hook_started_at` and the child env |
+| Risk b | "the vault question is decided once per process" (in-process, refusal-then-allow, exec forbidden) and "a refuse then allow vault is probed once by status" (process). Both failed on `e32c7c9` |
+| S2 / risk g | "renew never asks the vault" — 10 renews, 0 `run` calls; `release --held` 0 calls. "a record plane command probes once per hour not per call" — two `residue`: one probe; a missing slot: one `where`. "a vault slot created later is seen…" — a negative reused inside the minute, asked again after it. All failed on `e32c7c9` |
+| S4 | "a host without fcntl still registers and never crashes acquire" (`sys.modules['fcntl'] = None`) — `e32c7c9` raised ImportError |
+| S5 cost | "the shell prefilter reads words not substrings", "the prefilters copy of the glob agrees with the coordinators". Interleaved A/B against `e32c7c9` (`guard.sh`, 21 rounds, load average ~45, so absolute ms are noisy and the spawn counts are the evidence): coordinated two-target redirect with the lease held 244 ms (git 2, python3 3) vs 477 ms (git 10, python3 4); redirect into unguarded files 78 ms (git 0, python3 2) vs 413 ms (git 6, python3 4); uncoordinated `ls` 39 vs 45 ms; `echo used guarantee` 39 ms (python3 1) vs 84 ms (python3 2). The <150 ms target for the lease-held case is NOT shown on this machine at this load |
+| S6 | `renew.sh` on a 2 MB PostToolUse payload, uncoordinated repository, median of 15: 8.1 ms vs 89.1 ms on `e32c7c9`; with `~/.agent-sync/session-repos` present (head read) 29.0 vs 165.2 ms |
+| S7 / risk d | "the parser reads the write shapes agents use" — `mv` source, `<<\EOF`, `<( )`/`>( )`, `cd -P/-L`, `timeout`/`nice`/`stdbuf`/`xargs`, `sed --expression=`, `env -C`/`--chdir=`, piped and backgrounded `cd`, `<>`, absolute `cp` destination with `here` unknown. Failed on `e32c7c9` |
+| S8 | "a write into a coordinated repository is checked from any session" — CLAUDE_PROJECT_DIR unconfigured, `cd <repo> && echo x > notes.md` exits 2. Failed on `e32c7c9` |
+| S9 | "a lease held too long is said once where the session sees it" — the guard prints one `systemMessage`, then nothing. `e32c7c9` printed nothing |
+| Risk c | "the main prefilter lets the tokeniser decide sed" — `sed 's/;/x/' -i f.md` through `main()`. Failed on `e32c7c9` |
+| Risk e | "only a keyless json object is flagged" — `payload_is_keyless` |
+| Risk k | "check refuses a scheduled interval below the schema minimum" — 30 refused. Failed on `e32c7c9` |
+| Self-test plants | "the guard stops seeing commits" and "a piped commit slips past the guard" re-anchored on `bash_writes.py` (the commit parser moved there) |
+| House audit | make-skill `5ca5c36` (CI's pin) and `60ca8e2` (local): `0 GAP` — description 936/970, body 4726/4750 tokens |
+| Local gate (`53516c9`'s tree, 2026-10-12) | `npm test` with CLAUDE_CODE_SESSION_ID set in the calling shell: `PASS: 19 suite(s), each in its own HOME; /Users/sshlg/.agent-sync untouched (0 file(s) before and after)` — validate.py all green, claim cell 28, session hooks 15, uncoordinated guard 4, coordination 50, 13 audit regressions all green, installer 11. `python3 test/validate.py --self-test`: `SELF-TEST PASS: every injected defect was caught (75 fixtures, 8 at a time)`. Under `/usr/bin/python3` 3.9.6 (CI's floor): coordination 50, claim cell 28, every audit regression green. One earlier gate run, at load average ~60, failed "a bash acquire in a second repository is released by the real session end hook" on its last assertion (the lease released, the list not yet dropped when the 2 s hook budget ran out); the next three runs of the suite passed it |
+| CI (`53516c9`) | run 38222746461 (`pull_request`): `validate` job 114722714682 **success** — it now also runs `guard_uncoordinated_test.py` and `coordination_test.py` — and `House skill audit` job 114722714270 **success** |
+
+## v1.22.0 — coordination fixes, integration wave 3 (candidate)
+
+All rows are cases in `test/coordination_test.py` (33), run by `npm test`. "Failed on X"
+means this file was copied into a `git archive` of X and run there on 2026-10-12: 1.21.7
+(`210ce1b`) → 30 of 33 fail; the first candidate (`27f485a`) → 16 of 33 fail.
+
+| Gate | Evidence |
+|---|---|
+| R17 run id | "two keys sharing a prefix are two runs" — failed on 1.21.7 (`r-observatorys` for both) |
+| AS-08 width | "a three digit register does not leak ids it holds" — failed on 1.21.7 |
+| R19 long-held | "a lease held past the scheduled interval is reported", "no interval means nothing to report" |
+| R19 config key | "the config key for the scheduled interval passes check" — failed on `27f485a` (`check`: "not in the schema"); `check_config_round_trip` asserts CONFIG_KEYS = schema |
+| AS-11 sweep | "a long expired foreign lock is listed then cleared only with apply" (real CLI, fs plane); "a sweep by age shows each verdict and refuses a zero threshold" — failed on `27f485a` (`0` became 7, exit 0) |
+| R20 vault gating | "a refusing vault never locks the guard" — fake `project-observatory` whose `where`=0 and `run`=2: `agent_sync.py guard` and `guard.sh` (Edit) exit 0, the vault is never asked by the guard, `residue` probes once and falls back. Failed on `27f485a` (guard exit 2) |
+| R20 re-run | "an allowing vault reruns with the same argv and the main worktrees project" — probe + re-run, argv passed through, project = main worktree folder from a linked worktree. Failed on `27f485a` (project = the worktree's folder) |
+| R20 caches | "a vault slot created later is seen and the engine path is cached". The old negative cache shown by hand on `27f485a`: `_vault_slot_exists` → False, slot created, → False again |
+| R20 token report | "the vault is asked before the plaintext file", "a token from the file is reported as degraded" |
+| R21 map | "every command the fabric map names exists" |
+| AS-07 end to end | "a bash acquire in a second repository is released by the real session end hook" — `acquire` with only `CLAUDE_CODE_SESSION_ID`, then `session-end.sh` with the id only in its payload. Failed on `27f485a` (nothing registered) |
+| AS-07 isolation | "a second repository is released with its own record plane" — two stub Outline servers; X's release reaches X's collection with X's token, P's server sees nothing. Failed on `27f485a` (P's server got X's release) |
+| AS-07 sessions | "two sessions keep their own lists of a shared repository" — failed on `27f485a` (A's release took B's list) |
+| AS-07 robustness | "a listed repository that cannot be acted on never strands the rest" |
+| AS-07 slug | "the session list name agrees between bash and python" — 300-char and Cyrillic keys under `LC_ALL=C` and UTF-8. The old slug's disagreement shown by hand on `27f485a`: a 309-char path and `/Users/x/проект` each named two different files in Python and bash |
+| AS-07 identity | "a bash call and its hook resolve one session in an unstamped repository" |
+| AS-09 | "a bash write into a guarded file without a lease is refused" (real `guard.sh`); 1.21.7 allowed it. "a heredoc body is never read as commands" — failed on `27f485a` (guard exit 2 on a heredoc naming `docs/ROADMAP.md`); "the parser reads the write shapes agents use", "what the parser cannot resolve it skips" |
+| AS-14 check | "a keyless lease ref on the remote is flagged" — bare remote, a ref with no `key`; `residue` names it. Failed on `27f485a`. The live measurement is on the board |
+| Disk-full lockout | "the guard needs no temp file to allow a harmless command" (`ulimit -f 0`); 1.21.7 refused `df -h` with "could not run its parser" |
+| AS-10 | self-test plant "description between house and spec cap" |
+| Self-test plants | All 75 plants were checked to still change their file (a plant that no-ops reports MISSED); one did not on `27f485a` — "a local lock records no host" — re-anchored and run by hand on a copy: `FAIL: a lock taken in local mode records no host … (AS-03)`, 1 problem. The full `npm run test:negatives` (~1 h) is left to CI |
+| House audit | `audit_skill.py --house`: `0 GAP, 19 PASS` — description 936/970, body 4745/4750 tokens |
+| Default gate | superseded by the fix round 2 rows above (`npm test` = `test/run_gate.py`; CI run 38222746461) |
+
 ## v1.21.7 — shared-identity acquire refused; worktree session stamps (candidate)
 
 | Gate | Evidence |

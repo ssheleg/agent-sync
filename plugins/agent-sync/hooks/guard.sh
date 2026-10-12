@@ -12,13 +12,34 @@ set -uo pipefail
 #
 #   Write / Edit / MultiEdit / NotebookEdit   COVERED  (file_path matcher)
 #   Bash: git commit (incl. -C, env, compound) COVERED (parsed below)
-#   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
-#   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
-#   Bash: sed -i / perl -i                      UNSUPPORTED (in-place edit, no arg parse)
-#   Bash: > redirect / tee                      UNSUPPORTED (shell effect, not a tool arg)
 #   Bash: git -C <dir> commit                   COVERED (repo resolved from -C)
 #   Bash: env VAR=x git commit                  COVERED (env prefix skipped)
 #   Bash: compound (a && git commit)            COVERED (each segment parsed)
+#   Bash: git add X && git commit (one call)    COVERED (1.22.0, AS-16): what the SAME command
+#     stages is read from it -- `git add <specs>`, `git add -A/-u/.`, `git commit -a`,
+#     `git commit <paths>` -- and asked of `git ls-files` (modified + untracked under the
+#     specs), then checked with the index. The hook runs before the command, so the index
+#     alone never held X.
+#   Bash writes, parsed by scripts/bash_writes.py (1.22.0, AS-09) -- COVERED*, and only
+#   these shapes, each a case in test/coordination_test.py:
+#     > >> >| &> &>> <> and `>& FILE` redirects; tee [-a]; sed -i (GNU and BSD, -e,
+#     --expression=, -f); cp; mv (`-t DIR` too; mv's SOURCE is a write as well); after
+#     `cd [-L|-P] DIR`, inside `( ... )` and `<( ... )`/`>( ... )`, behind VAR=x / env
+#     [-C DIR] / sudo / nohup / time / command / exec / timeout / nice / stdbuf / xargs
+#     prefixes; quoted ; and | stay in their word; heredoc bodies are data, never commands,
+#     whatever the delimiter's quoting ('EOF', "EOF", \EOF)
+#   Bash: a target holding $VAR, a backtick or a glob   UNPARSED (skipped)
+#   Bash: a relative target after `cd -`, `cd`, `cd $X` UNPARSED (directory unknown)
+#   Bash: the arguments xargs reads from stdin; env -S  UNPARSED (not in the command)
+#   Bash: a `cd` in a pipeline or behind `&`            followed NOT AT ALL (a subshell)
+#   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
+#   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
+#   Bash: perl -i, awk, dd, install, rsync      UNSUPPORTED (not parsed)
+#   (sed -i / perl -i were both UNSUPPORTED until 1.22.0; sed -i is now parsed above.)
+#   * in every session, gated on the repository that OWNS each target (1.22.0 fix round 2,
+#     seam S8) -- no longer on the session's own project, so a session rooted outside every
+#     coordinated repository that writes into one is refused at the write, not only at its
+#     `git commit`.
 #
 # WHICH repository decides (v1.21.2): the one that owns the write -- for an
 # Edit/Write, `git -C <dirname of the path> rev-parse --show-toplevel`; for a
@@ -50,6 +71,9 @@ S="$AGENT_SYNC_PY"
 # project, and the guard's question is about the repository the write lands in. See
 # agent_sync_owner in _lib.sh and the matrix above.
 input=$(cat)
+# The payload's session id, for a coordinator that would otherwise walk to a stamp this
+# repository does not have (AS-07). The environment, when it names a session, still wins.
+agent_sync_export_session "$input"
 
 # The parser IS the guard: hooks.json carries no `if` filter (the one it declared until
 # v1.20.1 sat at the group level, where Claude Code never evaluated it, and a handler-level
@@ -67,7 +91,14 @@ parser_or_die() {
   exit 2
 }
 
-path=$(python3 -c '
+# A Bash call carries no file path: say so without an interpreter, so the commonest call in
+# every session — a Bash command that writes nothing and commits nothing — spawns no process
+# at all (seam S5). The pattern cannot match inside a JSON string, where quotes are escaped.
+bash_re='"tool_name"[[:space:]]*:[[:space:]]*"Bash"'
+if [[ $input =~ $bash_re ]]; then
+  path=""
+else
+  path=$(printf '%s' "$input" | python3 -c '
 import json,sys
 try:
     d=json.load(sys.stdin)
@@ -75,8 +106,9 @@ except Exception:
     sys.exit(0)
 ti=d.get("tool_input") or {}
 print(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
-' <<<"$input" 2>/dev/null)
-parser_or_die $?
+' 2>/dev/null)
+  parser_or_die $?
+fi
 
 # The owning repository is resolved with git, so git is part of the parser.
 if ! command -v git >/dev/null 2>&1; then
@@ -85,12 +117,78 @@ if ! command -v git >/dev/null 2>&1; then
   exit 2
 fi
 
-# git commit: check every staged path instead of a single file argument.
+# Forward the coordinator's one-line notice (R19's held-too-long warning, at most once per
+# lease per run). Each is one JSON object carrying `systemMessage` (the person sees it) and
+# `hookSpecificOutput.additionalContext` (the model sees it). The host parses stdout as ONE
+# object — two lines are a parse failure that drops both — so notices are collected and
+# printed once, on a successful exit only. Pure bash unless two repositories both had one.
+notices=()
+forward_notice() {
+  case "$1" in
+    *"AGENT_SYNC_NOTICE "*)
+      local n="${1#*AGENT_SYNC_NOTICE }"
+      notices+=("${n%%$'\n'*}")
+      ;;
+  esac
+}
+flush_notices() {
+  local rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  case ${#notices[@]} in
+    0) ;;
+    1) printf '%s\n' "${notices[0]}" ;;
+    *) printf '%s\n' "${notices[@]}" | python3 -c '
+import json, sys
+msgs = [json.loads(l)["systemMessage"] for l in sys.stdin if l.strip()]
+m = "\n".join(msgs)
+print(json.dumps({"systemMessage": m, "hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "additionalContext": m}}, ensure_ascii=True))' ;;
+  esac
+}
+trap flush_notices EXIT
+
+# A Bash call: its writes, then its commit.
 if [ -z "$path" ]; then
-  # This hook now runs in EVERY session, not only coordinated ones, so the common Bash call
-  # must stay cheap. The tokeniser below accepts a commit only as the literal token `commit`,
-  # and the host serialises the payload as JSON without escaping ASCII letters, so a payload
-  # that lacks the substring carries no commit. One interpreter start saved per Bash call.
+  # AS-09: a Bash write — `>`/`>>`/`<>`, `tee`, `sed -i`, `cp`, `mv` — into a guarded file.
+  # Gated on the repository that OWNS each target, never on the session's project (seam S8):
+  # a session rooted outside every coordinated repository that `cd`s into one is checked as
+  # well. bash_writes.py resolves owners by walking to `.git` and drops every target that no
+  # guardedFiles pattern matches, all without spawning anything, so only a write that might be
+  # refused reaches the coordinator — once per owning repository, with every target (seam S5).
+  # The shell test is cheap and loose on purpose: a `>` anywhere, or tee/sed/cp/mv as a WORD
+  # (not inside `used` or `guarantee`). A JSON `\n` or `\t` before the word counts as a break.
+  shape=0
+  case "$input" in *'>'*) shape=1 ;; esac
+  if [ "$shape" = 0 ]; then
+    word_re='(^|[^A-Za-z0-9_.-]|\\[nt])(tee|sed|cp|mv)([^A-Za-z0-9_.-]|$)'
+    [[ $input =~ $word_re ]] && shape=1
+  fi
+  if [ "$shape" = 1 ]; then
+    hits=$(printf '%s' "$input" | python3 "${S%/*}/bash_writes.py" --guarded 2>/dev/null)
+    parser_or_die $?
+    if [ -n "$hits" ]; then
+      owners=""
+      while IFS=$'\t' read -r o _t; do
+        [ -n "$o" ] || continue
+        case $'\n'"$owners"$'\n' in *$'\n'"$o"$'\n'*) ;; *) owners="$owners${owners:+$'\n'}$o" ;; esac
+      done < <(printf '%s\n' "$hits")
+      while IFS= read -r owner; do
+        [ -n "$owner" ] || continue
+        targets=()
+        while IFS=$'\t' read -r o t; do
+          [ "$o" = "$owner" ] && targets+=("$t")
+        done < <(printf '%s\n' "$hits")
+        if ! out=$(cd "$owner" && python3 "$S" guard -- "${targets[@]}" 2>&1); then
+          echo "agent-sync: this command writes a guarded file in $owner and this run holds no lease on it. Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>) first. ${out}" >&2
+          exit 2
+        fi
+        forward_notice "$out"
+      done < <(printf '%s\n' "$owners")
+    fi
+  fi
+  # The tokeniser accepts a commit only as the literal word `commit`, and the host serialises
+  # the payload as JSON without escaping ASCII letters, so a payload that lacks the substring
+  # carries no commit. One interpreter start saved per Bash call.
   case "$input" in *commit*) ;; *) exit 0 ;; esac
   # What repository, and is this even a commit. Both used to be wrong, and the second one is why
   # the first went unnoticed: the old test was `case "$cmd" in *"git commit"*)`, a CONTIGUOUS
@@ -100,52 +198,15 @@ if [ -z "$path" ]; then
   # index and passed. Measured 2026-08-07: a full day of commits to guarded registers, with the
   # Edit-tool half of this hook refusing correctly the whole time, so the protection looked present.
   #
-  # Tokenised in python rather than globbed in shell: `git log --grep=commit` must not match, and
-  # `git -c user.name=x -C dir commit` must.
-  parsed=$(python3 -c '
-import json, shlex, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("0 ."); sys.exit(0)
-cmd = (d.get("tool_input") or {}).get("command", "")
-is_commit, repo = 0, "."
-# Each &&/;/||/|&/| segment is its own command; a commit anywhere in the chain counts.
-# The single pipe was CLAIMED by this comment and never consumed (ASY-05, fixed 2026-08-29):
-# only "||" was replaced, so `echo msg | git commit -F -` stayed one segment whose first
-# token is `echo`, and the whole pipeline skipped the guard. Order matters: "||" and "|&"
-# must be consumed before the bare "|", or each would be split into a stray half.
-for seg in cmd.replace("&&", "\n").replace("||", "\n").replace("|&", "\n").replace(";", "\n").replace("|", "\n").split("\n"):
-    try:
-        toks = shlex.split(seg)
-    except ValueError:
-        continue
-    if not toks:
-        continue
-    if toks[0] == "cd" and len(toks) > 1:
-        repo = toks[1]
-        continue
-    if toks[0] != "git":
-        continue
-    k, r = 1, None
-    while k < len(toks):
-        t = toks[k]
-        if t == "-C" and k + 1 < len(toks):
-            r = toks[k + 1]; k += 2; continue
-        if t in ("-c", "--namespace") and k + 1 < len(toks):
-            k += 2; continue
-        if t.startswith("-"):
-            k += 1; continue
-        break
-    if k < len(toks) and toks[k] == "commit":
-        is_commit = 1
-        if r:
-            repo = r
-        break
-print(is_commit, repo)
-' <<<"$input" 2>/dev/null)
+  # Tokenised by bash_writes.py --commit (the same tokeniser as the writes above, so quoting,
+  # `cd`, subshells and prefixes read one way): `git log --grep=commit` is not a commit, and
+  # `git -c user.name=x -C dir commit` is. Its first line is `<is_commit> <repo>`; every later
+  # line is a file the SAME command stages before committing (AS-16) -- `git add X && git
+  # commit` reached the commit with X not yet in the index this hook reads, and passed.
+  parsed=$(printf '%s' "$input" | python3 "${S%/*}/bash_writes.py" --commit 2>/dev/null)
   parser_or_die $?
-  read -r is_commit repo <<<"$parsed"
+  first="${parsed%%$'\n'*}"
+  is_commit="${first%% *}"; repo="${first#* }"
   [ -n "${is_commit:-}" ] || is_commit=0
   [ -n "${repo:-}" ] || repo="."
   [ -d "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -157,13 +218,23 @@ print(is_commit, repo)
     # reading under which "docs/ROADMAP.md" means the right file in each repo. A repository
     # with no config of its own is not coordinated, whatever the session's project says.
     owner=$(agent_sync_owner "$repo") || exit 0
+    files=()
     while IFS= read -r staged; do
-      [ -n "$staged" ] || continue
-      if ! why=$(cd "$owner" && python3 "$S" guard "$staged" 2>&1 >/dev/null); then
-        echo "agent-sync: '$staged' is staged in $owner and this run holds no lease on it. Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>), or unstage it. ${why}" >&2
+      [ -n "$staged" ] && files+=("$staged")
+    done < <(git -C "$owner" diff --cached --name-only 2>/dev/null)
+    case "$parsed" in
+      *$'\n'*)
+        while IFS= read -r extra; do
+          case "$extra" in "$owner"/*) files+=("$extra") ;; esac
+        done < <(printf '%s\n' "${parsed#*$'\n'}")
+        ;;
+    esac
+    if [ "${#files[@]}" -gt 0 ]; then
+      if ! why=$(cd "$owner" && python3 "$S" guard -- "${files[@]}" 2>&1 >/dev/null); then
+        echo "agent-sync: this commit in $owner stages a guarded file this run holds no lease on (staged already, or by this same command). Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>), or unstage it. ${why}" >&2
         exit 2
       fi
-    done < <(git -C "$owner" diff --cached --name-only 2>/dev/null)
+    fi
   fi
   exit 0
 fi
@@ -173,7 +244,8 @@ fi
 case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
 owner=$(agent_sync_owner "$(dirname "$path")") || exit 0
 
-if out=$(cd "$owner" && python3 "$S" guard "$path" 2>&1); then
+if out=$(cd "$owner" && python3 "$S" guard -- "$path" 2>&1); then
+  forward_notice "$out"
   exit 0
 else
   code=$?

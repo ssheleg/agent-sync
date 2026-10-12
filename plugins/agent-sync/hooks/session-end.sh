@@ -10,6 +10,10 @@
 set -uo pipefail
 . "${CLAUDE_PLUGIN_ROOT}/hooks/_lib.sh"
 S="$AGENT_SYNC_PY"
-agent_sync_configured || exit 0
-run_limited 2 python3 "$S" release --held >/dev/null 2>&1 || true
+# The payload names the session (AS-07). Every other repository is released by its own
+# child process, in parallel, inside the same 2 s.
+if [ -t 0 ]; then payload=""; else payload=$(cat 2>/dev/null || true); fi
+agent_sync_configured || agent_sync_has_session_repos "$payload" || exit 0
+agent_sync_export_session "$payload"
+run_limited 2 python3 "$S" release --held --session-repos >/dev/null 2>&1 || true
 exit 0

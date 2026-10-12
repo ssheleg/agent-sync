@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Pack and skill | `agent-sync` |
-| Version | `1.21.4` |
+| Version | `1.22.0` |
 | License | MIT |
 | Source | https://github.com/ssheleg/agent-sync |
 
@@ -24,9 +24,15 @@ board views. Guarded documents are edited only after a claim.
 ## Runtime and trust
 
 The bundled CLI is Python. Filesystem mode works locally; optional backends may
-contact their configured service. Tokens belong in `.env.agent-sync`, mode 600,
-and must not enter argv, logs or commits. Enforcement degrades explicitly when a
-backend cannot provide the required capability.
+contact their configured service. The `notion` token belongs in the Observatory
+vault (1.22.0): record-plane commands re-run themselves under
+`use_secret.py run --vault-only`; the guard, `renew` and SessionEnd's
+`release --held` never ask the vault. Without
+Observatory, and for `outline`, the token lives in `.env.agent-sync`, mode 600,
+reported as degraded for `notion`. No token enters argv, logs or commits.
+Enforcement degrades explicitly when a backend cannot provide the required
+capability. A session's leases in other repositories are listed under
+`~/.agent-sync/session-repos/` so its hooks renew and release them there.
 
 ## Distribution
 
@@ -44,7 +50,12 @@ second settings-based hook channel.
 
 ## Known limits
 
-A lease expires; it does not remove residue or finish a Git change. Local
+A lease expires; it does not remove residue or finish a Git change. Clearing
+residue by age (`reap --long-expired --apply`) is an operator's decision, never
+an agent's. The Bash write guard is a parser, not a sandbox: `$VAR` targets,
+the arguments `xargs` reads from stdin, `perl -i`, `awk` and runtime writes are
+outside it. A commit is checked with what the same command stages
+(`git add X && git commit`, AS-16). Local
 advisory mode cannot claim remote enforcement. A submodule change remains
 unfinished until its parent points at the released commit.
 

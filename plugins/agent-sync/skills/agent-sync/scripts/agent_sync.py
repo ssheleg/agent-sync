@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.7"
+VERSION = "1.22.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -149,6 +149,7 @@ CONFIG_KEYS = frozenset({
     "$schema", "backend", "leaseTtlSeconds", "renewIntervalSeconds", "gated",
     "idRegisters", "guardedFiles", "claimTags", "gates", "mirror", "setupFile",
     "leaseBackend", "leaseRemote", "settleSeconds", "integrationBranch", "mergeLog",
+    "scheduledIntervalSeconds",
 })
 
 
@@ -178,14 +179,31 @@ def parse_iso(ts: str) -> float:
     return 0.0 if at is None else at
 
 
+# Read-only questions whose answer cannot change during one `guard` process. `guard` runs on
+# every write a hook sees, and asked them six times per call — ~95 ms of git spawns in a
+# ~150 ms command (seam S5, measured 2026-10-12). None = off: every other command, and every
+# in-process caller, asks git each time as before.
+_GIT_MEMO: dict[tuple[str, tuple[str, ...]], str] | None = None
+_GIT_MEMOABLE = {("rev-parse", "--show-toplevel"), ("config", "--get", "remote.origin.url"),
+                 ("rev-parse", "--show-superproject-working-tree")}
+
+
 def git(*args: str, cwd: Path | None = None) -> str:
+    memo_key = None
+    if _GIT_MEMO is not None and args in _GIT_MEMOABLE:
+        memo_key = (str(cwd) if cwd else os.getcwd(), args)
+        if memo_key in _GIT_MEMO:
+            return _GIT_MEMO[memo_key]
     try:
         out = subprocess.run(
             ["git", *args], cwd=str(cwd) if cwd else None,
             capture_output=True, text=True, timeout=15)
-        return out.stdout.strip() if out.returncode == 0 else ""
+        answer = out.stdout.strip() if out.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+    if memo_key is not None:
+        _GIT_MEMO[memo_key] = answer
+    return answer
 
 
 def project_root() -> Path:
@@ -478,6 +496,11 @@ def find_env_file(root: Path) -> Path | None:
     if local.exists():
         return local
 
+    # A checkout whose `.git` is a DIRECTORY is no submodule (git absorbs a submodule's git
+    # dir into the superproject's `.git/modules` and leaves a `.git` FILE), so it has no
+    # superproject to ask about — one git spawn saved on every guard call (seam S5).
+    if (root / ".git").is_dir():
+        return None
     seen: set[str] = set()
     current = root
     for _ in range(8):                      # a submodule chain, not the whole filesystem
@@ -490,6 +513,244 @@ def find_env_file(root: Path) -> Path | None:
             return candidate
         current = Path(superproject)
     return None
+
+
+VAULT_REEXEC = "AGENT_SYNC_VAULT_REEXEC"
+VAULT_SECRET = "AGENT_SYNC_NOTION_TOKEN"
+VAULT_SLOT_CACHE_S = 3600
+# A NEGATIVE answer — no slot, or `run` refused — is reused for a minute: long enough that a
+# burst of record-plane commands asks once, short enough that a slot the operator just
+# created (or a grant just given) is seen almost at once.
+VAULT_NEGATIVE_CACHE_S = 60
+# The wall-clock start of the hook process, carried across the vault re-exec, so a budget
+# measured from "this process started" is not reset by `execv` (risk a, 2026-10-12).
+HOOK_T0_ENV = "AGENT_SYNC_HOOK_T0"
+_WALL_T0 = time.time()
+# Where the record-plane token came from in this process: "env", "vault", "file" or None.
+# Assigned once, while None: `status` loads the env file and then builds a Sync() that loads
+# it again — by then the file's token IS in the environment, and the second pass used to
+# relabel a plaintext token as "from the environment" (unit B1, 2026-10-12).
+TOKEN_SOURCE: str | None = None
+# The roots whose vault question this process has already settled — asked once, before any
+# child starts, never again (risk b): the session path loads the env file twice.
+_VAULT_DECIDED: set[str] = set()
+# Why the vault was not used although it was asked, for `status` to say so. None = not asked.
+VAULT_DEGRADED: str | None = None
+# Set by main(): whether THIS subcommand touches the record plane, and the argv it was given.
+# Off by default, so importing this module or calling a helper never re-executes anything.
+RECORD_PLANE_COMMAND = False
+INVOKED_ARGV: list[str] | None = None
+# Subcommands that never need the record-plane token. The PreToolUse guard runs on every
+# Edit/Write/commit: re-running it under the vault cost a spawn per call, and when the vault
+# REFUSED (grants are checked by `run`, not by `where`) the guard exited 2 on every write in
+# the repository — a lockout from a token the guard never reads.
+#
+# `renew` and `release --held` (decided in main()) are on this list too, since 1.22.0's fix
+# round 2. The lease they act on is a local lock or a git ref — neither needs the token. What
+# they would publish with it is one visibility line in the Notion claims log, and readers of
+# that log already apply the TTL. The price of asking was too high for that: renew.sh runs
+# after EVERY tool call (two `use` audit rows per call once a slot existed), and SessionEnd's
+# whole budget is 2 s, which a vault probe and a re-exec consumed before any lease was
+# released. With the token in the plaintext file (degraded) they still publish.
+NO_RECORD_PLANE = frozenset({"guard", "write-targets", "whoami", "renew"})
+
+
+def vault_reexec_argv(backend: str, environ: dict[str, str], argv: list[str], python: str,
+                      script: str, use_secret: str | None, project: str,
+                      slot_exists: bool) -> list[str] | None:
+    """The command to re-run under the Observatory vault, or None (R20). Pure.
+
+    The record-plane token was read from a plaintext `.env.agent-sync` — fifteen of them
+    under one operator's `~/DATA` — while the machine's rule is vault-only. The value cannot
+    be fetched into this process without passing through something printable, so the tool
+    re-runs itself under `use_secret.py run --vault-only`, which puts the value in the
+    child's ENVIRONMENT and scrubs it from what the child prints. The value never reaches
+    argv. Only when every condition holds: the backend needs the token, nothing set it
+    explicitly, this is not already the re-run, the engine is installed, and the vault has
+    the slot. Otherwise the file is the fallback, reported as degraded.
+    """
+    if backend != "notion" or environ.get(VAULT_SECRET) or environ.get(VAULT_REEXEC):
+        return None
+    if not use_secret or not slot_exists:
+        return None
+    return [python, use_secret, "run", "--vault-only", project, VAULT_SECRET, "--",
+            python, script] + list(argv)
+
+
+def vault_project(root: Path) -> str:
+    """The Observatory project a repository's vault slot is filed under — its folder name.
+
+    `root.name` was wrong twice: a linked worktree (`_wt/agent-sync-w3`) and a renamed
+    checkout each have a folder name the vault never heard of, so the slot "did not exist"
+    in exactly the checkouts agents work in. The MAIN worktree's folder is the project's;
+    a submodule (whose git dir is not a `.git` folder) falls back to its remote's name.
+    """
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=root)
+    if common:
+        p = Path(common)
+        if p.name == ".git":
+            return p.parent.name
+    url = git("remote", "get-url", "origin", cwd=root)
+    if url:
+        name = re.split(r"[/:]", url.rstrip("/"))[-1]
+        name = name[:-4] if name.endswith(".git") else name
+        if name:
+            return name
+    return root.name
+
+
+def _vault_cache(root: Path) -> tuple[Path, dict[str, Any]]:
+    cache = root / STATE_DIR / "vault-slot.json"
+    try:
+        data = json.loads(cache.read_text())
+        return cache, data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return cache, {}
+
+
+def _vault_cache_write(cache: Path, data: dict[str, Any]) -> None:
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+def _observatory_use_secret(root: Path) -> str | None:
+    """Where `use_secret.py` is — cached an hour beside the slot answer, because asking
+    `project-observatory full-path` is a process spawn and record-plane commands run from
+    hooks. A cached path that no longer names a file is asked again."""
+    cache, data = _vault_cache(root)
+    path = data.get("use_secret")
+    if isinstance(path, str) and Path(path).is_file() and \
+            time.time() - float(data.get("use_secret_at") or 0) < VAULT_SLOT_CACHE_S:
+        return path
+    try:
+        out = subprocess.run(["project-observatory", "full-path"], capture_output=True,
+                             text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = Path(out.stdout.strip()) / "tools" / "use_secret.py"
+    if out.returncode != 0 or not found.is_file():
+        return None
+    data.update({"use_secret": str(found), "use_secret_at": time.time()})
+    _vault_cache_write(cache, data)
+    return str(found)
+
+
+def _vault_slot_exists(root: Path, use_secret: str, project: str, file_has_token: bool) -> bool:
+    """`use_secret.py where --vault-only` answers 0 when the slot resolves.
+
+    Only a POSITIVE answer is cached for the hour. A cached "no slot" hid the slot an
+    operator had just created for up to an hour, while the plaintext file went on serving
+    the token; a negative is now reused only while the file still carries a token — the
+    moment that line is deleted, the vault is asked again.
+    """
+    cache, data = _vault_cache(root)
+    slot = (data.get("slots") or {}).get(project) or {}
+    age = time.time() - float(slot.get("at") or 0)
+    fresh = age < VAULT_SLOT_CACHE_S
+    if fresh and slot.get("exists"):
+        return True
+    if slot.get("exists") is False and (age < VAULT_NEGATIVE_CACHE_S or
+                                        (fresh and file_has_token and slot.get("file_token"))):
+        return False
+    try:
+        r = subprocess.run([sys.executable, use_secret, "where", "--vault-only", project,
+                            VAULT_SECRET], capture_output=True, text=True, timeout=10)
+        exists = r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    data.setdefault("slots", {})[project] = {"exists": exists, "at": time.time(),
+                                             "file_token": file_has_token}
+    _vault_cache_write(cache, data)
+    return exists
+
+
+def _vault_run_refusal(root: Path, use_secret: str, project: str) -> str | None:
+    """Ask `use_secret.py run` itself, with a child that does nothing — None when it would run.
+
+    `where` resolves the slot; `run` also checks the grant, so a slot can exist and `run`
+    still refuse. The tool used to exec blind on `where`'s answer, and a refusal then ended
+    every command — the guard included — with use_secret's exit 2. Never exec on a guess.
+
+    The verdict is cached beside the slot answer: a pass for the hour (as the slot is), a
+    refusal for a minute. Every probe is a `use` row in the vault's audit log, and asking it
+    before every record-plane command doubled the rows for nothing (risk g, 2026-10-12).
+    """
+    cache, data = _vault_cache(root)
+    slot = (data.get("slots") or {}).get(project) or {}
+    now = time.time()
+    if now - float(slot.get("run_ok_at") or 0) < VAULT_SLOT_CACHE_S:
+        return None
+    if slot.get("run_refused") and now - float(slot.get("run_refused_at") or 0) < VAULT_NEGATIVE_CACHE_S:
+        return str(slot["run_refused"])
+    try:
+        r = subprocess.run([sys.executable, use_secret, "run", "--vault-only", project,
+                            VAULT_SECRET, "--", sys.executable, "-c", ""],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"use_secret.py could not run ({type(exc).__name__})"
+    if r.returncode == 0:
+        verdict = None
+        slot.update({"run_ok_at": now, "run_refused": None})
+    else:
+        lines = (r.stderr or r.stdout or "").strip().splitlines()
+        verdict = lines[-1][:200] if lines else f"use_secret.py run exited {r.returncode}"
+        slot.update({"run_ok_at": 0, "run_refused": verdict, "run_refused_at": now})
+    data.setdefault("slots", {})[project] = slot
+    _vault_cache_write(cache, data)
+    return verdict
+
+
+def _configured_backend(root: Path) -> str:
+    try:
+        cfg = json.loads((root / CONFIG_PATH).read_text())
+        return str(cfg.get("backend") or "") if isinstance(cfg, dict) else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _maybe_reexec_under_vault(root: Path, file_backend: str | None, file_has_token: bool) -> None:
+    global TOKEN_SOURCE, VAULT_DEGRADED
+    if os.environ.get(VAULT_SECRET):
+        if TOKEN_SOURCE is None:
+            TOKEN_SOURCE = "vault" if os.environ.get(VAULT_REEXEC) else "env"
+        return
+    if not RECORD_PLANE_COMMAND or os.environ.get(VAULT_REEXEC):
+        return
+    # Decided once per root per process. The session path loads the env file before its
+    # children start and again in Sync(): a second probe was a second audit row, and an exec
+    # decided the second time would have replaced a process whose children were already out.
+    try:
+        decided_key = str(root.resolve())
+    except OSError:
+        decided_key = str(root)
+    if decided_key in _VAULT_DECIDED:
+        return
+    _VAULT_DECIDED.add(decided_key)
+    backend = os.environ.get("AGENT_SYNC_BACKEND") or file_backend or _configured_backend(root)
+    if backend != "notion":
+        return
+    use_secret = _observatory_use_secret(root)
+    if not use_secret:
+        return
+    project = vault_project(root)
+    argv_in = INVOKED_ARGV if INVOKED_ARGV is not None else sys.argv[1:]
+    argv = vault_reexec_argv(backend, dict(os.environ), argv_in, sys.executable,
+                             os.path.abspath(__file__), use_secret, project,
+                             _vault_slot_exists(root, use_secret, project, file_has_token))
+    if not argv:
+        return
+    refusal = _vault_run_refusal(root, use_secret, project)
+    if refusal is not None:
+        VAULT_DEGRADED = f"the vault slot {project}/{VAULT_SECRET} exists but `run` refused: {refusal}"
+        return
+    os.environ[VAULT_REEXEC] = "1"
+    os.environ.setdefault(HOOK_T0_ENV, repr(_WALL_T0))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(argv[0], argv)
 
 
 def load_env_file(root: Path) -> None:
@@ -506,21 +767,32 @@ def load_env_file(root: Path) -> None:
     how it was invoked. An already-set variable always wins: explicit beats implicit,
     and an operator overriding a value for one command must not be undone here.
     """
+    global TOKEN_SOURCE
     path = find_env_file(root)
-    if path is None:
-        return
-    try:
-        text = path.read_text()
-    except OSError:
-        return
+    text = ""
+    if path is not None:
+        try:
+            text = path.read_text()
+        except OSError:
+            text = ""
+    pairs = []
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
+        pairs.append((key.strip(), value.strip().strip('"').strip("'")))
+    # R20: the vault is asked BEFORE the plaintext file can supply the token — by the
+    # commands that touch the record plane, and only those (NO_RECORD_PLANE). An explicitly
+    # set variable still wins over both — explicit beats implicit, as below.
+    file_vals = dict(pairs)
+    _maybe_reexec_under_vault(root, file_vals.get("AGENT_SYNC_BACKEND"),
+                              bool(file_vals.get(VAULT_SECRET)))
+    for key, value in pairs:
         if key and value and key not in os.environ:
             os.environ[key] = value
+            if key == VAULT_SECRET and TOKEN_SOURCE is None:
+                TOKEN_SOURCE = "file"
 
 
 def load_config(root: Path) -> dict[str, Any]:
@@ -535,6 +807,45 @@ def load_config(root: Path) -> dict[str, Any]:
         return json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise Fail(f".claude/agent-sync.json is not valid JSON: {exc}") from exc
+
+
+def id_width(text: str, reg: str, default: int = 4) -> int:
+    """The register's own zero-padding, read from the ids already in it (AS-08).
+
+    Four digits were hardcoded, so a three-digit register (`CO-051`) was handed `CO-0051`
+    and every id it had was reported as a permanent phantom leak. The widest id in the
+    file decides; an empty register keeps the old default.
+    """
+    widths = [len(m) for m in re.findall(r"\b" + re.escape(reg) + r"-(\d+)\b", text)]
+    return max(widths) if widths else default
+
+
+def format_id(reg: str, value: int, width: int = 4) -> str:
+    return f"{reg}-{value:0{width}d}"
+
+
+def id_present(text: str, reg: str, value: int) -> bool:
+    """Whether `reg-<value>` appears at ANY zero-padding, as a whole id (AS-08)."""
+    return re.search(r"\b" + re.escape(reg) + r"-0*" + str(int(value)) + r"\b", text) is not None
+
+
+def _rid_from(text: str) -> str:
+    """A run id for a key, unique per key (R17, Observatory DECISIONS.md:2023).
+
+    The id was the first twelve `[a-z0-9]` characters of the key, so two keys sharing a
+    prefix — `observatory-tick-1` and `observatory-tick-2`, or any two ids a caller builds
+    from a common stem — were ONE run: the second process won a lease the first still held,
+    and the first's release then "succeeded" against a lease that was no longer its own.
+
+    A key that fits in twelve characters is kept whole, because it cannot collide and the
+    readable id is what `status` and the journal show. A longer one keeps six readable
+    characters and spends six on a digest of the WHOLE key, so keys that differ anywhere
+    differ here. Ids already stamped in a marker are read back unchanged.
+    """
+    flat = re.sub(r"[^a-z0-9]", "", text.lower())
+    if len(flat) <= 12:
+        return "r-" + flat
+    return "r-" + flat[:6] + hashlib.sha256(text.encode("utf-8")).hexdigest()[:6]
 
 
 def _session_key() -> tuple[str, str]:
@@ -561,6 +872,14 @@ def _session_key() -> tuple[str, str]:
     session = os.environ.get("CLAUDE_SESSION_ID") or ""
     if session:
         return "session:" + session, "CLAUDE_SESSION_ID"
+
+    # Claude Code exports its session id to every Bash tool call as CLAUDE_CODE_SESSION_ID —
+    # the same id a hook reads from its payload and SessionStart stamps. It answers in a
+    # repository no SessionStart ever stamped (a second repository, AS-07), where the walk
+    # below finds nothing and the shell fell back to the shared identity.
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if session:
+        return "session:" + session, "CLAUDE_CODE_SESSION_ID"
 
     # No session id in this environment — a plain shell command has none. What it does have is
     # an ancestor process that the SessionStart hook ran under, and that hook DID have the id.
@@ -627,7 +946,7 @@ def run_id(root: Path) -> str:
     """
     key, _how = _session_key()
     if key.startswith("env:"):
-        return "r-" + re.sub(r"[^a-z0-9]", "", key[4:].lower())[:12]
+        return _rid_from(key[4:])
 
     marker = root / STATE_DIR / "run-id"
     data: dict[str, Any] = {}
@@ -650,8 +969,11 @@ def run_id(root: Path) -> str:
         entry["seen"] = now_iso()
         rid = entry["run"]
     else:
-        session = os.environ.get("CLAUDE_SESSION_ID") or ""
-        rid = ("r-" + re.sub(r"[^a-z0-9]", "", session.lower())[:12]) if session else \
+        # Derived from the SESSION the key names, however it was found — env, the
+        # CLAUDE_CODE_SESSION_ID a Bash call carries, or a stamp — so a hook and a shell in
+        # a checkout with no marker entry yet still mint the same id (AS-07).
+        session = key[len("session:"):] if key.startswith("session:") else ""
+        rid = _rid_from(session) if session else \
               "r-%06x%s" % (random.getrandbits(24), format(int(time.time()) & 0xFFF, "03x"))
         data["runs"][key or "shared"] = {"run": rid, "seen": now_iso()}
 
@@ -1371,6 +1693,40 @@ def claim_marker_re(template: str) -> "re.Pattern[str] | None":
     return re.compile(re.escape(head) + r"(?P<holder>[^|\s]+)" + re.escape(tail))
 
 
+LONG_EXPIRED_DAYS = 7
+
+
+def long_held(ages: dict[str, float], interval: int | None) -> list[tuple[str, float]]:
+    """Leases held longer than the repository's scheduled interval (R19).
+
+    Observatory's scheduled tick stands aside while any lease is held, so a session that
+    keeps one for hours makes every tick in that window a no-op — measured as a ledger
+    gone stale (project-observatory DECISIONS.md:12873). `scheduledIntervalSeconds` in the
+    config names that interval; without it there is nothing to compare against and nothing
+    is reported. Ages come from the lock's `since` (written at acquire, kept by renew), or
+    from `ts` on a lock written before `since` existed — which can only under-report.
+    """
+    if not interval or interval <= 0:
+        return []
+    return sorted(((k, a) for k, a in ages.items() if a > interval), key=lambda kv: -kv[1])
+
+
+def long_expired(entries: list[dict[str, Any]], older_than_s: int) -> list[dict[str, Any]]:
+    """Residue past every reasonable explanation (AS-11). Not Fabric's `abandoned`, which is a
+    claim whose OWNER reported an unrecoverable failure — this is time alone.
+
+    An expired lease carries no right — `renew` walks `held()`, which never returns one, and
+    `acquire` takes the key over — so what remains is a file, and M-50 keeps a RUN from
+    deleting a file it cannot prove is its own. `reap --long-expired` is the swept form of the
+    operator decision `--i-own-this` already is: the keys are the ones expired longer than
+    `older_than_s`, it is never automatic, it prints and journals each payload it removes,
+    and a live lease or one whose expiry cannot be established is never in the list.
+    """
+    return [e for e in entries
+            if e.get("state") != LIVE and e.get("expired_for") is not None
+            and e["expired_for"] >= older_than_s]
+
+
 def classify_lock(key: str, raw: str, *, rid: str, identity_is_strong: bool,
                   repo: str, host: str, default_ttl: int, at: float) -> dict[str, Any]:
     """One lock file, read as a live lease or as one of three kinds of residue.
@@ -1864,7 +2220,8 @@ class Sync:
                 return False, held.get("run")
 
         payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(), "ttl": self.ttl,
-                              "repo": repo_name(), "host": platform.node()})
+                              "repo": repo_name(), "host": platform.node(),
+                              "since": now_iso()})
         empty_tree = git("hash-object", "-t", "tree", os.devnull)
         # A lease object is plumbing, not authorship, so it must not depend on the
         # machine having a git identity. Without these `-c` flags `commit-tree`
@@ -2347,7 +2704,8 @@ class Sync:
         # had one fewer way to refuse, on 25 of the 25 locks this family had on disk
         # (2026-08-20). Absent stays legal: locks written before this line exist.
         payload = json.dumps({"key": key, "run": self.rid, "ts": now_iso(),
-                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node()})
+                              "ttl": self.ttl, "repo": repo_name(), "host": platform.node(),
+                              "since": now_iso()})
 
         # A lease another run took under 1.21.2's lock name is still that run's: the
         # upgrade must not hand the same key out a second time under the new name.
@@ -2796,9 +3154,10 @@ class Sync:
         for sha, comp in sorted(refs, key=lambda x: x[1]):
             raw = self._git_lease_payload(sha)
             try:
-                named = json.loads(raw).get("key") if raw else None
-            except (json.JSONDecodeError, ValueError, AttributeError):
-                named = None
+                parsed = json.loads(raw) if raw else None
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            named = parsed.get("key") if isinstance(parsed, dict) else None
             # The key the ref was taken as: the one its payload names (1.21.3), else its
             # decoded name — which for every ref 1.21.2 pushed is the name itself.
             key = named if isinstance(named, str) and named else lease_key(comp)
@@ -2811,6 +3170,10 @@ class Sync:
                          "host": None, "ts": "", "expired_for": None,
                          "why": "the lease object carries no readable payload"}
             entry["plane"] = "git"
+            # AS-14's revisit condition, as a fact every sweep reports: a payload that parses
+            # as an object with no `key` was written by 1.21.2 or older. That dates the write;
+            # it does not prove an old writer is still running.
+            entry["keyless"] = payload_is_keyless(raw)
             entry["ref"] = LEASE_REF_PREFIX + comp        # the ref that exists, as it exists
             entry["sha"] = sha
             entry["path"] = None
@@ -3016,6 +3379,25 @@ class Sync:
                 e["why"] = (f"the tag names run {e['holder']} while the live lease for "
                             f"`{e['key']}` is held by {holder}")
             out.append(e)
+        return out
+
+    def held_ages(self) -> dict[str, float]:
+        """Seconds each held lease has been held, from its `since` (or `ts`) — R19."""
+        d = self.root / STATE_DIR / "leases"
+        held = set(self.held())
+        out: dict[str, float] = {}
+        now = time.time()
+        for q in sorted(d.glob("*.lock") if d.exists() else []):
+            try:
+                h = json.loads(q.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            key = h.get("key") or q.stem
+            if key not in held or h.get("run") != self.rid:
+                continue
+            t = parse_iso_or_none(str(h.get("since") or h.get("ts") or ""))
+            if t is not None:
+                out[key] = max(0.0, now - t)
         return out
 
     def held(self) -> list[str]:
@@ -3880,6 +4262,37 @@ class Sync:
         return False, (f"{rel} is a guarded registry file and this run holds no lease.{who} "
                        f"Acquire one first: agent_sync.py acquire <TASK-ID>")
 
+    def long_held_notice(self) -> str:
+        """R19's warning where a working session sees it — at most once per lease per run.
+
+        It printed only from `status`, which runs at SessionStart, when a fresh session holds
+        nothing: the one moment it can never fire (seam S9). The guard runs on every write,
+        so it says it here, once, and leaves a marker so the next write stays quiet."""
+        try:
+            interval = int(self.cfg.get("scheduledIntervalSeconds") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if interval <= 0:
+            return ""
+        lines = []
+        for key, age in long_held(self.held_ages(), interval):
+            if key.startswith(self.RESOURCE_PREFIX):
+                continue
+            mark = self.root / STATE_DIR / "warned" / f"{self.rid}--{lease_name(key)}"
+            if mark.exists():
+                continue
+            try:
+                mark.parent.mkdir(parents=True, exist_ok=True)
+                mark.write_text(now_iso())
+            except OSError:
+                continue
+            lines.append(f"{key} held for {since(int(age))}")
+        if not lines:
+            return ""
+        return (f"agent-sync: {'; '.join(lines)} — longer than this repository's scheduled "
+                f"interval ({since(interval)}). Scheduled jobs stand aside while it is held; "
+                "release it between batches.")
+
     def _any_other_holder(self) -> tuple[str, str] | None:
         """(run, key) of some lease another run holds — both halves, or neither."""
         for key, holding in sorted(self.all_holdings().items()):
@@ -3975,6 +4388,24 @@ class Sync:
         raw = (self.root / CONFIG_PATH).read_bytes()
         return hashlib.sha256(raw).hexdigest()[:12]
 
+    def _snapshot_credentials(self, env_path: Path | None) -> list[str]:
+        """The wiring snapshot's credential line(s). For notion the token's primary home is
+        the Observatory vault since 1.22.0, and the snapshot said `.env.agent-sync` for every
+        backend — a committed description that contradicted the tool (fix round 2, item 6)."""
+        where = (f"`{env_path.name}`"
+                 f"{' in ' + str(env_path.parent.name) if env_path and env_path.parent != self.root else ''}"
+                 if env_path else "`(none found)`")
+        backend = os.environ.get("AGENT_SYNC_BACKEND") or self.cfg.get("backend") or "fs"
+        if backend == "notion":
+            return [f"- record-plane token: the Observatory vault slot "
+                    f"`{vault_project(self.root)}/{VAULT_SECRET}` first — every command that "
+                    "writes to Notion re-runs itself under `use_secret.py run --vault-only`; "
+                    f"{where} only as a DEGRADED fallback (`status` names which one served). "
+                    "Never sourced, never committed",
+                    f"- other settings (parent page, collection) read from {where} — "
+                    "gitignored, never committed"]
+        return [f"- credentials read from {where} — gitignored, never committed"]
+
     def setup_snapshot(self) -> str:
         """A snapshot of how THIS project is actually wired, generated from the config.
 
@@ -4017,9 +4448,7 @@ class Sync:
             f"**{'gated' if self.gated else 'ungated'}**",
             f"- lease TTL {cfg.get('leaseTtlSeconds', DEFAULT_TTL)}s, renewed every "
             f"{cfg.get('renewIntervalSeconds', DEFAULT_RENEW)}s",
-            f"- credentials read from `{env_path.name if env_path else '(none found)'}`"
-            f"{' in ' + str(env_path.parent.name) if env_path and env_path.parent != self.root else ''}"
-            " — gitignored, never committed",
+            *self._snapshot_credentials(env_path),
             "",
             "### Id registers — reserve before you write",
             "",
@@ -4183,7 +4612,7 @@ class Sync:
         ]
         leaks = self._leaks(res_events)
         lines += ["", "## Reserved ids not found in git", ""]
-        lines += ([f"- `{r}-{v:04d}` reserved by {run}" for r, v, run in leaks]
+        lines += ([f"- `{self.fmt_id(r, v)}` reserved by {run}" for r, v, run in leaks]
                   or ["- none"])
 
         findings = self.reconcile()
@@ -4194,6 +4623,15 @@ class Sync:
             lines.append(f"- {n}")
         return "\n".join(lines) + "\n"
 
+    def _register_text(self, reg: str) -> str:
+        spec = (self.cfg.get("idRegisters") or {}).get(reg) or {}
+        path = self.root / spec["file"] if spec.get("file") else None
+        return path.read_text() if path and path.exists() else ""
+
+    def fmt_id(self, reg: str, value: int) -> str:
+        """`CO-051` in a three-digit register, `B-0051` in a four-digit one (AS-08)."""
+        return format_id(reg, value, id_width(self._register_text(reg), reg))
+
     def _leaks(self, events: list[dict[str, str]]) -> list[tuple[str, int, str]]:
         out = []
         for reg, spec in (self.cfg.get("idRegisters") or {}).items():
@@ -4201,7 +4639,7 @@ class Sync:
             path = self.root / spec["file"]
             text = path.read_text() if path.exists() else ""
             for run, value in assignments:
-                if f"{reg}-{value:04d}" not in text:
+                if not id_present(text, reg, value):
                     out.append((reg, value, run))
         return out
 
@@ -4268,11 +4706,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  1. Create a personal access token: Notion's developer portal →")
         print("     Personal access tokens → New token. It begins `ntn_`.")
         print("     Reference: https://developers.notion.com/docs/create-a-notion-integration")
-        print(f"  2. Put it, and the page the container should live under, in {ENV_FILE}:")
-        print("       AGENT_SYNC_NOTION_TOKEN=<paste it here>")
+        print("  2. Put the token in the Observatory vault — its primary home since 1.22.0.")
+        print("     Write ONLY the token (one line, no `NAME=`) into a mode-600 file outside")
+        print("     the repository, then:")
+        print(f"       python3 \"$(project-observatory full-path)/tools/vault.py\" put "
+              f"{vault_project(root)} local {VAULT_SECRET} < that-file")
+        print("     and delete that file. Every command that touches Notion re-runs itself")
+        print("     under `use_secret.py run --vault-only`, so the value never reaches argv.")
+        print(f"     No Observatory on this machine: paste it into {ENV_FILE} instead —")
+        print("     `status` reports that as degraded. Do not `source` the file either way.")
+        print(f"  3. Put the page the container should live under in {ENV_FILE}:")
         print("       AGENT_SYNC_NOTION_PARENT=<the 32-character id ending that page's URL>")
-        print("  3. Load the file into your shell before running agents:")
-        print(f"       set -a && . ./{ENV_FILE} && set +a")
         print()
         print("  Then run `bootstrap` — it creates the container page and prints the id")
         print("  to paste into AGENT_SYNC_NOTION_COLLECTION. Share that page in Notion")
@@ -4287,8 +4731,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("     (Settings → API and access), then put it in this line of "
               f"{ENV_FILE}:")
         print("       AGENT_SYNC_OUTLINE_TOKEN=<paste it here>")
-        print(f"  2. Load the file into your shell before running agents:")
-        print(f"       set -a && . ./{ENV_FILE} && set +a")
+        print(f"  2. Nothing to load: every command and hook reads {ENV_FILE} itself.")
+        print("     Do not `source` it into your shell — that puts the token in every")
+        print("     process the shell starts.")
         print()
         print("  Then run `status` again — it will create the cloud layout and print "
               "the collection id to paste into AGENT_SYNC_OUTLINE_COLLECTION.")
@@ -4375,6 +4820,15 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"  record plane   : {ad.name}"
           f"{'' if ad.is_lease_authority else ' — local only, not shared between machines'}")
     print(f"  lease          : {s.lease_mode} — {headline}")
+    if VAULT_DEGRADED:
+        print(f"  token          : degraded: {VAULT_DEGRADED}")
+    if TOKEN_SOURCE == "file":
+        print(f"  token          : degraded: plaintext token file {ENV_FILE} — move it to the "
+              f"Observatory vault:\n    python3 \"$(project-observatory full-path)/tools/vault.py\" "
+              f"put {vault_project(s.root)} local {VAULT_SECRET} < <a mode-600 file holding only "
+              f"the token>\n    then delete the {VAULT_SECRET} line from {ENV_FILE}")
+    elif TOKEN_SOURCE in ("vault", "env"):
+        print(f"  token          : from the {'Observatory vault' if TOKEN_SOURCE == 'vault' else 'environment'}")
     print(f"  runs recorded  : {'gated' if s.gated else 'UNGATED'}")
     print(f"  run id         : {s.rid}")
 
@@ -4398,6 +4852,14 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(f"\n✗ {exc}")
         return 1
     print(f"  leases held    : {', '.join(held) if held else 'none'}")
+    try:
+        interval = int(s.cfg.get("scheduledIntervalSeconds") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    for key, age in long_held(s.held_ages(), interval):
+        print(f"  ⚠ held too long: {key} for {since(int(age))} — longer than this repository's "
+              f"scheduled interval ({since(interval)}).\n    Scheduled jobs stand aside while "
+              "it is held; release it between batches.")
 
     # A run produces more than a diff, and what it leaves behind has to be reported by the
     # command every session runs. Until this line existed, `status` printed `leases held:
@@ -4411,6 +4873,14 @@ def cmd_status(_args: argparse.Namespace) -> int:
     else:
         print(f"  expired locks  : {len(stale)} — {len(reapable)} this run's to clear, "
               f"{len(left_alone)} left alone")
+        gone = long_expired(stale, LONG_EXPIRED_DAYS * 86400)
+        if gone:
+            # The lock directory only: `status` runs at every SessionStart and does not pay a
+            # remote round-trip; `residue` and `reap --long-expired` sweep the git plane too.
+            print(f"  long expired   : {len(gone)} in the lock directory expired "
+                  f"{LONG_EXPIRED_DAYS}+ days ago — the operator reviews them with: "
+                  "agent_sync.py reap --long-expired"
+                  + (" (which also sweeps the remote)" if s.lease_mode == "git" else ""))
         print("\n  Expired leases still on disk. Nobody holds these: the TTL ended the "
               "lease\n  and left the file.")
         # Age splits the list, because age is what decides whether a line is news.
@@ -4632,6 +5102,7 @@ def cmd_acquire(args: argparse.Namespace) -> int:
     s = Sync()
     won, holder = s.acquire(args.key)
     if won:
+        register_session_repo(s.root)
         headline, detail = lease_guarantee(s.lease_mode)
         print(f"won {args.key} (run {s.rid}, ttl {s.ttl}s)")
         print(f"  {headline} — {detail}")
@@ -4644,7 +5115,24 @@ def cmd_acquire(args: argparse.Namespace) -> int:
 
 
 def cmd_renew(args: argparse.Namespace) -> int:
-    Sync().renew(args.key)
+    if getattr(args, "session_repos", False):
+        own = _session_prelude()
+        key, children = _start_session_children("renew", own)
+        own_holds = None
+        try:
+            s = Sync()
+            s.renew(args.key)
+            own_holds = bool(s.held())
+        except Fail:
+            own_holds = False   # the session's own project may not be coordinated
+        except Exception as exc:                          # noqa: BLE001
+            print(f"note: {own}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        _finish_session_children("renew", key, children, own, own_holds)
+        return 0
+    s = Sync()
+    s.renew(args.key)
+    if getattr(args, "report_held", False):
+        print(f"{HELD_MARK} {len(s.held())}")
     return 0
 
 
@@ -4652,7 +5140,20 @@ def cmd_release(args: argparse.Namespace) -> int:
     if getattr(args, "held", False):
         if args.key:
             raise Fail("release takes a key OR --held, not both")
-        return _release_held()
+        if getattr(args, "session_repos", False):
+            own = _session_prelude()
+            key, children = _start_session_children("release", own)
+            rc, own_holds = 0, None
+            held_after: dict[str, int] = {}
+            try:
+                rc = _release_held(held_after=held_after)
+                own_holds = held_after.get("n", 1) > 0
+            except Fail:
+                own_holds = False   # the session's own project is not coordinated
+            except Exception as exc:                      # noqa: BLE001
+                print(f"note: {own}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return _finish_session_children("release", key, children, own, own_holds) or rc
+        return _release_held(report=getattr(args, "report_held", False))
     if not args.key:
         raise Fail("release needs a key, or --held for everything this run holds")
     # Exit non-zero when nothing was released. A caller that scripts `release` in a
@@ -4668,7 +5169,248 @@ def cmd_release(args: argparse.Namespace) -> int:
     return 0
 
 
-def _release_held() -> int:
+def session_repos_dir() -> Path:
+    """`~/.agent-sync/session-repos`, resolved at each call from the CURRENT `HOME`.
+
+    It was a module constant read at import, so a test that pointed `HOME` at a temporary
+    directory after importing the module — or an in-process caller that changed it — still
+    wrote into the real home: 14 files in the operator's `~/.agent-sync` came from one test
+    run (seam S1, 2026-10-12)."""
+    return Path.home() / ".agent-sync" / "session-repos"
+
+
+# The hook's whole budget, from this process's start: session-end.sh gives `release` 2 s
+# for EVERY repository, renew.sh gives `renew` 10 s. The children share it.
+SESSION_REPOS_BUDGET = {"release": 1.6, "renew": 9.0}
+HELD_MARK = "agent-sync-held:"
+# The environment this process STARTED with, before `load_env_file` filled it from one
+# repository's `.env.agent-sync`. A child acting in another repository starts from this,
+# never from the filled one: `load_env_file` only sets absent keys, so a second repository
+# acted on in-process inherited the first one's backend, URL, collection and token.
+_STARTED_ENV = dict(os.environ)
+
+
+def _hook_started_at(environ: dict[str, str], now_mono: float, now_wall: float) -> float:
+    """The monotonic instant the HOOK's process started — across a vault re-exec. Pure.
+
+    The budget was measured from this module's import, and `execv` under the vault imports
+    it again: the re-run process started its 1.6 s afresh after the probe had already spent
+    part of the 2 s the host gives. The first process records its wall-clock start in
+    AGENT_SYNC_HOOK_T0 just before the exec; the re-run counts from there."""
+    t0 = environ.get(HOOK_T0_ENV)
+    if t0 and environ.get(VAULT_REEXEC):
+        try:
+            return now_mono - min(max(0.0, now_wall - float(t0)), 3600.0)
+        except ValueError:
+            pass
+    return now_mono
+
+
+_STARTED_AT = _hook_started_at(os.environ, time.monotonic(), time.time())
+
+
+def session_registry_key() -> str:
+    """Whose list of repositories this is — the SESSION, never the project directory.
+
+    AS-07 keyed the list by `CLAUDE_PROJECT_DIR`, which a Bash tool call does not carry: the
+    `acquire` that should have registered a second repository found no project and wrote
+    nothing. And two sessions in one project shared one list, so the first SessionEnd
+    deleted it while the other still held a lease there. The key is `_session_key()`'s —
+    `env:<AGENT_SYNC_RUN_ID>` or `session:<id>` — which `hooks/_lib.sh` computes the same
+    way from the environment or the hook payload. Empty when no identity is established:
+    the shared fallback is nobody's list.
+    """
+    key, _how = _session_key()
+    return key
+
+
+def session_repos_file(key: str) -> Path:
+    """`<sha256 of the key's bytes>.json` — ASCII whatever the key, any length, and the same
+    digest `printf '%s' "$key" | sha256sum` gives in bash under any locale (raw bytes on
+    both sides: `os.fsencode` undoes the decoding Python applied to the environment)."""
+    return session_repos_dir() / (hashlib.sha256(os.fsencode(key)).hexdigest() + ".json")
+
+
+def session_repos(key: str) -> list[str]:
+    try:
+        data = json.loads(session_repos_file(key).read_text())
+        return [r for r in data if isinstance(r, str)] if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _update_session_repos(key: str, add: list[str] = (), drop: list[str] = ()) -> None:
+    """Add and drop under one lock, re-reading the list inside it — an `acquire` registering
+    a repository while a renew's children are still out must not be overwritten by the
+    renew's stale copy. An empty list removes the file, so the bash check stays a file test."""
+    f = session_repos_file(key)
+    try:
+        # Inside the try: a host without fcntl (Windows Python) raised ImportError past the
+        # OSError handler below and crashed `acquire` AFTER it had won the lease (seam S4).
+        # Without the lock the list is still written; two writers racing is the lesser harm.
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+        d = session_repos_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / ".lock", "a") as lock:
+            if fcntl is not None:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            repos = [r for r in session_repos(key) if r not in set(drop)]
+            repos = sorted(set(repos) | set(add))
+            if repos:
+                tmp = f.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(repos))
+                os.replace(tmp, f)
+            elif f.exists():
+                f.unlink()
+    except OSError:
+        pass
+
+
+def register_session_repo(root: Path) -> None:
+    """After a lease is won in `root`: list it under this session, so the session's hooks
+    renew and release it wherever the session itself is rooted (AS-07)."""
+    key = session_registry_key()
+    if key:
+        try:
+            _update_session_repos(key, add=[str(root.resolve())])
+        except Exception as exc:                          # noqa: BLE001 - best effort, never fail a won acquire
+            print(f"note: this session's list of repositories was not updated "
+                  f"({type(exc).__name__}) — renew/release this lease here by hand",
+                  file=sys.stderr)
+
+
+def _child_env(key: str) -> dict[str, str]:
+    env = dict(_STARTED_ENV)
+    if env.pop(VAULT_REEXEC, None) is not None:
+        env.pop(VAULT_SECRET, None)      # the vault put THIS repository's token here
+    env.pop(HOOK_T0_ENV, None)
+    if key.startswith("session:") and not any(
+            env.get(v) for v in ("AGENT_SYNC_RUN_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID")):
+        # Found by walking to a session stamp in THIS checkout; the child's checkout has none.
+        env["CLAUDE_SESSION_ID"] = key[len("session:"):]
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _start_session_children(verb: str, own: Path | None) -> tuple[str, list]:
+    """One child process per OTHER listed repository, started in parallel (AS-07).
+
+    Each runs in its own repository with the environment this process started with, so it
+    reads that repository's `.env.agent-sync` — and its own vault slot — and nothing of
+    this one's. Returns (registry key, [(repo, process or None)]).
+    """
+    key = session_registry_key()
+    if not key:
+        return key, []
+    argv = ["renew", "--report-held"] if verb == "renew" else ["release", "--held", "--report-held"]
+    env = _child_env(key)
+    out: list = []
+    for repo in session_repos(key):
+        try:
+            r = Path(repo)
+            if own is not None and r.resolve() == own:
+                continue                                  # acted on in this process
+            if not r.is_dir() or not (r / CONFIG_PATH).is_file():
+                print(f"note: {repo}: no longer a coordinated repository — dropped from this "
+                      "session's list", file=sys.stderr)
+                out.append((repo, None))
+                continue
+            p = subprocess.Popen([sys.executable, os.path.abspath(__file__)] + argv, cwd=repo,
+                                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+            out.append((repo, p))
+        except Exception as exc:                          # noqa: BLE001 - one repo never strands the rest
+            print(f"note: {repo}: could not start ({type(exc).__name__}: {exc}) — kept listed",
+                  file=sys.stderr)
+            out.append((repo, False))
+    return key, out
+
+
+def _finish_session_children(verb: str, key: str, children: list, own: Path | None,
+                             own_holds: bool | None) -> int:
+    """Wait for the children inside the hook's budget, relay what each said, and keep a
+    repository listed while this session may still hold anything there."""
+    if not key:
+        return 0
+    deadline = _STARTED_AT + SESSION_REPOS_BUDGET[verb]
+    rc, drop = 0, []
+    for repo, p in children:
+        if p is None:
+            drop.append(repo)
+            continue
+        if p is False:
+            continue
+        try:
+            out, err = p.communicate(timeout=max(0.05, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            print(f"note: {repo}: not finished inside the hook's {SESSION_REPOS_BUDGET[verb]:g}s "
+                  "budget — kept listed", file=sys.stderr)
+            rc = rc or 1
+            continue
+        except Exception as exc:                          # noqa: BLE001
+            print(f"note: {repo}: {type(exc).__name__}: {exc} — kept listed", file=sys.stderr)
+            continue
+        held_after = None
+        for line in (out or "").splitlines():
+            if line.startswith(HELD_MARK):
+                try:
+                    held_after = int(line[len(HELD_MARK):].strip())
+                except ValueError:
+                    held_after = None
+            else:
+                print(f"{repo}: {line}")
+        for line in (err or "").splitlines():
+            print(f"{repo}: {line}", file=sys.stderr)
+        if p.returncode not in (0, None):
+            rc = rc or p.returncode
+        if held_after == 0:
+            drop.append(repo)
+    if own is not None and own_holds is False:
+        drop.append(str(own))
+    if drop:
+        _update_session_repos(key, drop=drop)
+    return rc
+
+
+def _session_prelude() -> Path | None:
+    """The session's own repository, with its env loaded BEFORE any child starts: if this
+    process is going to re-run itself under the vault, it must do so with no child out."""
+    root = project_root()
+    try:
+        load_env_file(root)
+    except Exception:                                     # noqa: BLE001 - never block the hook
+        pass
+    try:
+        return root.resolve()
+    except OSError:
+        return None
+
+
+def _bash_writes():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "agent_sync_bash_writes", Path(__file__).resolve().parent / "bash_writes.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def bash_write_targets(cmd: str, cwd: str = ".") -> list[str]:
+    """See `bash_writes.py` (AS-09) — kept here so `write-targets` and tests share one parser."""
+    return _bash_writes().bash_write_targets(cmd, cwd)
+
+
+def cmd_write_targets(_args: argparse.Namespace) -> int:
+    """Print, one per line, the files a Bash tool call would write (payload on stdin)."""
+    return _bash_writes().main()
+
+
+def _release_held(report: bool = False, held_after: dict[str, int] | None = None) -> int:
     """Everything this run holds, in ONE process — the SessionEnd path.
 
     The hook used to spend `whoami` plus one `release` process per key, each paying the
@@ -4696,6 +5438,11 @@ def _release_held() -> int:
             released.extend(s.released_as.get(key) or [key])
         else:
             refused.append(key)
+    remaining = len(s.held())
+    if held_after is not None:
+        held_after["n"] = remaining
+    if report:
+        print(f"{HELD_MARK} {remaining}")
     if not released and not refused:
         print("released nothing — this run holds nothing")
         return 0
@@ -4713,7 +5460,7 @@ def cmd_reserve(args: argparse.Namespace) -> int:
         print(s.reserve_offline(args.register))
         return 0
     value = s.reserve(args.register, rkey=getattr(args, "rkey", None))
-    print(f"{args.register}-{value:04d}")
+    print(s.fmt_id(args.register, value))
     return 0
 
 
@@ -4817,12 +5564,63 @@ def cmd_residue(_args: argparse.Namespace) -> int:
                     print(f"      clear : agent_sync.py reap {e['key']}")
             print(f"    {len(refs)} ref(s) on the remote, {len(reapable)} this run can prove "
                   "it owns and has spent")
+            print_keyless_warning(refs, indent="    ")
     return 0
+
+
+def payload_is_keyless(raw: str | None) -> bool:
+    """True only for a payload that parsed as a JSON OBJECT carrying no `key` — the shape
+    1.21.2 and older wrote. An unreadable or non-object payload is not evidence of an old
+    writer, and was flagged as one (fix round 2, item e). Pure."""
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    key = parsed.get("key")
+    return not (isinstance(key, str) and key)
+
+
+def print_keyless_warning(refs: list[dict[str, Any]], indent: str = "  ") -> None:
+    """One line when a lease ref carries no `key` — AS-14's revisit condition, made a check.
+
+    1.21.3 writes the key into every ref's payload; a ref without one was pushed by 1.21.2
+    or older, so a writer that old is still running somewhere — the precondition for the
+    one race #25 left open (two runs pushing one PATH key under its two names). Measured
+    2026-10-12 on the Fabric remote: `docs-architecture-report-workspace.md`, written
+    2026-10-08 by r-d8d027823, beside `docs%2Farchitecture%2Freport-workspace.md`.
+    """
+    keyless = [e for e in refs if e.get("keyless")]
+    if keyless:
+        names = ", ".join(e["ref"][len(LEASE_REF_PREFIX):] for e in keyless[:4])
+        more = f", +{len(keyless) - 4} more" if len(keyless) > 4 else ""
+        stamps = ", ".join(str(e.get("ts") or "?") for e in keyless[:4])
+        print(f"{indent}⚠ {len(keyless)} lease ref(s) carry no `key` ({names}{more}) — each was "
+              f"written by agent-sync ≤1.21.2 (ts {stamps}).\n"
+              f"{indent}  That dates the write; it does not prove a ≤1.21.2 writer is still "
+              "running. A session started\n"
+              f"{indent}  before the upgrade keeps running the old plugin cache "
+              "(CLAUDE_PLUGIN_ROOT pins it):\n"
+              f"{indent}  restart sessions that predate the upgrade (AS-14).")
 
 
 def cmd_reap(args: argparse.Namespace) -> int:
     """Clear this run's spent locks, and verify the teardown by reading the state again."""
     s = Sync()
+    days = getattr(args, "older_than_days", None)
+    if not getattr(args, "long_expired", False):
+        if days is not None or getattr(args, "apply", False):
+            print("  --older-than-days and --apply belong to `reap --long-expired`; without it "
+                  "they would be ignored, so nothing was done.", file=sys.stderr)
+            return 2
+    else:
+        # `is None`, not `or`: 0 used to become 7 silently — an operator asking for "all of
+        # it" was handed the default and told nothing.
+        return _reap_long_expired(s, LONG_EXPIRED_DAYS if days is None else days,
+                                  bool(getattr(args, "apply", False)))
     if getattr(args, "own", False):
         return _reap_by_operator_decision(s, args.keys)
     result = s.reap(args.keys or None)
@@ -4876,7 +5674,60 @@ def cmd_reap(args: argparse.Namespace) -> int:
     return 1 if (result["remaining"] or result["refused"] or git_bad) else 0
 
 
-def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
+def _reap_long_expired(s: "Sync", days: int, apply: bool) -> int:
+    """`reap --long-expired` — AS-11: a sweep by AGE ALONE, and therefore an operator's call.
+
+    This is the one path that removes state by time rather than by proof of ownership, which
+    `references/lease-protocol.md` otherwise forbids a sweep to do — the dated section there
+    ("A sweep by age", 2026-10-12) is the amendment and its limits. Selects every lock, on
+    both planes, expired at least `days` days ago (`long_expired()`), and prints each with
+    the classifier's own verdict, so the operator sees what a run could NOT prove before
+    deciding. With `--apply` it clears exactly those entries through
+    `_reap_by_operator_decision` — the same refusals (live, unreadable), the same printed
+    payload, the same journal line — and nothing younger on the other plane. Without
+    `--apply` it only lists: the default is the read. Never automatic, never an agent's.
+    """
+    if days < 1:
+        print(f"  --older-than-days {days} refused: it must be at least 1. A sweep by age "
+              "that reaches a lease\n  expired minutes ago is not residue clearing; for one "
+              "key, `reap --i-own-this KEY`.", file=sys.stderr)
+        return 2
+    entries = list(s.residue())
+    for e in entries:
+        e.setdefault("plane", "fs")
+    git_note = ""
+    if s.lease_mode == "git":
+        refs, why = s.git_residue()
+        if why is not None:
+            git_note = f"the git plane could not be read ({why}) — only the lock directory was swept"
+            print(f"  ⚠ {git_note}.", file=sys.stderr)
+        entries += refs
+    gone = long_expired(entries, days * 86400)
+    if not gone:
+        print(f"  nothing expired {days} day(s) ago or more — nothing to sweep"
+              + (f" ({git_note})" if git_note else ""))
+        return 0
+    keys = sorted({e["key"] for e in gone})
+    print(f"  Expired {days} day(s) ago or more — the classifier's verdict on each, unchanged:")
+    for e in gone:
+        print(f"  · {e['key']} [{e.get('plane', 'fs')}] verdict {e['state']} · run "
+              f"{e.get('run') or '—'}{' · host ' + e['host'] if e.get('host') else ''} · {spent(e)}")
+        print(f"      why: {e.get('why') or '—'}")
+        if e.get("keyless"):
+            print(f"      ⚠ no `key` in the payload: was written by agent-sync ≤1.21.2 "
+                  f"(ts {e.get('ts') or '?'}) — not proof of a live writer (AS-14)")
+    if not apply:
+        print(f"\n  {len(keys)} key(s). Nothing was removed. Clearing by age is the OPERATOR's "
+              "decision, never an\n  agent's: an expired lease does not prove its writer "
+              "stopped. If you are the operator:\n    agent_sync.py reap --long-expired"
+              + (f" --older-than-days {days}" if days != LONG_EXPIRED_DAYS else "") + " --apply")
+        return 0
+    return _reap_by_operator_decision(s, keys, why=f"long expired (>= {days}d)",
+                                      min_expired_s=days * 86400)
+
+
+def _reap_by_operator_decision(s: "Sync", keys: list[str], why: str = "--i-own-this",
+                               min_expired_s: int | None = None) -> int:
     """`--i-own-this` — the one path that clears state no RUN can prove is its own.
 
     AS-01b. The classifier is right to refuse: a run whose identity is the shared fallback
@@ -4966,6 +5817,12 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
             continue
         for e in unique:
             plane = e.get("plane", "fs")
+            if min_expired_s is not None and e["state"] != LIVE and (
+                    e.get("expired_for") is None or e["expired_for"] < min_expired_s):
+                # The sweep chose this KEY for one plane's entry; the other plane's entry is
+                # younger than the threshold and is not what the operator was shown.
+                print(f"  · {e['key']} [{plane}] left: {spent(e)}, under the sweep's threshold")
+                continue
             if e["state"] == LIVE:
                 print(f"  ✗ {e['key']} [{plane}] is LIVE under {e.get('run') or 'a run'}"
                       f"{' on ' + e['host'] if e.get('host') else ''} — not cleared. An override "
@@ -5001,11 +5858,11 @@ def _reap_by_operator_decision(s: "Sync", keys: list[str]) -> int:
                           "verified, whatever the call returned", file=sys.stderr)
                     rc = 1
                     continue
-            print(f"  cleared {e['key']} [{plane}] by operator decision — it held {had}")
+            print(f"  cleared {e['key']} [{plane}] by operator decision ({why}) — it held {had}")
             print(f"    the classifier called it `{e['state']}`, and that has not changed: this "
                   "was a person's\n    call, not a proof of ownership.")
             try:
-                s.journal(f"reap --i-own-this {e['key']} [{plane}] — was {had}, "
+                s.journal(f"reap {why} {e['key']} [{plane}] — was {had}, "
                           f"classified {e['state']}")
             except Exception:                            # noqa: BLE001 - the record plane is optional
                 pass
@@ -5023,11 +5880,29 @@ def cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+NOTICE_MARK = "AGENT_SYNC_NOTICE "
+
+
 def cmd_guard(args: argparse.Namespace) -> int:
     """Exit 0 = allowed, 2 = denied. Any other code is non-blocking in Claude Code,
-    so internal failures must also exit 2 rather than fail open."""
+    so internal failures must also exit 2 rather than fail open.
+
+    Takes every path a tool call writes, in ONE process (seam S5): the hook used to start
+    the coordinator once per target, ~155 ms each. The first refusal decides; the paths
+    after it are not checked, because the call is refused whole.
+    """
+    global _GIT_MEMO
+    paths = args.path if isinstance(args.path, list) else [args.path]
+    _GIT_MEMO = {}
     try:
-        allowed, reason = Sync().guard(args.path)
+        s = Sync()
+        for path in paths:
+            allowed, reason = s.guard(path)
+            if not allowed:
+                print(f"agent-sync: {reason}", file=sys.stderr)
+                return 2
+            print(reason)
+        notice = s.long_held_notice()
     except NotCoordinated:
         # Nothing to protect here. Denying made every path in an uncoordinated
         # repository uncommittable, with a message about a lease no lease could satisfy.
@@ -5036,11 +5911,12 @@ def cmd_guard(args: argparse.Namespace) -> int:
     except Fail as exc:
         print(f"agent-sync guard: {exc}", file=sys.stderr)
         return 2
-    if allowed:
-        print(reason)
-        return 0
-    print(f"agent-sync: {reason}", file=sys.stderr)
-    return 2
+    if notice:
+        # One JSON line the hook forwards (R19, seam S9): `systemMessage` reaches the person,
+        # PreToolUse `additionalContext` the model, which is the one holding the lease.
+        print(NOTICE_MARK + json.dumps({"systemMessage": notice, "hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "additionalContext": notice}}, ensure_ascii=True))
+    return 0
 
 
 def cmd_board(args: argparse.Namespace) -> int:
@@ -5072,7 +5948,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     if getattr(args, "set_baseline", False):
         stamped = s.set_baseline()
         for reg, top in stamped.items():
-            print(f"baseline {reg} = {reg}-{top:04d} — ids after this must carry an as-built record")
+            print(f"baseline {reg} = {s.fmt_id(reg, top)} — ids after this must carry an as-built record")
         return 0
     findings = s.reconcile()
     print("Intent (git) vs as-built (coordination plane)\n")
@@ -5599,6 +6475,14 @@ def check_setup(root: Path) -> tuple[list[str], list[str], list[str]]:
         problems.append(f"backend '{cfg.get('backend')}' is not a known adapter")
     for k in sorted(set(cfg) - CONFIG_KEYS):
         problems.append(f"config key '{k}' is not in the schema — it will be ignored")
+    if "scheduledIntervalSeconds" in cfg:
+        # The schema says integer, minimum 60; `check` is what an operator runs, so it
+        # enforces what the schema declares (fix round 2, item k). Below a minute a lease
+        # held across one renew interval would already read as "held too long".
+        iv = cfg["scheduledIntervalSeconds"]
+        if isinstance(iv, bool) or not isinstance(iv, int) or iv < 60:
+            problems.append(f"scheduledIntervalSeconds is {iv!r} — the schema requires an "
+                            "integer of at least 60 (seconds)")
 
     # Registers must exist, their allocation pattern must match — and SOMETHING must be
     # able to hand an id out at all. A register no allocator serves is a rule that protects
@@ -6182,10 +7066,18 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("key", nargs="?")
     q.add_argument("--held", action="store_true",
                    help="release every lease this run holds, in one process (SessionEnd)")
+    q.add_argument("--session-repos", action="store_true", dest="session_repos",
+                   help="also in every other repository this session took a lease in (AS-07)")
+    q.add_argument("--report-held", action="store_true", dest="report_held",
+                   help=argparse.SUPPRESS)
     q.set_defaults(fn=cmd_release)
 
     r = sub.add_parser("renew")
     r.add_argument("key", nargs="?")
+    r.add_argument("--session-repos", action="store_true", dest="session_repos",
+                   help="also renew in every other repository this session took a lease in (AS-07)")
+    r.add_argument("--report-held", action="store_true", dest="report_held",
+                   help=argparse.SUPPRESS)
     r.set_defaults(fn=cmd_renew)
 
     rv = sub.add_parser("reserve", help="reserve the next id in a register")
@@ -6236,17 +7128,41 @@ def build_parser() -> argparse.ArgumentParser:
                     help="clear the NAMED expired locks even though this run cannot prove "
                          "they are its own — an operator's decision, per key, recorded. "
                          "Refuses a live lease and refuses to run with no key.")
+    rp.add_argument("--long-expired", action="store_true",
+                    help="list locks on both planes expired at least --older-than-days ago "
+                         f"(default {LONG_EXPIRED_DAYS}), each with the classifier's verdict; "
+                         "with --apply, clear them — a sweep by age alone, so the OPERATOR's "
+                         "decision, never an agent's; each removal printed and journaled")
+    rp.add_argument("--older-than-days", type=int, dest="older_than_days",
+                    help="with --long-expired: the age threshold in days, at least 1")
+    rp.add_argument("--apply", action="store_true",
+                    help="with --long-expired: clear what it lists (operator only)")
     rp.set_defaults(fn=cmd_reap)
 
+    wt = sub.add_parser("write-targets", help="files a Bash tool call writes (payload on stdin); "
+                                              "used by the guard hook — AS-09")
+    wt.set_defaults(fn=cmd_write_targets)
+
     g = sub.add_parser("guard", help="may this run write that path? exit 2 = no")
-    g.add_argument("path")
+    g.add_argument("path", nargs="+")
     g.set_defaults(fn=cmd_guard)
 
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    global RECORD_PLANE_COMMAND, INVOKED_ARGV, _GIT_MEMO, TOKEN_SOURCE, VAULT_DEGRADED
     args = build_parser().parse_args(argv)
+    # Per-invocation state: `main()` called twice in one process (the tests do) must not
+    # see the previous call's git answers or token source.
+    _GIT_MEMO, TOKEN_SOURCE, VAULT_DEGRADED = None, None, None
+    # The vault re-run repeats exactly what THIS invocation was given — `main(argv)` called
+    # in-process is not `sys.argv` — and only for a command that touches the record plane.
+    INVOKED_ARGV = list(argv) if argv is not None else sys.argv[1:]
+    # `release --held` is SessionEnd's (and its children's) command: see NO_RECORD_PLANE.
+    RECORD_PLANE_COMMAND = args.cmd not in NO_RECORD_PLANE and not (
+        args.cmd == "release" and getattr(args, "held", False))
+    _VAULT_DECIDED.clear()
     try:
         return int(args.fn(args))
     except Fail as exc:

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/ssheleg/agent-sync/main/agent-sync.schema.json",
   "title": "agent-sync project configuration",
-  "description": "Shape only. Identity (instance URL, token, container id) lives in .env.agent-sync and is never committed.",
+  "description": "Shape only, committed. Identity never lives here: the instance URL and container id live in .env.agent-sync; the token lives in the Observatory vault for the notion backend (1.22.0), else in .env.agent-sync. Neither is ever committed.",
   "type": "object",
   "required": [
     "backend"
@@ -159,6 +159,11 @@
           "description": "How many days keep full detail; older entries are compacted to one line on the next write. Default 7."
         }
       }
+    },
+    "scheduledIntervalSeconds": {
+      "type": "integer",
+      "minimum": 60,
+      "description": "The interval of a scheduled job that stands aside while any lease here is held — Project Observatory's scheduled tick, for one. `status` warns when this run has held a lease longer than it, so a session does not silently turn every tick in that window into a no-op. Absent: no warning."
     }
   }
 }

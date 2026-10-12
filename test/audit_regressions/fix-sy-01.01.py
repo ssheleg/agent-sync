@@ -31,6 +31,10 @@ import tempfile
 
 # The import below must not leave bytecode in a tree people read as source (ASY-01).
 sys.dont_write_bytecode = True
+sys.path.insert(0, __import__("os").path.dirname(
+    __import__("os").path.dirname(__import__("os").path.abspath(__file__))))
+import _sandbox  # noqa: E402 - a temp HOME and no inherited session id, before anything runs
+_sandbox.isolate()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, os.pardir, os.pardir, "plugins", "agent-sync", "skills",
