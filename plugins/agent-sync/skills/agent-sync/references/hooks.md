@@ -104,11 +104,15 @@ the narrowing is its own, in two steps (1.22.0):
    `git commit <paths>`, resolved by `git ls-files`). Those files and the index are
    checked together, in one `guard` call (AS-16): the hook runs before the command, so
    `git add X && git commit` used to reach the commit with X not yet in the index.
-   When the command cannot be tokenised (an odd-quote heredoc, AS-18), a `git … commit`
-   COMMAND line — at a segment start in the text before the first `$(` / `<<` — counts
-   as a commit in the repository its `-C` / `cd` names (else the payload's directory);
-   only that index is checked, and what the same command stages is unknown. Text inside
-   a heredoc body or a quoted argument (a PR body saying "git commit") is not a commit.
+   When the command cannot be tokenised (an odd-quote heredoc, AS-18), the command text
+   is what remains after joining backslash-newline continuations and removing each
+   balanced `$(…)` and backtick span, each heredoc body (from the `<<DELIM` line through
+   the line that is exactly DELIM) and each comment; an opener that never closes ends it
+   there. A `git … commit` at a segment start of that text counts as a commit in the
+   repository its `-C` / `cd` names (else the payload's directory; a `cd "$(…)"` is
+   unknown, so the payload's directory); only that index is checked, and what the same
+   command stages is unknown. Text inside a heredoc body or a quoted argument (a PR body
+   saying "git commit") is not a commit.
 
 When `guard` allows a write while this run holds a lease longer than the repository's
 `scheduledIntervalSeconds`, the hook prints R19's warning once per lease per run (a marker

@@ -1167,6 +1167,12 @@ def the_untokenisable_commit_fallback_reads_only_a_git_commit_command():
     assert f('git log --grep commit "$(', "/r") is None, "`git log --grep commit` is no commit"
     assert f('A=1 git -c a=b commit -m "$(', "/r") == "/r"
     assert f('cd - && git commit -m "$(', "/r") == "/r", "an unknown dir falls back to cwd"
+    plan = _bash_writes().commit_plan
+    oddmsg = "git commit -m \"$(cat <<'EOF'\nfix the \"x thing\nEOF\n)\""
+    assert plan('git add "$(git ls-files -m)" && ' + oddmsg, "/r")[:2] == (True, "/r"), \
+        "a commit after a leading substitution was not a commit"
+    assert plan("cat > f <<'EOF'\nsay \"git commit\nEOF\ngh pr create --body \"$(cat f)\"",
+                "/r")[0] is False, "a heredoc body naming `git commit` was a commit"
     root, other = _repo(), _repo()
     home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
     try:
@@ -1199,6 +1205,19 @@ def the_untokenisable_commit_fallback_reads_only_a_git_commit_command():
             r.returncode)
         r = _run_guard(root, bash("cd %s && " % other + odd), home)
         assert r.returncode == 2, "`cd <other> && git commit` read cwd's index (%d)" % r.returncode
+        # Blind reading of ea936ae: cutting at the FIRST `$(` / `<<` missed a commit after a
+        # leading substitution. Balanced `$(…)`, heredoc bodies and backticks are removed
+        # instead; a continuation line is joined first.
+        open(os.path.join(root, "notes.md"), "a").write("m\n")
+        subprocess.run(["git", "-C", root, "add", "notes.md"], check=True)
+        for cmd in ('cd "$(git rev-parse --show-toplevel)" && ' + odd,
+                    "MSG=\"$(cat <<'EOF'\nit's \"x\nEOF\n)\" && git commit -m \"$MSG\"",
+                    'git add "$(git ls-files -m)" && ' + odd,
+                    "git \\\n  commit -m \"$(cat <<'EOF'\nfix the \"x thing\nEOF\n)\"",
+                    "echo `date` && " + odd):
+            r = _run_guard(root, bash(cmd), home)
+            assert r.returncode == 2, "an untokenisable commit after a substitution passed " \
+                "(%d): %r" % (r.returncode, cmd)
     finally:
         for d in (root, other, home):
             shutil.rmtree(d, ignore_errors=True)

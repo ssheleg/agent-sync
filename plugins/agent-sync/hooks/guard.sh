@@ -20,6 +20,12 @@ set -uo pipefail
 #     `git commit <paths>` -- and asked of `git ls-files` (modified + untracked under the
 #     specs), then checked with the index. The hook runs before the command, so the index
 #     alone never held X.
+#   Bash: a commit that does not tokenise         COVERED (1.22.1, AS-18): an odd-quote
+#     heredoc message, say. bash_writes.py drops balanced $(...) / backtick spans, heredoc
+#     bodies and comments, joins backslash-newline continuations, and counts a `git ... commit`
+#     only at a segment start of what is left, in the repo its -C / cd names (else the
+#     payload's cwd); the index alone is checked -- what the same command stages is UNPARSED.
+#     An opener that never closes ends the command text there.
 #   Bash writes, parsed by scripts/bash_writes.py (1.22.0, AS-09) -- COVERED*, and only
 #   these shapes, each a case in test/coordination_test.py:
 #     > >> >| &> &>> <> and `>& FILE` redirects; tee [-a]; sed -i (GNU and BSD, -e,

@@ -512,7 +512,8 @@ def guarded_targets(targets: list[str]) -> list[tuple[str, str]]:
 # ------------------------------------------------------------------ AS-16: what a commit stages
 
 _COMMIT_WORDS = re.compile(r"\bgit\b[^\n]*\bcommit\b")
-_OPENER = re.compile(r"\$\(|<<")
+_HEREDOC_OP = re.compile(r"""<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"]+))""")
+_SUB = "$SUB"                        # what a removed `$(…)` / backtick span leaves behind
 _LOOSE_WORD = re.compile(r"""\"([^\"]*)\"?|'([^']*)'?|(\S+)""")
 _SEGMENT_KEYWORDS = {"{", "!", "then", "do", "else"}
 _COMMIT_VALUED_SHORT = set("mFCct")
@@ -635,9 +636,103 @@ def commit_plan(cmd: str, cwd: str) -> tuple[bool, str | None, list[tuple[str, s
     return False, None, []
 
 
+def _scan(s: str, k: int, sub: bool) -> tuple[str, int, bool]:
+    """(command text, index after, closed) of `s` from `k`, quote-aware.
+
+    Each balanced `$(…)` and backtick span is replaced by `$SUB`, each heredoc body (from the
+    line after `<<DELIM` / `<<'DELIM'` / `<<-DELIM` through the line that is exactly DELIM)
+    and each `#` comment is dropped. With `sub`, the scan is inside a `$(`: a fresh quoting
+    context that ends at its matching `)`. An opener whose span never closes ends the text
+    there (closed False), so a quote or heredoc that cannot be matched is never read as
+    commands.
+    """
+    out: list[str] = []
+    q: str | None = None
+    depth, pending, n = 0, [], len(s)
+    while k < n:
+        ch = s[k]
+        if q == "'":
+            out.append(ch)
+            q = None if ch == "'" else q
+            k += 1
+            continue
+        if ch == "\\" and k + 1 < n:
+            out.append(s[k:k + 2])
+            k += 2
+            continue
+        if s.startswith("$(", k):
+            _inner, end, ok = _scan(s, k + 2, True)
+            if not ok:
+                return "".join(out), k, False
+            out.append(_SUB)
+            k = end
+            continue
+        if ch == "`":
+            j = k + 1
+            while j < n and s[j] != "`":
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                return "".join(out), k, False
+            out.append(_SUB)
+            k = j + 1
+            continue
+        if q == '"':
+            out.append(ch)
+            q = None if ch == '"' else q
+            k += 1
+            continue
+        if ch in "'\"":
+            q = ch
+        elif ch == "#" and (k == 0 or s[k - 1] in " \t\n;&|()"):
+            j = s.find("\n", k)
+            k = n if j < 0 else j
+            continue
+        elif s.startswith("<<<", k):
+            out.append("<<<")
+            k += 3
+            continue
+        elif s.startswith("<<", k):
+            m = _HEREDOC_OP.match(s, k)
+            if m:
+                delim = next(g for g in (m.group(2), m.group(3), m.group(4)) if g is not None)
+                pending.append((delim, m.group(1) == "-"))
+                out.append(m.group(0))
+                k = m.end()
+                continue
+        elif ch == "\n" and pending:
+            out.append("\n")
+            k += 1
+            for delim, tabs in pending:
+                while True:
+                    if k >= n:
+                        return "".join(out), k, False      # a body that never ends
+                    j = s.find("\n", k)
+                    line = s[k:n if j < 0 else j]
+                    k = n if j < 0 else j + 1
+                    if (line.lstrip("\t") if tabs else line) == delim:
+                        break
+            pending = []
+            continue
+        elif sub and ch == "(":
+            depth += 1
+        elif sub and ch == ")":
+            if depth == 0:
+                return "".join(out), k + 1, True
+            depth -= 1
+        out.append(ch)
+        k += 1
+    return "".join(out), k, not sub and not pending
+
+
+def _command_text(cmd: str) -> str:
+    """The part of `cmd` that is commands: continuations joined, substitutions, heredoc
+    bodies and comments removed (see `_scan`)."""
+    return _scan(cmd.replace("\\\n", ""), 0, False)[0]
+
+
 def _head_segments(head: str) -> list[str]:
-    """`head` split at `;`, `&&`, `||`, `|`, `&`, `(`, `)` and newlines outside quotes. The
-    head ends before the first `$(` / `<<`, so a quote it leaves open simply runs to its end."""
+    """`head` split at `;`, `&&`, `||`, `|`, `&`, `(`, `)` and newlines outside quotes. A
+    quote left open (the text ended at an unclosed opener) simply runs to its end."""
     segs, cur, q, k = [], [], None, 0
     while k < len(head):
         ch = head[k]
@@ -669,16 +764,17 @@ def _untokenised_commit_dir(cmd: str, cwd: str) -> str | None:
     """The directory a `git … commit` COMMAND in an untokenisable `cmd` runs in, else None.
 
     AS-18 scope (1.22.1): the fallback used to match `git … commit` ANYWHERE, so a PR body or
-    a heredoc that merely mentioned "every git commit" was read as a commit in cwd. Only the
-    text before the first `$(` / `<<` opener is command text here — everything after it may be
-    a heredoc body or a quoted argument. A commit counts only at a segment start (after env
-    assignments / prefixes and `git -C <dir>` / `-c k=v`); a preceding `cd <dir>` segment and
-    `-C <dir>` name the repository whose index the hook must read, not the payload's cwd.
+    a heredoc that merely mentioned "every git commit" was read as a commit in cwd. Command
+    text is what `_command_text` leaves: balanced `$(…)` / backtick spans, heredoc bodies and
+    comments removed, continuations joined — it ends early only at an opener that never
+    closes. (Cutting at the FIRST opener missed `cd "$(…)" && git commit …`.) A commit counts
+    only at a segment start (after env assignments / prefixes and `git -C <dir>` / `-c k=v`);
+    a preceding `cd <dir>` segment and `-C <dir>` name the repository whose index the hook
+    must read, not the payload's cwd.
     """
-    if not _COMMIT_WORDS.search(cmd):
+    head = _command_text(cmd)
+    if not _COMMIT_WORDS.search(head):
         return None
-    m = _OPENER.search(cmd)
-    head = cmd[:m.start()] if m else cmd
     here: str | None = cwd
     for seg in _head_segments(head):
         words = [next(g for g in mt.groups() if g is not None)
@@ -692,7 +788,8 @@ def _untokenised_commit_dir(cmd: str, cwd: str) -> str | None:
             continue
         if words[0] == "cd":
             target = words[1] if len(words) > 1 else "~"
-            here = None if target == "-" else _resolve(target, here)
+            here = None if target == "-" or _UNRESOLVED.search(target) \
+                else _resolve(target, here)
             continue
         r, sub, _args = _git_sub(words)
         if sub != "commit":

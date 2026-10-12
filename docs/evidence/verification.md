@@ -18,7 +18,8 @@ assertion was also run alone against that tree and failed as listed in the CHANG
 | Gate | Evidence |
 |---|---|
 | AS-18 scope | "the untokenisable commit fallback reads only a git commit command" — a `gh pr create` heredoc body naming `git commit` exits 0 with a guarded file staged and no lease; the odd-quote `git commit -m "$(cat <<'EOF'…)"` exits 2; `git -C <other> commit` and `cd <other> && git commit` read `<other>`'s index (exit 2 staged there, 0 staged only in cwd). Failed on `517b4b6` |
-| Docs | `references/hooks.md` "A commit" names the fallback; README `scheduledIntervalSeconds` row and the S9 row below say one JSON object (`systemMessage` + `hookSpecificOutput.additionalContext`) |
+| AS-18 scope, fix round (blind reading of `ea936ae`) | Same case: `cd "$(git rev-parse --show-toplevel)" && <odd commit>`, `MSG="$(cat <<'EOF'…)" && git commit -m "$MSG"`, `git add "$(git ls-files -m)" && <odd commit>` and a backslash-newline `git \ commit` each exit 2 — each exited 0 on `ea936ae`; `commit_plan` on the `git add "$(…)"` shape was `(False, None, [])` there, `(True, cwd, [])` now |
+| Docs | `references/hooks.md` "A commit" names the fallback; `guard.sh`'s capability matrix has the untokenisable-commit row; README `scheduledIntervalSeconds` row and the S9 row below say one JSON object (`systemMessage` + `hookSpecificOutput.additionalContext`) |
 
 
 ## v1.22.0 — fix round 2 (second blind reading of `e32c7c9`)
