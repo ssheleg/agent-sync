@@ -60,6 +60,14 @@ agent_sync_configured() {
   [ -f "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/agent-sync.json" ]
 }
 
+# AS-07: the OTHER repositories this session took leases in, listed by agent_sync.py at
+# acquire time under a slug of the session's project path. A file test, so a session that
+# never left its project pays nothing.
+agent_sync_has_session_repos() {
+  local p="${CLAUDE_PROJECT_DIR:-$PWD}"
+  [ -f "$HOME/.agent-sync/session-repos/${p//[^A-Za-z0-9._-]/_}.json" ]
+}
+
 # The repository that OWNS a path decides whether a write to it is coordinated -- never the
 # session's project. Prints that repository's toplevel when it carries
 # .claude/agent-sync.json; prints nothing and returns 1 when the path is inside no git

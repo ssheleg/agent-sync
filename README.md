@@ -487,7 +487,7 @@ workflow run it on every push and every tag, so nothing a merge or a release enf
 moved.
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
-scripts, the slash command, `agent-sync.schema.json`, and eleven reference contracts the
+scripts, the slash command, `agent-sync.schema.json`, and twelve reference contracts the
 agent loads on their own trigger rather than by default:
 
 | Reference | Read it when |
@@ -503,6 +503,7 @@ agent loads on their own trigger rather than by default:
 | [`earned-rules.md`](plugins/agent-sync/skills/agent-sync/references/earned-rules.md) | why identity is resolved the way it is, and why `finish` exists — the two failures that produced both |
 | [`roadmap.md`](plugins/agent-sync/skills/agent-sync/references/roadmap.md) | configuring `claimTags`, taking or closing a task, or re-planning a board |
 | [`branching.md`](plugins/agent-sync/skills/agent-sync/references/branching.md) | starting work that will produce commits, merging a branch, or asking what landed while you were away |
+| [`fabric-coordination.md`](plugins/agent-sync/skills/agent-sync/references/fabric-coordination.md) | mapping Fabric's coordination contract to commands, and what is not conformant yet |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md). Everyone
 taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).

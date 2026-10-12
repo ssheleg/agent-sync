@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.21.7"
+VERSION = "1.22.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -4847,6 +4847,7 @@ def cmd_acquire(args: argparse.Namespace) -> int:
     s = Sync()
     won, holder = s.acquire(args.key)
     if won:
+        register_session_repo(s.root)
         headline, detail = lease_guarantee(s.lease_mode)
         print(f"won {args.key} (run {s.rid}, ttl {s.ttl}s)")
         print(f"  {headline} — {detail}")
@@ -4859,6 +4860,13 @@ def cmd_acquire(args: argparse.Namespace) -> int:
 
 
 def cmd_renew(args: argparse.Namespace) -> int:
+    if getattr(args, "session_repos", False):
+        try:
+            Sync().renew(args.key)
+        except Fail:
+            pass   # the session's own project may not be coordinated; the others still are
+        _in_session_repos(lambda: (Sync().renew(None), 0)[1])
+        return 0
     Sync().renew(args.key)
     return 0
 
@@ -4867,6 +4875,12 @@ def cmd_release(args: argparse.Namespace) -> int:
     if getattr(args, "held", False):
         if args.key:
             raise Fail("release takes a key OR --held, not both")
+        if getattr(args, "session_repos", False):
+            try:
+                rc = _release_held()
+            except Fail:
+                rc = 0
+            return _in_session_repos(_release_held) or rc
         return _release_held()
     if not args.key:
         raise Fail("release needs a key, or --held for everything this run holds")
@@ -4881,6 +4895,98 @@ def cmd_release(args: argparse.Namespace) -> int:
         return 1
     print(f"released {', '.join(s.released_as.get(args.key) or [args.key])}")
     return 0
+
+
+SESSION_REPOS_DIR = Path.home() / ".agent-sync" / "session-repos"
+
+
+def session_repos_file(project_dir: str) -> Path:
+    """Where a session rooted at `project_dir` lists the OTHER repositories it took leases in.
+
+    AS-07: the lifecycle hooks act on the session's project (`CLAUDE_PROJECT_DIR`) because
+    they have no path to resolve, so a lease taken in a second repository was never renewed
+    and never released — it expired under work in progress. The slug is the path with every
+    character outside `[A-Za-z0-9._-]` made `_`, which `hooks/_lib.sh` computes the same way
+    in bash so the common case (no file) costs no interpreter start.
+    """
+    return SESSION_REPOS_DIR / (re.sub(r"[^A-Za-z0-9._-]", "_", project_dir)[:200] + ".json")
+
+
+def session_repos(project_dir: str) -> list[str]:
+    try:
+        data = json.loads(session_repos_file(project_dir).read_text())
+        return [r for r in data if isinstance(r, str)]
+    except (OSError, ValueError):
+        return []
+
+
+def _write_session_repos(project_dir: str, repos: list[str]) -> None:
+    f = session_repos_file(project_dir)
+    try:
+        if repos:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps(sorted(set(repos))))
+        elif f.exists():
+            f.unlink()
+    except OSError:
+        pass
+
+
+def register_session_repo(root: Path) -> None:
+    """After a lease is won in `root`: remember it when it is not the session's own project."""
+    proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+    if not proj:
+        return
+    try:
+        if Path(proj).resolve() == root.resolve():
+            return
+    except OSError:
+        return
+    _write_session_repos(proj, session_repos(proj) + [str(root.resolve())])
+
+
+def _in_session_repos(action) -> int:
+    """Run `action()` in each repository the session took leases in (AS-07). A repository
+    where this run then holds nothing leaves the list; one failure never strands the rest."""
+    proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+    if not proj:
+        return 0
+    rc, keep = 0, []
+    here = os.getcwd()
+    for repo in session_repos(proj):
+        try:
+            os.chdir(repo)
+            r = action()
+            rc = rc or r
+            if Sync().held():
+                keep.append(repo)
+        except (Fail, OSError) as exc:
+            print(f"note: {repo}: {exc}", file=sys.stderr)
+            if os.path.isdir(repo):
+                keep.append(repo)
+        finally:
+            os.chdir(here)
+    _write_session_repos(proj, keep)
+    return rc
+
+
+def _bash_writes():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "agent_sync_bash_writes", Path(__file__).resolve().parent / "bash_writes.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def bash_write_targets(cmd: str, cwd: str = ".") -> list[str]:
+    """See `bash_writes.py` (AS-09) — kept here so `write-targets` and tests share one parser."""
+    return _bash_writes().bash_write_targets(cmd, cwd)
+
+
+def cmd_write_targets(_args: argparse.Namespace) -> int:
+    """Print, one per line, the files a Bash tool call would write (payload on stdin)."""
+    return _bash_writes().main()
 
 
 def _release_held() -> int:
@@ -6433,10 +6539,14 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("key", nargs="?")
     q.add_argument("--held", action="store_true",
                    help="release every lease this run holds, in one process (SessionEnd)")
+    q.add_argument("--session-repos", action="store_true", dest="session_repos",
+                   help="also in every other repository this session took a lease in (AS-07)")
     q.set_defaults(fn=cmd_release)
 
     r = sub.add_parser("renew")
     r.add_argument("key", nargs="?")
+    r.add_argument("--session-repos", action="store_true", dest="session_repos",
+                   help="also renew in every other repository this session took a lease in (AS-07)")
     r.set_defaults(fn=cmd_renew)
 
     rv = sub.add_parser("reserve", help="reserve the next id in a register")
@@ -6494,6 +6604,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--older-than-days", type=int, dest="older_than_days")
     rp.add_argument("--apply", action="store_true")
     rp.set_defaults(fn=cmd_reap)
+
+    wt = sub.add_parser("write-targets", help="files a Bash tool call writes (payload on stdin); "
+                                              "used by the guard hook — AS-09")
+    wt.set_defaults(fn=cmd_write_targets)
 
     g = sub.add_parser("guard", help="may this run write that path? exit 2 = no")
     g.add_argument("path")

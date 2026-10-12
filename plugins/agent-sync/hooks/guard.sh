@@ -14,8 +14,11 @@ set -uo pipefail
 #   Bash: git commit (incl. -C, env, compound) COVERED (parsed below)
 #   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
 #   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
-#   Bash: sed -i / perl -i                      UNSUPPORTED (in-place edit, no arg parse)
-#   Bash: > redirect / tee                      UNSUPPORTED (shell effect, not a tool arg)
+#   Bash: sed -i                                COVERED* (bash_writes.py, 1.22.0, AS-09)
+#   Bash: > / >> redirect, tee, cp, mv          COVERED* (bash_writes.py, 1.22.0, AS-09)
+#   Bash: perl -i, awk, dd, install, rsync      UNSUPPORTED (not parsed)
+#   * when this session is coordinated or holds leases elsewhere; an uncoordinated
+#     session's write into another repository is caught at its `git commit` instead.
 #   Bash: git -C <dir> commit                   COVERED (repo resolved from -C)
 #   Bash: env VAR=x git commit                  COVERED (env prefix skipped)
 #   Bash: compound (a && git commit)            COVERED (each segment parsed)
@@ -91,6 +94,27 @@ if [ -z "$path" ]; then
   # must stay cheap. The tokeniser below accepts a commit only as the literal token `commit`,
   # and the host serialises the payload as JSON without escaping ASCII letters, so a payload
   # that lacks the substring carries no commit. One interpreter start saved per Bash call.
+  # AS-09: a Bash write — `>`/`>>`, `tee`, `sed -i`, `cp`, `mv` — into a guarded file.
+  # Cheap by construction: only where this session is coordinated (or has taken leases in
+  # other repositories), only when the payload carries a write shape, and the parse is the
+  # small bash_writes.py (median 28 ms) rather than the coordinator (109 ms, measured
+  # 2026-10-12). A write from an uncoordinated session into another repository is still
+  # caught at its `git commit`, below. What the parse cannot read, it skips.
+  if agent_sync_configured || agent_sync_has_session_repos; then
+    case "$input" in
+      *'>'*|*tee*|*sed*|*'cp '*|*'mv '*)
+        targets=$(python3 "${S%/*}/bash_writes.py" <<<"$input" 2>/dev/null) || targets=""
+        while IFS= read -r target; do
+          [ -n "$target" ] || continue
+          owner=$(agent_sync_owner "$(dirname "$target")") || continue
+          if ! why=$(cd "$owner" && python3 "$S" guard "$target" 2>&1 >/dev/null); then
+            echo "agent-sync: this command writes '$target' in $owner and this run holds no lease on it. Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>) first. ${why}" >&2
+            exit 2
+          fi
+        done <<<"$targets"
+        ;;
+    esac
+  fi
   case "$input" in *commit*) ;; *) exit 0 ;; esac
   # What repository, and is this even a commit. Both used to be wrong, and the second one is why
   # the first went unnoticed: the old test was `case "$cmd" in *"git commit"*)`, a CONTIGUOUS

@@ -1,3 +1,50 @@
+## v1.22.0 — coordination that Fabric and Observatory can lean on
+
+Integration wave 3 of the family's 2026-10-11 waves run (hub plan R17–R22).
+`test/coordination_test.py` (18 cases) joins `npm test`; every case was run against
+1.21.7 first and watched failing.
+
+- **A run id is unique per key (R17).** It was the first twelve `[a-z0-9]` of the key, so
+  `observatory-scheduled-tick-1` and `-2` were one run (`r-observatorys`). Now a key that
+  fits in twelve characters is kept whole, and a longer one keeps six readable characters
+  plus six hex of a sha256 of the whole key (project-observatory DECISIONS.md:2024).
+  Ids already stamped in a marker read back unchanged.
+- **Ids print and match at the register's own width (AS-08).** A three-digit register
+  (`CO-051`) was handed `CO-0051`, and every id it held was reported as a permanent leak.
+- **The description cap is the family's 970 (AS-10)**, not the spec's 1024, with a
+  self-test plant in the band between the two.
+- **A lease held past the repository's scheduled interval is reported (R19).** The new
+  optional `scheduledIntervalSeconds` in the config names the interval. `status` warns
+  when a held lease is older, measured from `since`, which `acquire` now writes and
+  `renew` keeps. Observatory's scheduled tick stands aside while a lease is held
+  (DECISIONS.md:12874).
+- **`reap --long-expired` (AS-11).** It lists locks on both planes that expired more than
+  seven days ago (`--older-than-days N`), and with `--apply` clears them. Clearing goes
+  through the same path as `--i-own-this`: a live lease is refused, and each removed
+  payload is printed and journaled. It never runs automatically. `status` reports the
+  count. The flag is not named `abandoned`, which in Fabric's contract means an owner
+  reported failure.
+- **The record-plane token comes from the Observatory vault first (R20).** With the
+  `notion` backend and no token in the environment, the tool re-runs itself under
+  `use_secret.py run --vault-only <repo> AGENT_SYNC_NOTION_TOKEN`, so the value never
+  reaches argv. Whether the slot exists is cached for an hour. A token read from
+  `.env.agent-sync` is reported by `status` as `degraded: plaintext token file`, with the
+  command that moves it.
+- **A lease in a second repository is renewed and released (AS-07).** `acquire` records
+  the repository under the session's project (`~/.agent-sync/session-repos/`), and the
+  renew and SessionEnd hooks pass `--session-repos`, which also acts there.
+- **The guard sees Bash writes (AS-09).** In a coordinated session, `>`/`>>`, `tee`,
+  `sed -i`, `cp` and `mv` into a guarded file need a lease. The parse lives in the small
+  `scripts/bash_writes.py`, measured at a 28 ms median against 109 ms for the coordinator,
+  because the hook runs on every Bash call. What it cannot parse it skips.
+- **Fabric conformance map (R21).** `references/fabric-coordination.md` maps each operation
+  of `fabric-agent-contract@bcada4a` `coordination.md` to its command. A test checks every
+  named command exists. What is not yet conformant is listed there.
+- **AS-14 dropped, deliberately.** Taking a path key's ref under both names in one atomic
+  push breaks #25's one-key-one-ref bijection: `a/b`'s old slug is the ref of a different
+  key, `a-b`. The race needs a ≤1.21.2 writer alive, and the operator's machines run
+  1.21.7. Revisit if a lease ref without a `key` field appears on any remote.
+
 ## v1.21.7 — a lease the guard would not recognise is refused, and a worktree finds its session
 
 - **`acquire` refuses the shared fallback identity where hooks know their session.** From

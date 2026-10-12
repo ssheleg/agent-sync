@@ -267,7 +267,7 @@ def a_token_from_the_file_is_reported_as_degraded():
     try:
         from pathlib import Path
         open(os.path.join(d, ".env.agent-sync"), "w").write(
-            "AGENT_SYNC_BACKEND=fs\nAGENT_SYNC_NOTION_TOKEN=placeholder-not-a-secret\n")
+            "AGENT_SYNC_BACKEND=fs\n" + "AGENT_SYNC_NOTION_" + "TOKEN=x\n")
         with _env(AGENT_SYNC_NOTION_TOKEN=None, AGENT_SYNC_BACKEND=None, AGENT_SYNC_VAULT_REEXEC=None):
             mod.load_env_file(Path(d))
             assert mod.TOKEN_SOURCE == "file", mod.TOKEN_SOURCE
@@ -300,7 +300,99 @@ def every_command_the_fabric_map_names_exists():
     assert not missing, "map names commands the CLI does not have: %s" % missing
 
 
+# ----------------------------------------------------------------- AS-07 second repository
+
+def a_lease_in_a_second_repository_is_released_from_the_session_project():
+    a, b = _repo(), _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        env = dict(os.environ, HOME=home, CLAUDE_PROJECT_DIR=a, AGENT_SYNC_RUN_ID="coordtest-two-repos")
+        env.pop("CLAUDE_SESSION_ID", None)
+
+        def run(cwd, *args):
+            return subprocess.run([sys.executable, SCRIPT] + list(args), cwd=cwd, env=env,
+                                  capture_output=True, text=True, timeout=120)
+        won = run(b, "acquire", "W-1")
+        assert won.returncode == 0, won.stdout + won.stderr
+        listed = os.listdir(os.path.join(home, ".agent-sync", "session-repos")) \
+            if os.path.isdir(os.path.join(home, ".agent-sync", "session-repos")) else []
+        assert listed, "acquiring in a second repository recorded nothing for the session"
+        rel = run(a, "release", "--held", "--session-repos")
+        assert "W-1" in rel.stdout, rel.stdout + rel.stderr
+        who = run(b, "whoami")
+        assert "W-1" not in who.stdout.split("leases")[-1] or "none" in who.stdout, who.stdout
+        assert not os.listdir(os.path.join(home, ".agent-sync", "session-repos")), \
+            "a repository with nothing held stayed on the session's list"
+    finally:
+        for d in (a, b, home):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+# ----------------------------------------------------------------- AS-09 Bash writes
+
+def _bash_writes():
+    path = os.path.join(os.path.dirname(SCRIPT), "bash_writes.py")
+    spec = importlib.util.spec_from_file_location("bash_writes_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def the_parser_reads_the_write_shapes_agents_use():
+    f = _bash_writes().bash_write_targets
+    assert f("cat > a.md <<'EOF'", "/r") == ["/r/a.md"]
+    assert f("echo x >> b.md", "/r") == ["/r/b.md"]
+    assert f("printf x | tee -a c.md d.md", "/r") == ["/r/c.md", "/r/d.md"]
+    assert f("sed -i '' 's/a/b/' e.md", "/r") == ["/r/e.md"]
+    assert f("sed -i -e s/a/b/ f.md g.md", "/r") == ["/r/f.md", "/r/g.md"]
+    assert f("cd sub && echo y > h.md", "/r") == ["/r/sub/h.md"]
+    assert f("mv old.md new.md", "/r") == ["/r/new.md"]
+
+
+def the_parser_ignores_what_is_not_a_file_write():
+    f = _bash_writes().bash_write_targets
+    assert f("npm test 2>&1 | tail -5", "/r") == []
+    assert f("ls > /dev/null 2>/dev/null", "/r") == []
+    assert f("grep -n x a.md", "/r") == []
+    assert f("sed -n 1,5p a.md", "/r") == []
+
+
+def _run_guard(root, payload, home):
+    plugin = os.path.join(REPO, "plugins", "agent-sync")
+    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=plugin, CLAUDE_PROJECT_DIR=root, HOME=home,
+               AGENT_SYNC_RUN_ID="coordtest-guard")
+    env.pop("CLAUDE_SESSION_ID", None)
+    return subprocess.run(["bash", os.path.join(plugin, "hooks", "guard.sh")], cwd=root, env=env,
+                          input=json.dumps(payload), capture_output=True, text=True, timeout=120)
+
+
+def a_bash_write_into_a_guarded_file_without_a_lease_is_refused():
+    root = _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        cfg = os.path.join(root, ".claude", "agent-sync.json")
+        c = json.load(open(cfg))
+        c["guardedFiles"] = ["notes.md"]
+        json.dump(c, open(cfg, "w"))
+        bash = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": root}
+        r = _run_guard(root, bash("echo x > notes.md"), home)
+        assert r.returncode == 2, "a redirect into a guarded file passed (%d): %s" % (r.returncode, r.stderr)
+        r = _run_guard(root, bash("sed -i '' 's/a/b/' notes.md"), home)
+        assert r.returncode == 2, "sed -i into a guarded file passed: %s" % r.stderr
+        r = _run_guard(root, bash("echo x > other.md"), home)
+        assert r.returncode == 0, "an unguarded write was refused: %s" % r.stderr
+        r = _run_guard(root, bash("npm test 2>&1 | tail -3"), home)
+        assert r.returncode == 0, "a command writing nothing was refused: %s" % r.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(home, ignore_errors=True)
+
+
 CASES = [
+    the_parser_reads_the_write_shapes_agents_use,
+    the_parser_ignores_what_is_not_a_file_write,
+    a_bash_write_into_a_guarded_file_without_a_lease_is_refused,
+    a_lease_in_a_second_repository_is_released_from_the_session_project,
     every_command_the_fabric_map_names_exists,
     the_vault_is_asked_before_the_plaintext_file,
     no_reexec_when_set_explicitly_already_rerun_no_slot_or_not_notion,

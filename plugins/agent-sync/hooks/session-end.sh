@@ -10,6 +10,6 @@
 set -uo pipefail
 . "${CLAUDE_PLUGIN_ROOT}/hooks/_lib.sh"
 S="$AGENT_SYNC_PY"
-agent_sync_configured || exit 0
-run_limited 2 python3 "$S" release --held >/dev/null 2>&1 || true
+agent_sync_configured || agent_sync_has_session_repos || exit 0
+run_limited 2 python3 "$S" release --held --session-repos >/dev/null 2>&1 || true
 exit 0

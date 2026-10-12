@@ -4,7 +4,7 @@ description: "Use when several coding agents work one repository at the same tim
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
-  version: "1.21.7"
+  version: "1.22.0"
   author: ssheleg
 ---
 
@@ -348,5 +348,6 @@ Each file is loaded on its own trigger, not by default.
 | `references/roadmap.md` | configuring `claimTags`, taking or closing a task, or re-planning a board |
 | `references/branching.md` | starting work that will produce commits, merging a branch, or asking what landed while you were away |
 | `references/earned-rules.md` | asking why identity resolves the way it does, or why `finish` exists |
+| `references/fabric-coordination.md` | Fabric's coordination contract, or `reap --long-expired` |
 
 Missing `references/`? Fetch from `https://raw.githubusercontent.com/ssheleg/agent-sync/main/plugins/agent-sync/skills/agent-sync/references/<file>`.

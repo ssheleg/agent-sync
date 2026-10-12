@@ -8,6 +8,21 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.22.0 — coordination fixes, integration wave 3 (candidate)
+
+| Gate | Evidence |
+|---|---|
+| R17 run id | `test/coordination_test.py` "two keys sharing a prefix are two runs" — failed on 1.21.7 (`r-observatorys` for both) |
+| AS-08 width | "a three digit register does not leak ids it holds" — failed on 1.21.7 |
+| R19 long-held | "a lease held past the scheduled interval is reported", "no interval means nothing to report" |
+| AS-11 sweep | "a long expired foreign lock is listed then cleared only with apply" (real CLI, fs plane) |
+| R20 token | "the vault is asked before the plaintext file", "a token from the file is reported as degraded" |
+| R21 map | "every command the fabric map names exists" |
+| AS-07 | "a lease in a second repository is released from the session project" |
+| AS-09 | "a bash write into a guarded file without a lease is refused" (real `guard.sh`); 1.21.7 allowed it |
+| AS-10 | self-test plant "description between house and spec cap" |
+| Default gate | `npm test`: `PASS: agent-sync v1.22.0 — all checks green` + every suite, recorded in the PR |
+
 ## v1.21.7 — shared-identity acquire refused; worktree session stamps (candidate)
 
 | Gate | Evidence |
