@@ -1,6 +1,7 @@
 # FW04: bounded lease activity and PR handoff
 
-Status: source reproduction and implementation plan, not an acceptance receipt.
+Status: implementation and focused checks complete; full gate and independent
+acceptance pending. No installed/native or remote-provider acceptance claimed.
 Base: `2f149b1fe9a071a9462696851b7e8d33698fd3f8`; source findings are
 AS-23 and AS-24 in [the owner board](../backlog.md).
 
@@ -51,4 +52,54 @@ claimed; fixtures must own and clean their temporary directories.
 Skills: task-pipeline for the plan and delivery, agent-sync for ownership,
 make-skill for construction limits, evidence-docs for bounded receipts.
 
-Next task: run the failing reproduction before changing the implementation.
+## Observed reproduction and focused verification
+
+Against unchanged `2f149b1`, `python3 test/lease_activity_test.py` ran seven real
+CLI scenarios with a fake clock: five failed and two passed. Stale heartbeat,
+unguarded tools, unrelated TASK-B work, missing legacy activity and releasing
+TASK-A's resource while TASK-B remained reproduced the problem. Active guarded
+work and explicit named keepalive were positive controls. The test wrapper uses
+legacy `renew` on an old script, so baseline failures prove behavior rather than
+an unknown new CLI option.
+
+After correction, all **14 focused tests pass**, including the real hook across
+two registered repositories, malformed metadata, old lock contention, expired
+claim refusal, ambiguous tasks, partial resource-release failure and retry, and
+the `signal --help` contract. Existing `test/coordination_test.py`: **52 cases,
+exit 0**. The owner structural validator also passed. The harness enters both
+local and hosted gates through the existing `audit_regressions/*.py` discovery;
+the test owns and removes its HOME and repository fixtures.
+
+House skill audit: **0 GAP, 19 PASS**, description 936/970 characters, body 4553
+tokens with the available tiktoken counter. Repeated explanatory prose was
+shortened while adding the PR handoff and signal boundary; descriptions and
+skill identity are unchanged.
+
+## Lifetime and compatibility boundary
+
+The activity window is **two renewal intervals** (600 seconds at the default
+300-second interval). It controls eligibility for automatic renewal only.
+The lease's configured TTL (default 2700 seconds) still decides exclusion from
+its last successful renewal. Inactivity does not immediately release or shorten
+a lease; it stops future automatic extensions. Publish and explicitly release
+for a prompt handoff. No expired lease is resurrected by a guard or heartbeat.
+
+Manual `renew <KEY>` remains an intentional keepalive. Legacy holdings without
+activity are not automatically extended. A fresh guard or explicit renewal
+establishes activity. Existing key/ref/payload/generation rules are unchanged;
+old installed heartbeats keep their old behavior until upgraded. This change
+does not claim to fix mixed-version PATH alias races (AS-14) or unrelated vault
+and signal-delivery findings.
+
+## Candidate CI and next task
+
+The owner workflow now uses the already-approved family policy: 23:00
+Europe/Warsaw schedule, `workflow_call`, explicit diagnostics with required
+`candidate_reason`, and PR `ready_for_review` only. Local parsing verifies the
+four events and unchanged job bodies. No push/opened/synchronize trigger exists.
+Only a frozen, locally green and independently reviewed draft is promoted once.
+Diagnostic dispatch does not satisfy required PR checks. Release callers and
+tag workflows are unchanged; no hosted run or package release has occurred here.
+
+Next: finish owner full gates, freeze and push the exact implementation, obtain
+independent review, then run the single eligible candidate check and normal merge.
