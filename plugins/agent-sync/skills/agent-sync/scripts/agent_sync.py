@@ -3103,7 +3103,12 @@ class Sync:
             ref_key = lease_key(git_ref[len(LEASE_REF_PREFIX):])
             self._drop_note(self._local_lock(ref_key), key, names={ref_key})
         self.released_as.setdefault(key, [key])
-        self._activity_marker(key).unlink(missing_ok=True)
+        try:
+            self._activity_marker(key).unlink(missing_ok=True)
+        except OSError:
+            # Scheduling metadata cannot undo the authority's confirmed release.
+            print(f"note: {key}: released; activity metadata remains — it cannot "
+                  "renew a lease this run no longer holds", file=sys.stderr)
         if self.adapter.is_lease_authority:
             try:
                 self.adapter.log_append(self.log_id("claims"),
@@ -4299,6 +4304,9 @@ class Sync:
         task_keys = [k for k in held if not k.startswith(self.RESOURCE_PREFIX)]
         res = self.resource_key(path)
         if res in held:
+            if not task_keys:
+                return False, (f"{rel}: resource claim remains but no live task lease "
+                               "is held — acquire the current task before resuming")
             self._guard_activity(res, task_keys)
             return True, f"resource claim held for {rel} ({res})"
         if task_keys:

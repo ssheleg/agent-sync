@@ -62,7 +62,7 @@ work and explicit named keepalive were positive controls. The test wrapper uses
 legacy `renew` on an old script, so baseline failures prove behavior rather than
 an unknown new CLI option.
 
-After correction, all **14 focused tests pass**, including the real hook across
+After the initial correction, all **14 focused tests passed**, including the real hook across
 two registered repositories, malformed metadata, old lock contention, expired
 claim refusal, ambiguous tasks, partial resource-release failure and retry, and
 the `signal --help` contract. Existing `test/coordination_test.py`: **52 cases,
@@ -101,5 +101,26 @@ Only a frozen, locally green and independently reviewed draft is promoted once.
 Diagnostic dispatch does not satisfy required PR checks. Release callers and
 tag workflows are unchanged; no hosted run or package release has occurred here.
 
-Next: finish owner full gates, freeze and push the exact implementation, obtain
-independent review, then run the single eligible candidate check and normal merge.
+## Independent-review follow-up
+
+The first `npm test` run passed **20 suites**, including the initial 14 new
+controls; the real HOME's 50 agent-sync files were unchanged. This result applies
+to `162d483`, before the following review corrections, and is not the final gate.
+
+Self-review reproduced a held resource allowing a guarded write after all task
+leases expired (CLI exit 0 where exit 2 was required). The guard now refuses
+until the current task is explicitly reacquired, retaining the resource claim
+and refusing the competing writer. Independent review also reproduced a read-only
+activity directory interrupting a confirmed resource release with PermissionError.
+That cleanup is now best-effort with a bounded warning; stale scheduling metadata
+cannot renew an absent lease and the unrelated live task is preserved.
+
+A local bare-remote fixture additionally checks git-plane handoff, live contention,
+inactive expiry/takeover and confirmed ref removal. Expired foreign/own refs are
+not silently reaped: the fixture explicitly releases its active claims, leaving
+the existing AS-11 expired-ref lifecycle outside this change.
+
+The corrected focused suite passed **17/17**, exit 0. Next: complete owner full gates after review,
+push the final SHA, then promote draft [PR 35](https://github.com/ssheleg/agent-sync/pull/35)
+once for the eligible candidate check. No final independent approval is implied
+by recording a review finding here.

@@ -514,6 +514,11 @@ is deleted merely for inactivity, and a resumed guarded write must pass the
 normal live-lease check. Do not treat TTL takeover as proof that an unfinished
 edit has been handed off: publish durable context and release after a PR push;
 `branching.md` specifies the bounded merge-watcher exception.
+If only a resource claim remains and every task lease expired, the guard refuses
+until the current task is explicitly reacquired. It does not discard the file
+claim or choose a task on the agent's behalf. Failure to remove activity metadata
+after confirmed release is a warning, not a failed lease release; those markers
+carry no authority and cannot resurrect an absent claim.
 
 | Fact | Home | Lifetime |
 |---|---|---|

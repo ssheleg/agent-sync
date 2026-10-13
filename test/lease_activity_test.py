@@ -119,6 +119,25 @@ class Activity(unittest.TestCase):
         self.cli('acquire','TASK-C',run='activity-b')
         self.cli('guard','one.md',run='activity-b')
 
+    def test_unwritable_activity_cleanup_does_not_block_confirmed_release(self):
+        self.cli('acquire','TASK-A'); self.cli('guard','one.md')
+        self.cli('acquire','TASK-B')
+        directory=self.root/'.agent-sync/activity'
+        directory.chmod(0o555)
+        try:
+            out=self.cli('release','TASK-A')
+            self.assertIn('activity metadata remains',out)
+            self.assertNotIn('Traceback',out)
+            held=self.cli('whoami')
+            self.assertNotIn('TASK-A',held)
+            self.assertIn('TASK-B',held)
+            self.tick(); self.cli('_heartbeat')
+            self.assertNotIn('TASK-A',self.cli('whoami'))
+        finally:
+            directory.chmod(0o755)
+        self.cli('acquire','TASK-C',run='activity-b')
+        self.cli('guard','one.md',run='activity-b')
+
     def test_signal_help_states_dependency_record_is_not_an_ask(self):
         out=self.cli('signal','--help')
         self.assertIn('dependency state only',out)
@@ -187,6 +206,28 @@ class Activity(unittest.TestCase):
         self.cli('release','TASK-A')
         self.cli('acquire','TASK-A',run='activity-b')
 
+    def test_git_plane_activity_handoff_and_inactive_expiry(self):
+        remote=Path(self.tmp.name)/'remote.git'
+        subprocess.run(['git','init','--bare','-q',str(remote)],check=True)
+        subprocess.run(['git','remote','add','origin',str(remote)],cwd=self.root,check=True)
+        config=self.root/'.claude/agent-sync.json'
+        data=json.loads(config.read_text()); data['leaseBackend']='git'
+        config.write_text(json.dumps(data))
+        self.cli('acquire','TASK-A'); self.cli('guard','one.md')
+        self.cli('acquire','TASK-B'); self.cli('release','TASK-A')
+        self.cli('acquire','TASK-C',run='activity-b')
+        self.cli('guard','one.md',run='activity-b')
+        self.cli('acquire','TASK-B',run='activity-b',status=1)
+        self.cli('release','TASK-C',run='activity-b')
+        for _ in range(12):
+            self.tick(); self.cli('_heartbeat')
+        self.assertNotIn('TASK-B',self.cli('whoami'))
+        self.cli('acquire','TASK-B',run='activity-b')
+        self.cli('release','--held',run='activity-b')
+        refs=subprocess.check_output(['git','--git-dir',str(remote),'for-each-ref',
+                                      '--format=%(refname)','refs/agent-sync/leases/'],text=True)
+        self.assertEqual(refs.strip(),'')
+
     def test_expired_claim_cannot_be_revived_by_guard_or_heartbeat(self):
         self.cli('acquire','TASK-A'); self.cli('guard','one.md')
         self.tick(100); self.cli('_heartbeat')
@@ -202,6 +243,17 @@ class Activity(unittest.TestCase):
             self.tick(); self.cli('guard','one.md'); self.cli('_heartbeat')
         self.assertEqual(self.lock('TASK-A')['ts'],self.lock('TASK-B')['ts'])
         self.assertLess(self.lock('TASK-A')['ts'],'2027-01-15T08:00:30Z')
+
+    def test_live_resource_requires_reacquire_after_all_tasks_expire(self):
+        self.cli('acquire','TASK-A'); self.cli('acquire','TASK-B')
+        for _ in range(7):
+            self.tick(); self.cli('guard','one.md'); self.cli('_heartbeat')
+        self.tick(33)
+        self.cli('guard','one.md',status=2)
+        self.cli('acquire','TASK-C',run='activity-b')
+        self.cli('guard','one.md',run='activity-b',status=2)
+        self.cli('acquire','TASK-D')
+        self.cli('guard','one.md')
 
 
 if __name__=='__main__':
