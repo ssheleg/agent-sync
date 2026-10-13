@@ -1,0 +1,16 @@
+{
+  "owner": "agent-sync-r30",
+  "source": "cb4f9cea2e6ade637090bbde1afdb969dda4f459",
+  "command": "npm test",
+  "returncode": 0,
+  "disk_stop": false,
+  "elapsed_seconds": 280.9,
+  "free_before": 722460672,
+  "free_after": 1958928384,
+  "owned_temporary_removed": true,
+  "log_original_sha256": "aafd617c1b07e40f82d6b84ab0e02748be465bbf78549966553b7ca69a46808f",
+  "log_sanitized_sha256": "fc0fa75d3853af384cac6f775f763c8b18d97776944b154a1b7a2e1422d8c3fd",
+  "log": "full.log.gz",
+  "log_sanitization": "literal /Users/sshlg replaced by $HOME; test output otherwise preserved",
+  "scope": "npm test as declared by owner; CI-only checks and live/provider acceptance are separate"
+}
