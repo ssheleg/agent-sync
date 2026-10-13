@@ -1,0 +1,16 @@
+[
+  {
+    "owner": "agent-sync-r30",
+    "baseline_head": "8fd93be6383a7da0459e9c01f41a4ad164969e29",
+    "case": "ancestry removed",
+    "returncode": 0,
+    "output": "note: routed triggers \u2014 no sshlg-skills umbrella above this checkout\nPASS: agent-sync v1.22.2 \u2014 all checks green\n"
+  },
+  {
+    "owner": "agent-sync-r30",
+    "baseline_head": "8fd93be6383a7da0459e9c01f41a4ad164969e29",
+    "case": "shallow",
+    "returncode": 0,
+    "output": "note: routed triggers \u2014 no sshlg-skills umbrella above this checkout\nPASS: agent-sync v1.22.2 \u2014 all checks green\n"
+  }
+]

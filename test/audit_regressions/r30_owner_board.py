@@ -59,4 +59,14 @@ with tempfile.TemporaryDirectory(prefix='r30-board-adapter-') as tmp:
         validator._guarded(validator.check_owner_board)
         assert any(needle in e for e in validator.errors),validator.errors
         checks+=1
+    release=Path(tmp)/'.github/workflows/release.yml';release.parent.mkdir(parents=True)
+    source=(ROOT/'.github/workflows/release.yml').read_text()
+    board.write_text(BASE)
+    for value,needle in [(source,None),
+        (source.replace('git merge-base --is-ancestor','git merge-base-removed --is-ancestor',1),'release ancestry guard'),
+        (source.replace('fetch-depth: 0','fetch-depth: 1',1),'release full-history checkout')]:
+        release.write_text(value);validator.errors=[]
+        validator._guarded(validator.check_owner_board)
+        assert (any(needle in e for e in validator.errors) if needle else not validator.errors),validator.errors
+        checks+=1
 print(f'PASS: owner board {checks} focused controls')

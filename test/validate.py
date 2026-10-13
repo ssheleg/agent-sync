@@ -3779,6 +3779,8 @@ def _guarded(fn):
 def check_owner_board() -> None:
     from owner_board import check
     check(ROOT, err)
+    from owner_release import check as check_release
+    check_release(ROOT, err)
 
 
 def main() -> int:
@@ -3881,6 +3883,12 @@ def self_test() -> int:
     """A validator that cannot fail is decoration. Corrupt a copy, expect failure."""
     global ROOT, errors, notes
     cases = {
+        "owner release ancestry guard missing": (
+            ".github/workflows/release.yml",
+            lambda t: t.replace("git merge-base --is-ancestor", "git merge-base-removed --is-ancestor", 1)),
+        "owner release checkout shallow": (
+            ".github/workflows/release.yml",
+            lambda t: t.replace("fetch-depth: 0", "fetch-depth: 1", 1)),
         "owner board duplicate ID": ("docs/evidence/backlog.md",
             lambda t: t.replace("| AS-24 |", "| AS-14 |", 1)),
         "owner board shifted columns": ("docs/evidence/backlog.md",
