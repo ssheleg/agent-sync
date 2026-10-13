@@ -1,0 +1,13 @@
+# R30 owner table guard — agent-sync candidate
+
+Objective: refuse ambiguous IDs and shifted board columns in this repository's own structural gate. Base `3dbafd82eb635d8e79b65ddc0c3d1fd8205936db` accepted both defects while its baseline passed. Exact upstream reproductions: [hub R30 audit](https://github.com/ssheleg/sshlg-skills/blob/37f289046e5ea5c013f2555fb05ce7ba4ad09124/docs/evidence/completion-1013/r30-owner-audit/README.md).
+
+The candidate extracts the reviewed table parser from agent-stack `792e3f6:test/member_gates.py`, without importing its release-YAML checker. Existing `AW-0906-desc` and `AW-0906-refusal` identifiers require a documented lowercase hyphen suffix; numeric IDs and one-letter suffixes remain supported. Plain citations and fenced examples are not declarations. Multiple ID tables share duplicate tracking and keep their own widths. Missing/unreadable board, unsupported Row header, orphan declaration and missing separator refuse.
+
+`test/validate.py` calls the adapter from its real main sequence. Two corruptions are in the existing self-test matrix. `test/audit_regressions/r30_owner_board.py` is picked up by the existing local/CI audit glob: 27 controls cover parsing, odd/even pipe escapes, formatted/historical IDs, multiple tables, broken separators, orphans, missing/invalid-UTF8 files and the real validator adapter.
+
+Measured checks: new test initially failed because the module did not exist; the stronger pre-change evidence is the actual owner validator accepting both planted defects. Final focused controls pass (27). [Three real validator processes](process.json) pass the healthy candidate, refuse duplicate ID with its intended diagnostic, and refuse extra column with its intended diagnostic. All nested work used owned temporary roots and was removed. `git diff --check` passes. The full owner npm suite/self-test and independent candidate review are NOT_RUN at this preparation point.
+
+This is a bounded ID-table grammar, not an arbitrary Markdown parser. No historical row or verdict was rewritten; no package version, release workflow, installed state or hub pin changes. Release-tag ancestry is a separate R30 requirement still to inspect. No universal R30 closure is claimed.
+
+Delivery branch: `fix/r30-owner-board-1013`. Next: independent exact-SHA review; coordinator schedules full owner gate once, then frozen normal PR admission. The task and `test/validate.py` resource lease are local advisory coordination, not cross-machine exclusion. Required handoff context: linked hub audit, parser origin, explicit suffix deviation, process hashes and remaining release-guard scope.

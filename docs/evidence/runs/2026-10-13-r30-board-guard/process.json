@@ -1,0 +1,36 @@
+{
+  "scope": "real validator, not full owner suite",
+  "source_status": "candidate implementation; hashes below bind executable validator/helper used by all three processes",
+  "results": [
+    {
+      "case": "baseline",
+      "exit_code": 0,
+      "expected_diagnostic": null,
+      "passed": true,
+      "elapsed_seconds": 64.364,
+      "output": "note: routed triggers \u2014 no sshlg-skills umbrella above this checkout\nPASS: agent-sync v1.22.2 \u2014 all checks green\n"
+    },
+    {
+      "case": "duplicate",
+      "exit_code": 1,
+      "expected_diagnostic": "board duplicate ID",
+      "passed": true,
+      "elapsed_seconds": 64.207,
+      "output": "note: routed triggers \u2014 no sshlg-skills umbrella above this checkout\nFAIL: docs/evidence/backlog.md: 18: board duplicate ID AS-14; first at 11\n\n1 problem(s)\n"
+    },
+    {
+      "case": "width",
+      "exit_code": 1,
+      "expected_diagnostic": "board row width",
+      "passed": true,
+      "elapsed_seconds": 64.324,
+      "output": "note: routed triggers \u2014 no sshlg-skills umbrella above this checkout\nFAIL: docs/evidence/backlog.md: 18: board row width: AS-24 has 6 cells; header declares 5\n\n1 problem(s)\n"
+    }
+  ],
+  "files": {
+    "test/validate.py": "7d684ac75368c0bb5f53c4d4916f2684b9a5b7edcec7b8df42a979e6248795e4",
+    "test/owner_board.py": "131f6e1cc6e762cfd26aceddcbbe6284db00fda8f0a4dc8772573c1fb3274079",
+    "test/audit_regressions/r30_owner_board.py": "2b5bee6b086b08a80ada83f98b99664e2d3be79c1463a0ff81740ee1d24591c5"
+  },
+  "comment_only_followup": "Shared-mechanism headers added to regression file after process replay; AST equality checked and 27-control file rerun. Validator and helper bytes unchanged."
+}
