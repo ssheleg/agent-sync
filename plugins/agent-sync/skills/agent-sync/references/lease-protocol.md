@@ -519,6 +519,10 @@ until the current task is explicitly reacquired. It does not discard the file
 claim or choose a task on the agent's behalf. Failure to remove activity metadata
 after confirmed release is a warning, not a failed lease release; those markers
 carry no authority and cannot resurrect an absent claim.
+An allowed guard must persist fresh resource/task activity. If that write fails,
+the guard refuses while retaining the claim for repair and retry: a stale
+association left by failed cleanup must not silently bind a newly acquired
+resource to a previous task, including release/reacquire within the same second.
 
 | Fact | Home | Lifetime |
 |---|---|---|

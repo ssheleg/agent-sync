@@ -120,7 +120,15 @@ inactive expiry/takeover and confirmed ref removal. Expired foreign/own refs are
 not silently reaped: the fixture explicitly releases its active claims, leaving
 the existing AS-11 expired-ref lifecycle outside this change.
 
-The corrected focused suite passed **17/17**, exit 0. Next: complete owner full gates after review,
+The corrected focused suite passed **17/17**, exit 0. Independent review then
+combined read-only directories with read-only marker files and reproduced a
+same-run release/reacquire retaining an old task association after reset failed.
+The new fixed-clock (same-second) regression first failed with an allowed guard.
+Guards now require successful fresh activity/binding persistence; failure refuses
+admission while retaining the claim for repair/retry. This uses no new lease
+epoch or wire fields. Release cleanup remains best-effort after confirmed release.
+
+The expanded focused suite passed **18/18**, exit 0. Next: complete owner full gates after review,
 push the final SHA, then promote draft [PR 35](https://github.com/ssheleg/agent-sync/pull/35)
 once for the eligible candidate check. No final independent approval is implied
 by recording a review finding here.

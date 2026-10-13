@@ -2945,7 +2945,7 @@ class Sync:
             return {}
 
     def _touch_activity(self, key: str, *, task: str | None = None,
-                        reset: bool = False) -> None:
+                        reset: bool = False) -> bool:
         # Local scheduling metadata, never lease authority or a new wire key.
         data = {} if reset else self._activity(key)
         data["at"] = now_iso()
@@ -2955,24 +2955,28 @@ class Sync:
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(json.dumps(data))
+            return True
         except OSError as exc:
             print(f"note: {key}: activity not recorded ({exc}); automatic renewal "
                   "may stop — explicitly renew or release this lease", file=sys.stderr)
+            return False
 
     def _recent_activity(self, key: str, interval: int) -> bool:
         ts = parse_iso_or_none(self._activity(key).get("at"))
         return ts is not None and 0 <= time.time() - ts <= 2 * interval
 
-    def _guard_activity(self, resource: str, tasks: list[str]) -> None:
+    def _guard_activity(self, resource: str, tasks: list[str]) -> bool:
         task = self._activity(resource).get("task")
         if task not in tasks:
             task = tasks[0] if len(tasks) == 1 else None
-        self._touch_activity(resource, task=task)
+        if not self._touch_activity(resource, task=task):
+            return False
         if task is not None:
-            self._touch_activity(task)
+            return self._touch_activity(task)
         elif len(tasks) > 1:
             print("note: resource activity names no unambiguous task; release stale "
                   "claims or explicitly renew the task still being worked", file=sys.stderr)
+        return True
 
     def _renew_marker(self, key: str) -> Path:
         return self.root / STATE_DIR / "renew" / f"{self.rid}--{lease_name(key)}"
@@ -4307,13 +4311,17 @@ class Sync:
             if not task_keys:
                 return False, (f"{rel}: resource claim remains but no live task lease "
                                "is held — acquire the current task before resuming")
-            self._guard_activity(res, task_keys)
+            if not self._guard_activity(res, task_keys):
+                return False, (f"{rel}: activity binding could not be persisted; "
+                               "claim retained, repair metadata permissions and retry")
             return True, f"resource claim held for {rel} ({res})"
         if task_keys:
             won, holder = self.acquire(res)
             note = "" if self.gated else " (advisory: arbitrated locally only)"
             if won:
-                self._guard_activity(res, task_keys)
+                if not self._guard_activity(res, task_keys):
+                    return False, (f"{rel}: activity binding could not be persisted; "
+                                   "claim retained, repair metadata permissions and retry")
                 return True, (f"held by this run ({', '.join(task_keys)}); resource "
                               f"claim taken for {rel}{note}")
             return False, (f"{rel}: another run ({holder}) holds this FILE's "

@@ -138,6 +138,25 @@ class Activity(unittest.TestCase):
         self.cli('acquire','TASK-C',run='activity-b')
         self.cli('guard','one.md',run='activity-b')
 
+    def test_failed_activity_reset_cannot_admit_stale_task_binding(self):
+        self.cli('acquire','TASK-A'); self.cli('guard','one.md')
+        directory=self.root/'.agent-sync/activity'
+        for p in directory.iterdir(): p.chmod(0o444)
+        directory.chmod(0o555)
+        try:
+            self.cli('release','TASK-A')
+            self.cli('acquire','TASK-B')
+            self.cli('guard','one.md',status=2)
+            self.cli('acquire','TASK-A')
+            self.cli('guard','one.md',status=2)
+            self.cli('release','TASK-A')
+        finally:
+            directory.chmod(0o755)
+            for p in directory.iterdir(): p.chmod(0o644)
+        self.cli('guard','one.md')
+        self.cli('acquire','TASK-C',run='activity-b')
+        self.cli('guard','one.md',run='activity-b',status=2)
+
     def test_signal_help_states_dependency_record_is_not_an_ask(self):
         out=self.cli('signal','--help')
         self.assertIn('dependency state only',out)
