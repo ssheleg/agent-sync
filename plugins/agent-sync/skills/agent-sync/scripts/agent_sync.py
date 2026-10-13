@@ -2969,7 +2969,9 @@ class Sync:
         task = self._activity(resource).get("task")
         if task not in tasks:
             task = tasks[0] if len(tasks) == 1 else None
-        if not self._touch_activity(resource, task=task):
+        # Unknown means unbound, not "keep the previous task". A later acquire
+        # of that old key must not revive its ownership of another task's file.
+        if not self._touch_activity(resource, task=task, reset=task is None):
             return False
         if task is not None:
             return self._touch_activity(task)

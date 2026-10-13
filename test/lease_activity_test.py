@@ -274,6 +274,18 @@ class Activity(unittest.TestCase):
         self.cli('acquire','TASK-D')
         self.cli('guard','one.md')
 
+    def test_unknown_association_clears_expired_task_before_same_key_reacquire(self):
+        self.cli('acquire','TASK-A'); self.cli('guard','one.md')
+        self.cli('acquire','TASK-B'); self.cli('acquire','TASK-C')
+        self.tick(50)
+        for key in ('TASK-B','TASK-C','res--repo--one-md'):
+            self.cli('renew',key)
+        self.tick(50); self.cli('guard','one.md')
+        self.cli('acquire','TASK-A'); self.cli('guard','one.md')
+        self.cli('release','TASK-A')
+        self.cli('acquire','TASK-D',run='activity-b')
+        self.cli('guard','one.md',run='activity-b',status=2)
+
 
 if __name__=='__main__':
     unittest.main()

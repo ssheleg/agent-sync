@@ -502,7 +502,8 @@ guarded activity or explicit renewal is required after upgrading an old holding.
 A resource records an unambiguous task association when guarded. Later guarded
 activity marks that resource and that still-held task, never every task of the
 run. With multiple unbound tasks, the resource stays guarded under the existing
-admission rule but no arbitrary task is marked active; release stale tasks or
+admission rule but no arbitrary task is marked active; an expired prior task
+association is cleared, not retained for a later same-key acquire. Release stale tasks or
 explicitly renew the intended task. Releasing a task also releases its known
 resources even if another task remains. Releasing the last task keeps the legacy
 cleanup of every remaining resource claim.

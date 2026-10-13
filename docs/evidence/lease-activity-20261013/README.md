@@ -128,7 +128,13 @@ Guards now require successful fresh activity/binding persistence; failure refuse
 admission while retaining the claim for repair/retry. This uses no new lease
 epoch or wire fields. Release cleanup remains best-effort after confirmed release.
 
-The expanded focused suite passed **18/18**, exit 0. Next: complete owner full gates after review,
+The expanded focused suite passed **18/18**, exit 0. A further independent
+expire/multiple-task/reacquire control found that an unknown association retained
+the old task field. The plant reproduced a wrongly allowed competing guard.
+Unknown now explicitly clears that field; ordinary explicit renewal still keeps
+a valid binding. The resulting focused suite passed **19/19**, exit 0.
+
+Next: complete owner full gates after review,
 push the final SHA, then promote draft [PR 35](https://github.com/ssheleg/agent-sync/pull/35)
 once for the eligible candidate check. No final independent approval is implied
 by recording a review finding here.
