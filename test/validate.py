@@ -3776,7 +3776,13 @@ def _guarded(fn):
             pass
 
 
+def check_owner_board() -> None:
+    from owner_board import check
+    check(ROOT, err)
+
+
 def main() -> int:
+    _guarded(check_owner_board)
     _guarded(check_manifests)
     _guarded(check_no_stray_skills)
     ok, version = _guarded(check_version_sync)
@@ -3875,6 +3881,10 @@ def self_test() -> int:
     """A validator that cannot fail is decoration. Corrupt a copy, expect failure."""
     global ROOT, errors, notes
     cases = {
+        "owner board duplicate ID": ("docs/evidence/backlog.md",
+            lambda t: t.replace("| AS-24 |", "| AS-14 |", 1)),
+        "owner board shifted columns": ("docs/evidence/backlog.md",
+            lambda t: t.replace("| AS-24 |", "| AS-24 | extra |", 1)),
         # B-72: the tarball carried 245.8 kB of someone else's bytecode because
         # `files` overrides both ignore files. Dropping the negations is the exact
         # state that shipped, so the plant is a deletion rather than an injection.
