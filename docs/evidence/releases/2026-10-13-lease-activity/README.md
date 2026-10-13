@@ -24,9 +24,13 @@ records independent bounded PASS, full 20-suite gate and 75 negative plants.
    peeled remote SHA, watch the existing release workflow, and read the exact npm
    version and published payload. Report source/tag/run to the hub coordinator.
 
-Current state: release plan committed before version edits. PR35 is still under
-hosted verification; this stack does not claim integration or publication.
-Next: prepare synchronized version metadata and run the bounded release checks.
+Current state: PR35 merged normally at `8c9303016ff32d1c4ef2a736e541217d8de15233`
+after [eligible run 38340047156](https://github.com/ssheleg/agent-sync/actions/runs/38340047156)
+succeeded. The two local release commits were rebased onto that canonical main;
+the resulting tree exactly matched the independently reviewed packaging tree
+`8c45b4f2b8b04c73e341af416e5528a94b69e023`. This receipt update changes no payload.
+Next: push the frozen candidate, promote its draft once, then follow the normal
+merge/tag/publication checks. No package publication is claimed yet.
 No native host installation or model outcome is inferred from local fixtures.
 
 Skills: make-skill (release construction), task-pipeline (delivery), agent-sync
