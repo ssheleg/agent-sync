@@ -31,3 +31,14 @@ No native host installation or model outcome is inferred from local fixtures.
 
 Skills: make-skill (release construction), task-pipeline (delivery), agent-sync
 (local advisory ownership), evidence-docs (source and check receipts).
+
+## Bounded packaging checks
+
+`python3 test/validate.py` exited 0 and printed
+`PASS: agent-sync v1.22.2 — all checks green`. It disclosed the package ahead of
+the latest tag as release preparation and routed-trigger coverage as unlooked
+outside the umbrella. `python3 test/lease_activity_test.py`: **19/19**, exit 0.
+`node test/installer_test.js`: **11/11**, exit 0, all owned temporary HOMEs removed.
+Both strict Claude manifests, npm payload dry-run and `git diff --check` pass.
+The prior source gate's 20 suites and 75 negative plants were not repeated for
+this metadata-only packaging change; hosted candidate/release checks remain live.

@@ -1,3 +1,23 @@
+## v1.22.2 — active work keeps a lease alive
+
+- Automatic heartbeats renew only claims with recent guarded activity or explicit
+  acquisition/renewal. Unrelated tool calls no longer extend every task indefinitely.
+  Manual renewal remains intentional. The activity window is two renewal intervals;
+  the configured lease TTL still controls exclusion from the last successful renewal.
+- A guard requires a live task and durable activity/binding metadata. Missing task
+  ownership or an unwritable binding refuses admission while retaining the claim for
+  explicit repair. Expired ambiguous task associations are cleared, not guessed.
+- Releasing a handed-off task releases its associated file claims without freeing
+  another task's files. Incomplete authority release remains retryable; activity-file
+  cleanup after confirmed release is best-effort and cannot resurrect a lease.
+- Document prompt release after a pushed PR handoff and distinguish dependency
+  `signal` state from a cross-project board ask. Existing lease keys, arbitration,
+  generations and wire payloads are unchanged. Old installed heartbeats retain their
+  old behavior until upgraded.
+- Verification: 19 real CLI/fake-clock controls, including same-second metadata
+  failures and a local bare Git remote. The source candidate passed 20 suites and
+  all 75 existing negative plants before this synchronized packaging bump.
+
 ## v1.22.1 — the AS-18 commit fallback reads only a command
 
 Patch from a re-certification reading of 1.22.0 (`517b4b6`).
