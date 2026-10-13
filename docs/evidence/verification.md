@@ -3,10 +3,25 @@
 One row per shipped requirement, and how it is verified **now** — not how it was verified once.
 A row whose method is "read the code" is a row nobody can re-run; those say so.
 
-`check_*` names are functions in `test/validate.py`, run by `npm test` and by CI on every push.
+`check_*` names are functions in `test/validate.py`, run by `npm test` and by eligible candidate, nightly and release CI.
 `self-test` means the validator also plants that exact defect back and confirms the check fires
 (`python3 test/validate.py --self-test`).
 
+
+## v1.22.2 — lease activity and PR handoff
+
+The [FW04 source packet](lease-activity-20261013/README.md) binds independent
+review and the complete source gate to `e96fb3914097889a4167715f98bb2134e10d1fd0`.
+[Release packet](releases/2026-10-13-lease-activity/README.md) tracks this version-only
+candidate separately. Neither a prepared version nor a passing fixture proves
+publication or installed native-hook behavior.
+
+| Gate | Evidence |
+|---|---|
+| AS-23 source | `test/lease_activity_test.py`: 19 cases, including active/inactive expiry, legacy state, two-repository real heartbeat, local Git contention, orphan resources, partial release and both stale-binding counterexamples |
+| AS-24 doctrine | `signal` help and SKILL references distinguish dependency-state recording from a Fabric board request |
+| Source full gate | 20 suites and 75 negative plants, exit 0 at the reviewed implementation; real HOME agent-sync files unchanged |
+| Packaging candidate | Structural gate printed `PASS: agent-sync v1.22.2 — all checks green`; focused19, installer11, strict manifests and payload dry-run pass; see the release packet |
 
 ## v1.22.1 — AS-18 fallback scope (re-certification reading of `517b4b6`)
 
