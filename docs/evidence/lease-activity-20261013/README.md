@@ -134,7 +134,21 @@ the old task field. The plant reproduced a wrongly allowed competing guard.
 Unknown now explicitly clears that field; ordinary explicit renewal still keeps
 a valid binding. The resulting focused suite passed **19/19**, exit 0.
 
-Next: complete owner full gates after review,
-push the final SHA, then promote draft [PR 35](https://github.com/ssheleg/agent-sync/pull/35)
-once for the eligible candidate check. No final independent approval is implied
-by recording a review finding here.
+## Final source verification
+
+Frozen implementation `e96fb3914097889a4167715f98bb2134e10d1fd0` received
+independent bounded PASS. The reviewer replayed the expiry/multiple-task/reacquire
+case, valid manual binding preservation, same-second unwritable metadata repair,
+orphan-resource refusal, partial-release retry and local Git-plane contention.
+
+The final `npm test && npm run test:negatives && git diff --check` exited **0**:
+20 suites (including all 19 new CLI controls), all 75 injected defects detected.
+The full gate observed the real HOME's 51 agent-sync files unchanged. A fresh
+remote shallow checkout of this exact commit resolved the task packet and harness.
+Earlier structural, coordination52, strict manifest and house-audit receipts above
+remain separate checks; no native/provider or installed-cache acceptance is claimed.
+
+This receipt-only update does not alter the independently reviewed implementation.
+Next: push it, promote [PR 35](https://github.com/ssheleg/agent-sync/pull/35) once,
+require its eligible exact-head check, then normal squash merge. Package release
+and the hub's later pins/global-install pass remain separate work.
