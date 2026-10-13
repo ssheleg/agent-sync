@@ -123,6 +123,12 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" merges --compact # force the pass now
 - **No pull request.** This is the flow for agents that share one repository and merge
   their own work. A project that reviews through pull requests keeps doing that; `merge`
   is then the wrong command, and `finish` is still the right one.
+  **Release after the guarded edit and durable handoff are pushed to the PR
+  branch.** The PR carries the proposed change, not an active write lease. If a
+  lease must cover merge itself, start a watcher that releases it within two
+  minutes of merge. Never keep it merely because the PR waits while the session
+  moves on. Reacquire before editing a reviewed branch; check intervening changes
+  and repeat the affected review. Expiry alone is not a completed handoff.
 - **It does not make a branch safe to skip a lease.** Two agents on two branches editing
   one file still collide — later, at merge time, with more work already spent. `acquire`
   first; the branch is where the work goes, not what decides who does it.

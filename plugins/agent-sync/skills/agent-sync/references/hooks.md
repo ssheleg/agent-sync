@@ -153,19 +153,27 @@ a machine where no session ever left its project pays nothing.
 |---|---|
 | `session-start.sh` | Register the run, print the board summary and the one next action |
 | `guard.sh` | Deny an edit to a `guardedFiles[]` path, or a commit staging one, without a live lease — judged by the repository that owns the file |
-| `renew.sh` | Renew the lease — moves the timestamp expiry is computed from, throttled to `renewIntervalSeconds`, a no-op most calls; here and in this session's other listed repositories |
+| `renew.sh` | Run `renew --active-only --session-repos`: refresh only keys with recent guarded activity or explicit acquisition/renewal, throttled per key; unrelated calls never reset activity |
 | `session-end.sh` | Release every lease this run holds, here and in this session's other listed repositories. That is all it does — it writes no journal entry and closes nothing else |
 
 ## Performance
 
 `renew.sh` runs after **every** tool call, asynchronously. It must be a no-op in the
-common case: it reads one timestamp file and returns. Its payload carries the tool's whole
+common case: it reads per-key activity/throttle markers and returns. Its payload carries the tool's whole
 response, so it decides WITHOUT reading stdin wherever it can — an unconfigured project
 with no `~/.agent-sync/session-repos` exits at once — and otherwise reads only the first
 4 KB, where the host writes `session_id` (fix round 2, seam S6: a 2 MB Read result cost
 89 ms per tool call before, 8 ms after). A session with leases in other repositories also
 starts one child process per listed repository, each the same throttled no-op until a
-renewal is due. It touches the network at most once per `renewIntervalSeconds` (default
+renewal is due and activity is recent. Activity expires after two renewal intervals;
+the heartbeat never stamps activity itself. Acquisition and explicit manual renewal
+stamp that key; an allowed guarded write stamps its resource and its unambiguous
+task. Multiple unbound tasks are not all kept alive: release stale tasks or use
+explicit named renewal. Missing/corrupt legacy activity is unknown and is not
+automatically renewed; a fresh guard or explicit renewal establishes it. The
+existing lease TTL and arbitration still decide ownership, so inactivity neither
+deletes claims nor authorizes a write after expiry. See `lease-protocol.md`.
+It touches the network at most once per `renewIntervalSeconds` (default
 300 s) per repository. `renew` and SessionEnd's `release --held` never ask the Observatory
 vault: the lease they act on is a local lock or a git ref, and the token would add only a
 visibility line in the Notion claims log (published whenever the token is in the file).

@@ -489,6 +489,42 @@ number, and silently handing it out again would produce two documents with one i
 
 ## The lease is not the claim
 
+### Activity and pull-request handoff (AS-23)
+
+`renew --active-only` is the hook's bounded heartbeat; `renew <KEY>` and manual
+`renew` remain intentional keepalives. Acquisition, explicit renewal and an
+allowed guarded-file check write local `.agent-sync/activity/<run>--<key>`
+metadata. A heartbeat refreshes only keys active within two renewal intervals
+and never moves the activity timestamp itself. Unrelated tools cannot perpetuate
+a stale claim. Unknown/malformed activity is not interpreted as recent; fresh
+guarded activity or explicit renewal is required after upgrading an old holding.
+
+A resource records an unambiguous task association when guarded. Later guarded
+activity marks that resource and that still-held task, never every task of the
+run. With multiple unbound tasks, the resource stays guarded under the existing
+admission rule but no arbitrary task is marked active; an expired prior task
+association is cleared, not retained for a later same-key acquire. Release stale tasks or
+explicitly renew the intended task. Releasing a task also releases its known
+resources even if another task remains. Releasing the last task keeps the legacy
+cleanup of every remaining resource claim.
+
+These local sidecars schedule renewal; they do not change the lease payload,
+ref/key identity, generation fence or CAS. Old and new writers still contend on
+the same key. An old heartbeat keeps its old behavior until upgraded. No claim
+is deleted merely for inactivity, and a resumed guarded write must pass the
+normal live-lease check. Do not treat TTL takeover as proof that an unfinished
+edit has been handed off: publish durable context and release after a PR push;
+`branching.md` specifies the bounded merge-watcher exception.
+If only a resource claim remains and every task lease expired, the guard refuses
+until the current task is explicitly reacquired. It does not discard the file
+claim or choose a task on the agent's behalf. Failure to remove activity metadata
+after confirmed release is a warning, not a failed lease release; those markers
+carry no authority and cannot resurrect an absent claim.
+An allowed guard must persist fresh resource/task activity. If that write fails,
+the guard refuses while retaining the claim for repair and retry: a stale
+association left by failed cleanup must not silently bind a newly acquired
+resource to a previous task, including release/reacquire within the same second.
+
 | Fact | Home | Lifetime |
 |---|---|---|
 | Who holds this task **right now** | the lease log | ephemeral, TTL |

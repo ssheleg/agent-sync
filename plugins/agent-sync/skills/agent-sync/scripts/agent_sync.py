@@ -2658,6 +2658,12 @@ class Sync:
             self._exit_local_section(guard)
 
     def acquire(self, key: str) -> tuple[bool, str | None]:
+        won, holder = self._acquire(key)
+        if won:
+            self._touch_activity(key, reset=True)
+        return won, holder
+
+    def _acquire(self, key: str) -> tuple[bool, str | None]:
         """Exclusion comes from an atomic file create; the cloud carries the record.
 
         This is the third design, and the first that is true. A single shared document
@@ -2876,7 +2882,7 @@ class Sync:
             self._exit_local_section(guard)
         return True
 
-    def renew(self, key: str | None = None) -> bool:
+    def renew(self, key: str | None = None, *, active_only: bool = False) -> bool:
         """Refresh leases — each against ITS OWN throttle, never a shared one.
 
         The throttle used to be one file per checkout. Run A touching it every
@@ -2889,6 +2895,8 @@ class Sync:
         """
         interval = int(self.cfg.get("renewIntervalSeconds") or DEFAULT_RENEW)
         if key is not None:
+            if active_only and not self._recent_activity(key, interval):
+                return False
             # An explicit renew answers for THIS key: a real refresh, or the
             # precise per-key reason there was none. It never hides behind the
             # heartbeat's throttle — the caller named the key on purpose.
@@ -2897,6 +2905,8 @@ class Sync:
                     self.adapter.log_append(self.log_id("claims"),
                                             fmt_line("renew", key, self.rid))
                 self._touch_renew(key)
+                if not active_only:
+                    self._touch_activity(key)
                 return True
             age = self._renew_age(key)
             why = (f"its renewal marker is {int(age)}s old" if age is not None
@@ -2906,6 +2916,8 @@ class Sync:
             return False
         due = []
         for k in self.held():
+            if active_only and not self._recent_activity(k, interval):
+                continue
             age = self._renew_age(k)
             if age is None or age >= interval:
                 due.append(k)
@@ -2918,7 +2930,55 @@ class Sync:
                 self.adapter.log_append(oid, fmt_line("renew", k, self.rid))
         for k in renewed:
             self._touch_renew(k)
+            if not active_only:
+                self._touch_activity(k)
         return bool(renewed)
+
+    def _activity_marker(self, key: str) -> Path:
+        return self.root / STATE_DIR / "activity" / f"{self.rid}--{lease_name(key)}"
+
+    def _activity(self, key: str) -> dict:
+        try:
+            data = json.loads(self._activity_marker(key).read_text())
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _touch_activity(self, key: str, *, task: str | None = None,
+                        reset: bool = False) -> bool:
+        # Local scheduling metadata, never lease authority or a new wire key.
+        data = {} if reset else self._activity(key)
+        data["at"] = now_iso()
+        if task is not None:
+            data["task"] = task
+        marker = self._activity_marker(key)
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps(data))
+            return True
+        except OSError as exc:
+            print(f"note: {key}: activity not recorded ({exc}); automatic renewal "
+                  "may stop — explicitly renew or release this lease", file=sys.stderr)
+            return False
+
+    def _recent_activity(self, key: str, interval: int) -> bool:
+        ts = parse_iso_or_none(self._activity(key).get("at"))
+        return ts is not None and 0 <= time.time() - ts <= 2 * interval
+
+    def _guard_activity(self, resource: str, tasks: list[str]) -> bool:
+        task = self._activity(resource).get("task")
+        if task not in tasks:
+            task = tasks[0] if len(tasks) == 1 else None
+        # Unknown means unbound, not "keep the previous task". A later acquire
+        # of that old key must not revive its ownership of another task's file.
+        if not self._touch_activity(resource, task=task, reset=task is None):
+            return False
+        if task is not None:
+            return self._touch_activity(task)
+        elif len(tasks) > 1:
+            print("note: resource activity names no unambiguous task; release stale "
+                  "claims or explicitly renew the task still being worked", file=sys.stderr)
+        return True
 
     def _renew_marker(self, key: str) -> Path:
         return self.root / STATE_DIR / "renew" / f"{self.rid}--{lease_name(key)}"
@@ -3030,10 +3090,13 @@ class Sync:
         if not key.startswith(self.RESOURCE_PREFIX):
             remaining = [k for k in self.held()
                          if not k.startswith(self.RESOURCE_PREFIX) and k != key]
-            if not remaining:
-                for res in [k for k in self.held()
-                            if k.startswith(self.RESOURCE_PREFIX)]:
-                    self.release(res)
+            for res in [k for k in self.held()
+                        if k.startswith(self.RESOURCE_PREFIX)]:
+                if not remaining or self._activity(res).get("task") == key:
+                    if not self.release(res):
+                        print(f"note: {key}: resource {res} was not released; "
+                              "task handoff is incomplete, retry release", file=sys.stderr)
+                        return False
 
         for n in self.write_claim(key, None):
             print(f"  {n}")
@@ -3046,6 +3109,12 @@ class Sync:
             ref_key = lease_key(git_ref[len(LEASE_REF_PREFIX):])
             self._drop_note(self._local_lock(ref_key), key, names={ref_key})
         self.released_as.setdefault(key, [key])
+        try:
+            self._activity_marker(key).unlink(missing_ok=True)
+        except OSError:
+            # Scheduling metadata cannot undo the authority's confirmed release.
+            print(f"note: {key}: released; activity metadata remains — it cannot "
+                  "renew a lease this run no longer holds", file=sys.stderr)
         if self.adapter.is_lease_authority:
             try:
                 self.adapter.log_append(self.log_id("claims"),
@@ -4241,11 +4310,20 @@ class Sync:
         task_keys = [k for k in held if not k.startswith(self.RESOURCE_PREFIX)]
         res = self.resource_key(path)
         if res in held:
+            if not task_keys:
+                return False, (f"{rel}: resource claim remains but no live task lease "
+                               "is held — acquire the current task before resuming")
+            if not self._guard_activity(res, task_keys):
+                return False, (f"{rel}: activity binding could not be persisted; "
+                               "claim retained, repair metadata permissions and retry")
             return True, f"resource claim held for {rel} ({res})"
         if task_keys:
             won, holder = self.acquire(res)
             note = "" if self.gated else " (advisory: arbitrated locally only)"
             if won:
+                if not self._guard_activity(res, task_keys):
+                    return False, (f"{rel}: activity binding could not be persisted; "
+                                   "claim retained, repair metadata permissions and retry")
                 return True, (f"held by this run ({', '.join(task_keys)}); resource "
                               f"claim taken for {rel}{note}")
             return False, (f"{rel}: another run ({holder}) holds this FILE's "
@@ -5117,11 +5195,12 @@ def cmd_acquire(args: argparse.Namespace) -> int:
 def cmd_renew(args: argparse.Namespace) -> int:
     if getattr(args, "session_repos", False):
         own = _session_prelude()
-        key, children = _start_session_children("renew", own)
+        key, children = _start_session_children("renew", own,
+                                                active_only=getattr(args, "active_only", False))
         own_holds = None
         try:
             s = Sync()
-            s.renew(args.key)
+            s.renew(args.key, active_only=getattr(args, "active_only", False))
             own_holds = bool(s.held())
         except Fail:
             own_holds = False   # the session's own project may not be coordinated
@@ -5130,7 +5209,7 @@ def cmd_renew(args: argparse.Namespace) -> int:
         _finish_session_children("renew", key, children, own, own_holds)
         return 0
     s = Sync()
-    s.renew(args.key)
+    s.renew(args.key, active_only=getattr(args, "active_only", False))
     if getattr(args, "report_held", False):
         print(f"{HELD_MARK} {len(s.held())}")
     return 0
@@ -5295,7 +5374,7 @@ def _child_env(key: str) -> dict[str, str]:
     return env
 
 
-def _start_session_children(verb: str, own: Path | None) -> tuple[str, list]:
+def _start_session_children(verb: str, own: Path | None, *, active_only: bool = False) -> tuple[str, list]:
     """One child process per OTHER listed repository, started in parallel (AS-07).
 
     Each runs in its own repository with the environment this process started with, so it
@@ -5306,6 +5385,8 @@ def _start_session_children(verb: str, own: Path | None) -> tuple[str, list]:
     if not key:
         return key, []
     argv = ["renew", "--report-held"] if verb == "renew" else ["release", "--held", "--report-held"]
+    if verb == "renew" and active_only:
+        argv.append("--active-only")
     env = _child_env(key)
     out: list = []
     for repo in session_repos(key):
@@ -7074,6 +7155,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("renew")
     r.add_argument("key", nargs="?")
+    r.add_argument("--active-only", action="store_true",
+                   help="heartbeat: renew only keys active within two renewal intervals")
     r.add_argument("--session-repos", action="store_true", dest="session_repos",
                    help="also renew in every other repository this session took a lease in (AS-07)")
     r.add_argument("--report-held", action="store_true", dest="report_held",
@@ -7114,7 +7197,10 @@ def build_parser() -> argparse.ArgumentParser:
     j.add_argument("text", nargs="+")
     j.set_defaults(fn=cmd_journal)
 
-    sg = sub.add_parser("signal")
+    sg = sub.add_parser("signal", help="record dependency state, never transmit an ask",
+                        description="Record dependency state only. Where Fabric serves the "
+                        "project, send cross-project asks through com.submit and cite its "
+                        "board message in the DEP record.")
     sg.add_argument("dep")
     sg.add_argument("state")
     sg.set_defaults(fn=cmd_signal)

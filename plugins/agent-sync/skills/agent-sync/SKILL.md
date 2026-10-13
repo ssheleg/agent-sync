@@ -49,11 +49,9 @@ from `gated` lease arbitration. A mode's five capability fields
 live in ONE place — `references/adapter-contract.md` → *The status capability
 contract*, never restated here. Do not describe a project as protected when it is not.
 
-**4. Parse liberally, and never call an unreadable log a lost race.** The store rewrites
-what you wrote — Outline turns a `- ` bullet into `* `. Emit `- `, accept `-`/`*`/`+`,
-count anything entry-shaped that fails, and **fail loudly** past 2% unparseable. Reporting
-`lost` when the truth is *unreadable* names a holder who does not exist. Watch for a
-silent pre-filter: a `continue` before the regex hides bad lines from the counter.
+**4. An unreadable log is not a lost race.** Emit `-`, accept `-`/`*`/`+`, count
+every malformed entry-shaped line before filtering, and refuse over 2% unparseable.
+The parsing contract and observed failures live in `references/lease-protocol.md`.
 
 ## Bringing this into ANY project — the whole chain
 
@@ -67,12 +65,9 @@ setup     → generate the snapshot that describes this project's wiring
 check     → validate the whole thing; non-zero if it is not healthy
 ```
 
-**`check` is what makes the skill self-sufficient.** It refuses to call a setup healthy on a
-rule that protects nothing (a register, guard glob, claim pattern, gate or mirror source
-pointing at what is not there), on missing credentials, on an env file **tracked by git** —
-the one unrecoverable mistake here — on a stale snapshot, or on a register with no baseline.
-It names each one. Run it after
-adopting, after changing the config, and in CI.
+**`check` refuses** missing rule targets, credentials or register baselines, stale
+snapshots and an env file **tracked by git**. Run it after adoption, config changes
+and in CI; it names every failing condition.
 
 **`scaffold` never overwrites.** It seeds a decision register and an `AGENTS.md` pointing at
 the snapshot, and leaves every existing file untouched.
@@ -133,11 +128,9 @@ the token staying theirs.
 python3 "$SKILL_DIR/scripts/agent_sync.py" status
 ```
 
-Idempotent. Inspects, repairs, reports, names exactly ONE next action — and carries
-`check`'s verdict, so the command every session runs and the one that validates the setup
-cannot give two answers about one project.
+Idempotent: inspects, repairs, reports and names one next action with `check`'s verdict.
 
-**Read the two awareness sections it prints — they are the point, not decoration.**
+**Read both awareness sections:**
 
 - **Other runs working this project right now.** Who holds what, this minute. Do not take
   those on, and do not "just look at" the files they cover.
@@ -162,7 +155,7 @@ npx sshlg-skills install
 | `status` | Inspect, repair, report, name one next action |
 | `bootstrap` | Create the cloud container and print the id to paste into the env file |
 | `acquire <KEY>` | Take the lease on a task id. Prints `won` or `lost <holder>` |
-| `renew <KEY>` | Extend the lease. The `PostToolUse` hook does this for you |
+| `renew <KEY>` | Explicit keepalive. The hook uses `--active-only`; unrelated calls do not prolong claims |
 | `release <KEY>` | Give the lease back on every path; `released` means the remote ref is gone |
 | `release --held` | Give back everything this run holds, in one process — what SessionEnd runs |
 | `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …); prints it. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
@@ -171,7 +164,7 @@ npx sshlg-skills install
 | `journal <text>` | Append one line to this run's journal |
 | `record <text>` | Append what you **actually built** — `--decision DEC-…`, `--files a,b` |
 | `reconcile` | Intent (git) vs as-built (cloud). `--set-baseline` once per project |
-| `signal <DEP-ID> <state>` | Move a cross-repo dependency: `filed`/`accepted`/`delivered`/`closed`/`refused` |
+| `signal <DEP-ID> <state>` | Record dependency state, never an ask. With Fabric, ask via `com.submit`; the DEP cites its board message |
 | `guard <path>` | Answer whether this run may write that path. Exit 0 = yes, 2 = no |
 | `board` | Regenerate the shared board and this repo's page. `--mirror` also renders the configured git docs into the plane |
 | `whoami` | Print this run's id and its held leases |
@@ -192,8 +185,7 @@ environment guarantee.
 
 ## One identity per session, and how it is decided
 
-A lease is only a lease if two agents get two identities; both failure ends have shipped
-(`references/earned-rules.md`). The order: `AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` ·
+Identity precedence (`references/earned-rules.md`): `AGENT_SYNC_RUN_ID` · `CLAUDE_SESSION_ID` ·
 `CLAUDE_CODE_SESSION_ID` (every Claude Code Bash call carries it) · **the session that
 started this shell** (`SessionStart` stamps `.agent-sync/sessions/<CLI pid>`; a command walks
 its process ancestry to it) · shared — and a shared identity is said out loud, never
@@ -205,8 +197,8 @@ presented as separation.
 acquire → do the work → release
 ```
 
-Never skip `release`, including on failure: an abandoned lease blocks the task until its
-TTL expires, and the next agent cannot tell "in progress" from "crashed an hour ago".
+Release even on failure; an abandoned lease blocks the task until TTL expiry.
+For PRs: push the durable handoff, then release; see `references/branching.md`.
 A lease taken in **another repository** is listed under this session, and the renew and
 SessionEnd hooks act there too (AS-07).
 

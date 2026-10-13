@@ -46,7 +46,7 @@ agreeing with it.
 | **7 Lint + deploy** | `journal` per gate | — |
 | **8 Post-deploy** | `journal` | — |
 | **9 Docs + wiki** | `signal` per dependency flip, then `board` | The main write point. The pipeline already updates docs here; the board is regenerated from what it wrote |
-| **10 Acceptance** | `merge` when the work is on a branch — it records the merge and releases; otherwise `release` every lease and write the claim tag through | A run that ends without releasing looks alive until its TTL expires |
+| **10 Acceptance** | Direct integration uses `merge`; PR review uses push + durable handoff + `release`, with reacquisition before further edits | A merge-only lease needs a watcher releasing it within two minutes; see `branching.md` |
 
 ## pipeline.json
 

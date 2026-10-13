@@ -18,5 +18,5 @@ if [ -z "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}${AGENT_SYNC_RUN_ID:-}
 fi
 agent_sync_configured || agent_sync_has_session_repos "$payload" || exit 0
 agent_sync_export_session "$payload"
-run_limited 10 python3 "$S" renew --session-repos >/dev/null 2>&1 || true
+run_limited 10 python3 "$S" renew --active-only --session-repos >/dev/null 2>&1 || true
 exit 0
