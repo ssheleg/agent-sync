@@ -40,14 +40,27 @@ section v1.23.0.
 
 ## Checks actually run
 
-See the ledger section for numbers. Local: `npm test` (all suites), `npm run
-test:negatives`, hub `advertised_check.js`, A/B timing of both hooks against the hub
-checkout and against github.com. Hosted CI and the release workflow are recorded below
-once they run.
+See the ledger section for numbers. Local: `npm test` (23 suites; all green except one
+too-tight timing limit in the first draft of `guard_budget_test.py`, fixed and re-run),
+`npm run test:negatives` (`SELF-TEST PASS: every injected defect was caught (79
+fixtures, 8 at a time)` after the plant fix), hub `advertised_check.js`, A/B timing of
+both hooks against the hub checkout and against github.com.
 
 ## Release state
 
-Filled in by the release run: PR, merge commit, tag, release run, npm version.
+- [PR 39](https://github.com/ssheleg/agent-sync/pull/39), head `fe27ec1`, eligible CI
+  [run 39373178948](https://github.com/ssheleg/agent-sync/actions/runs/39373178948):
+  `validate` and `House skill audit` success. The first CI run (`caac4b7`) was cancelled
+  after its suites passed, once the local self-test showed the stale plant.
+- Squash merge `5c169af9097f8192fe8786014fb08b3e8fe2204d` on `main`, tree identical to
+  `fe27ec1`.
+- Annotated tag `v1.23.0` (object `6f33f25`, peeled `5c169af`).
+  [Release run 39376599168](https://github.com/ssheleg/agent-sync/actions/runs/39376599168):
+  `release` and `publish` success. [GitHub release](https://github.com/ssheleg/agent-sync/releases/tag/v1.23.0).
+- npm `@ssheleg/agent-sync@1.23.0`, `gitHead` `5c169af`; the packed tarball's
+  `session-start.sh` runs `status --brief` and its `agent_sync.py` carries
+  `_claim_in_child` and `VERSION = "1.23.0"`.
+- Not done here, by design: the hub pin and the machine install (next task, item 1).
 
 ## Next task for whoever picks this up
 
