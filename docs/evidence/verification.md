@@ -21,6 +21,8 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 | AS-26 measured | Against github.com with `leaseBackend: git` in a temporary worktree of this repository, three first writes each: 1.22.2 guard 8601, 8920, 10867 ms; 1.23.0 guard 3975, 5165, 3957 ms. Profiled on an already claimed file: 1.2 s of 1.35 s in two 50-byte activity writes, the machine at load average ~500. Every measurement lease and claim was released and `git ls-remote origin 'refs/agent-sync/*'` printed nothing |
 | AS-27 description | 445 chars (was 936). Hub `node test/advertised_check.js --member agent-sync` at `sshlg-skills@5852c575`: `ok: agent-sync advertises all 14 routed trigger(s) across 1 skill(s)`, exit 0 |
 | Structural gate | `python3 test/validate.py` printed `PASS: agent-sync v1.23.0 — all checks green` |
+| Negative plants | `python3 test/validate.py --self-test` on `fe27ec1`: `SELF-TEST PASS: every injected defect was caught (79 fixtures, 8 at a time)` |
+| Hosted | CI [39373178948](https://github.com/ssheleg/agent-sync/actions/runs/39373178948) success on `fe27ec1`; release [39376599168](https://github.com/ssheleg/agent-sync/actions/runs/39376599168) success on tag `v1.23.0` (`5c169af`); npm `@ssheleg/agent-sync@1.23.0` `gitHead` `5c169af` |
 | Self-test plant moved | `--self-test` on the first candidate (`caac4b7`): `undetected: ['description between house and spec cap']`. The plant added a fixed 40 characters, which put the 445-char description at 485, outside the 970 to 1024 band it tests. It now pads to 995 from the current length |
 
 ## v1.22.2 — lease activity and PR handoff
