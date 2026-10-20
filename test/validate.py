@@ -3908,9 +3908,12 @@ def self_test() -> int:
         "SessionEnd timeout a host clamps": ("plugins/agent-sync/hooks/hooks.json",
                                              lambda t: t.replace('"timeout": 3\n', '"timeout": 20\n', 1)),
         # AS-10: between the house cap and the spec cap — the band the old gate passed.
+        # Padded to 995 chars from the description's current length: a fixed "+40" left
+        # the band, and the plant went undetected, once 1.23.0 cut it to 445 (AS-27).
         "description between house and spec cap": (
             "plugins/agent-sync/skills/agent-sync/SKILL.md",
-            lambda t: t.replace('description: "Use when', 'description: "Use when' + "x" * 40, 1)),
+            lambda t: t.replace('description: "Use when', 'description: "Use when' + "x" * (
+                995 - len(re.search(r'^description: "(.*)"$', t, re.M).group(1))), 1)),
         "description over cap": ("plugins/agent-sync/skills/agent-sync/SKILL.md",
                                  lambda t: t.replace("description: \"Use when",
                                                      "description: \"" + "x" * 1100 + " Use when")),
