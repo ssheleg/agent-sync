@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Register the run and print the board summary plus one next action.
+# Stamp the session, then say what THIS run must act on: one line, or nothing (AS-25).
+#
+# Runs on startup, resume and clear, because each of them can start a new session in a
+# process whose stamp is stale (ASY-08); it PRINTS on startup only, since a resumed or
+# cleared session already has the line in its earlier context. The full `status` block
+# (834 characters in the hub checkout, measured 2026-10-20, ending in a "NEXT: acquire"
+# the routing block already says) is behind AGENT_SYNC_SESSION_VERBOSE=1 and the
+# `status` command.
 set -uo pipefail
 . "${CLAUDE_PLUGIN_ROOT}/hooks/_lib.sh"
 S="$AGENT_SYNC_PY"
@@ -21,17 +28,12 @@ if [ -t 0 ]; then
 else
   payload=$(cat 2>/dev/null || true)
 fi
+# Read with bash, not an interpreter: a resume or a /clear only stamps, and pays no python.
 sid="${CLAUDE_SESSION_ID:-}"
-if [ -z "$sid" ] && [ -n "$payload" ]; then
-  sid=$(printf '%s' "$payload" | python3 -c '
-import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-print(d.get("session_id") or "")
-' 2>/dev/null)
-fi
+[ -n "$sid" ] || sid=$(agent_sync_payload_session "$payload")
+source=""
+src_re='"source"[[:space:]]*:[[:space:]]*"([^"]*)"'
+[[ $payload =~ $src_re ]] && source="${BASH_REMATCH[1]}"
 if [ -n "$sid" ]; then
   d="$(git rev-parse --show-toplevel 2>/dev/null)/.agent-sync/sessions"
   if mkdir -p "$d" 2>/dev/null; then
@@ -45,5 +47,11 @@ if [ -n "$sid" ]; then
   fi
 fi
 
-run_limited 10 python3 "$S" status 2>&1 || true
+case "$source" in resume|clear|compact) exit 0 ;; esac
+if [ "${AGENT_SYNC_SESSION_VERBOSE:-}" = "1" ]; then
+  run_limited 10 python3 "$S" status 2>&1 || true
+else
+  # Fail silent: a traceback is not an action, and stderr is not the brief's channel.
+  run_limited 5 python3 "$S" status --brief 2>/dev/null || true
+fi
 exit 0

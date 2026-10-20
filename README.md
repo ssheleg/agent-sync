@@ -422,7 +422,9 @@ The lifecycle hooks (`SessionStart`, `PostToolUse`, `SessionEnd`) act on the ses
 project and exit immediately when it has no config. The `PreToolUse` guard asks a
 different question — **the repository that owns the write decides**: for an edit, the
 git repository containing the file; for a Bash write, the repository of each target; for a
-commit, the one named by `-C` or `cd`. No
+commit, the one named by `-C` or `cd`. Where a file's claim needs a remote (git leases, a
+cloud record plane), the guard waits for it only `AGENT_SYNC_GUARD_BUDGET` seconds (1.5 by
+default, 1.23.0) and lets the write proceed under the task lease while the claim lands. No
 config there → allowed; config there → checked from that repository's root, against its
 `guardedFiles` and its leases, whatever the session's own project is. A path inside no
 git repository is allowed. The guard can **deny** a tool call and never grants one that
@@ -430,7 +432,7 @@ would otherwise be denied.
 
 | Hook | Runs | Effect |
 |---|---|---|
-| `SessionStart` | startup, resume | `status` — the board summary, other runs, one next action |
+| `SessionStart` | startup, resume, clear | Stamps the session. On startup only, `status --brief`: one line naming what this run must act on (the leases it holds, its own expired locks, a claim tag out of step), or nothing. `AGENT_SYNC_SESSION_VERBOSE=1` prints the full `status` instead |
 | `PreToolUse` | `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and every `Bash` call — a parsed `git commit`, and (1.22.0) a Bash write by `>`/`>>`/`>\|`/`&>`, `tee`, `sed -i`, `cp` or `mv` | Denies the call (exit 2) when the path is guarded **in the repository that owns it** and this run holds no lease there; a `git commit` is checked against every staged path of the repository it commits to **and every file the same command stages** (`git add X && git commit`, `git commit -a`, AS-16). Bash writes are parsed in every session and checked in the repository that owns each target; what the parse cannot resolve (`$VAR` targets, the arguments `xargs` reads from stdin, `perl -i`, a runtime's own write) it skips — the capability matrix in `guard.sh` lists each shape |
 | `PostToolUse` | every tool call | Throttled `renew` — touches the network at most once per `renewIntervalSeconds`; also in every other repository this session took a lease in |
 | `SessionEnd` | session end | Releases every lease this run holds — here, and (1.22.0) in every other repository this session took a lease in, each by its own process inside the same 2 s |

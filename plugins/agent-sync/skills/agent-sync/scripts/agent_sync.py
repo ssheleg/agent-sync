@@ -21,6 +21,8 @@ import os
 import platform
 import random
 import re
+import select
+import signal
 import stat
 import subprocess
 import hashlib
@@ -35,11 +37,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.22.2"
+VERSION = "1.23.0"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
 STATE_DIR = Path(".agent-sync")
+# How long the PreToolUse guard waits for a resource claim that needs a remote (AS-26).
+# A git-mode claim is an `ls-remote` and a `push`: 1.6 s per round-trip to github.com,
+# measured 2026-10-20, and the 2026-10-20 audit saw the guard take 10-20 s against a 20 s
+# hook timeout. Past the budget the write proceeds under the task lease and the claim
+# finishes in a detached process. `0` restores the synchronous claim.
+GUARD_BUDGET_ENV = "AGENT_SYNC_GUARD_BUDGET"
+DEFAULT_GUARD_BUDGET_S = 1.5
+# A claim the background process found held by another run is refused from this record,
+# without a round-trip, for this long; then the remote is asked again.
+CLAIM_LOSS_RECHECK_S = 60
+# A background claim older than this is not waited for: its process is presumed stuck.
+CLAIM_PID_STALE_S = 120
 # How recent an expired lease has to be to earn a line of its own. Anything older
 # collapses into one summary that still names the keys. Twenty-four hours is chosen
 # because it is the span in which an expired lease can still mean "a run is in
@@ -1944,6 +1958,9 @@ class Sync:
         # name 1.21.2 reported for another key resolves to that key (#25), and the CLI
         # says which key it let go rather than repeating the name it was given.
         self.released_as: dict[str, list[str]] = {}
+        # Set by `cmd_guard` only: when the guard must answer by (time.monotonic()). None
+        # elsewhere, so every other caller of `guard()` claims synchronously (AS-26).
+        self.guard_deadline: float | None = None
 
     def capabilities(self) -> dict:
         """Five SEPARATE capability fields — because `gated` was one boolean
@@ -2241,7 +2258,12 @@ class Sync:
         args = ["git", "push", remote, f"{commit}:{ref}"]
         if held_sha:                       # stealing an expired lease, and only that
             args.insert(2, f"--force-with-lease={ref}:{held_sha}")
-        r = subprocess.run(args, capture_output=True, text=True)
+        try:
+            # Bounded like the reads (AS-26): an unbounded push held the guard's claim, and
+            # the hook with it, until the host's own timeout let the write through anyway.
+            r = subprocess.run(args, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            raise Fail(f"acquire {key}: the push to '{remote}' did not answer in 60 s") from exc
         if r.returncode != 0:
             # Rejected: somebody won between our read and our push. Ask who.
             _s, now_held, _r = self._git_read_lease(key)
@@ -4318,14 +4340,20 @@ class Sync:
                                "claim retained, repair metadata permissions and retry")
             return True, f"resource claim held for {rel} ({res})"
         if task_keys:
-            won, holder = self.acquire(res)
+            outcome, holder = self._claim_resource_bounded(res, task_keys)
             note = "" if self.gated else " (advisory: arbitrated locally only)"
-            if won:
-                if not self._guard_activity(res, task_keys):
-                    return False, (f"{rel}: activity binding could not be persisted; "
-                                   "claim retained, repair metadata permissions and retry")
+            if outcome == "won":
                 return True, (f"held by this run ({', '.join(task_keys)}); resource "
                               f"claim taken for {rel}{note}")
+            if outcome == "unbound":
+                return False, (f"{rel}: activity binding could not be persisted; "
+                               "claim retained, repair metadata permissions and retry")
+            if outcome == "pending":
+                return True, (f"held by this run ({', '.join(task_keys)}); the resource "
+                              f"claim for {rel} is still being taken on the lease remote, "
+                              "past this guard's budget: the write proceeds under the task "
+                              "lease, and a claim another run holds is refused at the next "
+                              f"write{note}")
             return False, (f"{rel}: another run ({holder}) holds this FILE's "
                            f"resource claim ({res}) — a task lease authorizes the "
                            f"task, not the file. Wait for the claim to release or "
@@ -4339,6 +4367,164 @@ class Sync:
                if other else "")
         return False, (f"{rel} is a guarded registry file and this run holds no lease.{who} "
                        f"Acquire one first: agent_sync.py acquire <TASK-ID>")
+
+    def _claim_resource(self, res: str, task_keys: list[str]) -> tuple[str, str | None]:
+        """Take this file's claim now: ("won" | "lost" | "unbound", holder)."""
+        won, holder = self.acquire(res)
+        if not won and holder == self.rid:
+            # The ref is this run's: another write of the same file, still in flight
+            # (AS-26), won it between this run's read and its push.
+            won = True
+        if not won:
+            return "lost", holder
+        if not self._guard_activity(res, task_keys):
+            return "unbound", None
+        return "won", None
+
+    def _claim_files(self, res: str) -> tuple[Path, Path]:
+        base = self.root / STATE_DIR / "claiming" / f"{self.rid}--{lease_name(res)}"
+        return base.with_name(base.name + ".pid"), base.with_name(base.name + ".lost")
+
+    @staticmethod
+    def _recent_loss(lost: Path) -> str | None:
+        """The holder a background claim found, while that finding is recent enough to act on."""
+        try:
+            data = json.loads(lost.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if time.time() - float(data.get("at") or 0) < CLAIM_LOSS_RECHECK_S:
+            return str(data.get("holder") or "another run")
+        try:
+            lost.unlink()
+        except OSError:
+            pass
+        return None
+
+    @staticmethod
+    def _running_claim(pidf: Path) -> int | None:
+        try:
+            pid = int(pidf.read_text().strip() or 0)
+            age = time.time() - pidf.stat().st_mtime
+        except (OSError, ValueError):
+            return None
+        if pid > 0 and age < CLAIM_PID_STALE_S and _pid_alive(pid):
+            return pid
+        try:
+            pidf.unlink()
+        except OSError:
+            pass
+        return None
+
+    def _claim_resource_bounded(self, res: str, task_keys: list[str]) -> tuple[str, str | None]:
+        """The resource claim, decided by `guard_deadline` when it needs a remote (AS-26).
+
+        "pending" means the claim is still being taken by a detached process that outlives
+        this one: the write proceeds under the task lease, and that process leaves either
+        this run's local note (the next write is then decided locally) or a record of the
+        run holding the claim (the next write is then refused without a round-trip).
+        A claim on a local lock and a local record plane is a file create and is never
+        backgrounded, nor is any claim on a host without `fork`.
+        """
+        deadline = self.guard_deadline
+        remote = self.lease_mode == "git" or self.adapter.name != "fs"
+        if deadline is None or not remote or not hasattr(os, "fork"):
+            return self._claim_resource(res, task_keys)
+        pidf, lostf = self._claim_files(res)
+        holder = self._recent_loss(lostf)
+        if holder is not None:
+            return "lost", holder
+        running = self._running_claim(pidf)
+        if running:
+            # A claim of this file by this run is already under way: wait for it rather
+            # than racing it to the same ref.
+            while time.monotonic() < deadline and _pid_alive(running):
+                time.sleep(0.05)
+            if _pid_alive(running):
+                return "pending", None
+            holder = self._recent_loss(lostf)
+            if holder is not None:
+                return "lost", holder
+            if res in self.held():
+                return ("won", None) if self._guard_activity(res, task_keys) \
+                    else ("unbound", None)
+        return self._claim_in_child(res, task_keys, pidf, lostf, deadline)
+
+    def _claim_in_child(self, res: str, task_keys: list[str], pidf: Path, lostf: Path,
+                        deadline: float) -> tuple[str, str | None]:
+        r, w = os.pipe()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        try:
+            pid = os.fork()
+        except OSError:
+            os.close(r)
+            os.close(w)
+            return self._claim_resource(res, task_keys)
+        if pid == 0:                                     # the detached claim
+            try:
+                os.close(r)
+                signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+                try:
+                    os.setsid()
+                except OSError:
+                    pass
+                # Off the hook's pipes, or the host waits for this process to finish too.
+                null = os.open(os.devnull, os.O_RDWR)
+                for fd in (0, 1, 2):
+                    os.dup2(null, fd)
+                verdict: dict[str, Any] = {}
+                try:
+                    pidf.parent.mkdir(parents=True, exist_ok=True)
+                    pidf.write_text(str(os.getpid()))
+                    outcome, holder = self._claim_resource(res, task_keys)
+                    verdict = {"outcome": outcome, "holder": holder}
+                    if outcome == "lost":
+                        lostf.write_text(json.dumps({"holder": holder, "at": time.time()}))
+                    else:
+                        lostf.unlink(missing_ok=True)
+                except Fail as exc:
+                    verdict = {"error": str(exc)}
+                except Exception as exc:                 # noqa: BLE001 - reported, not raised
+                    verdict = {"error": f"{type(exc).__name__}: {exc}"}
+                finally:
+                    try:
+                        pidf.unlink()
+                    except OSError:
+                        pass
+                try:
+                    os.write(w, json.dumps(verdict).encode())
+                except OSError:
+                    pass
+            finally:
+                os._exit(0)
+        os.close(w)
+        chunks: list[bytes] = []
+        try:
+            ready, _, _ = select.select([r], [], [], max(0.0, deadline - time.monotonic()))
+            if not ready:
+                return "pending", None
+            while True:
+                chunk = os.read(r, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(r)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        try:
+            verdict = json.loads(b"".join(chunks) or b"{}")
+        except ValueError:
+            verdict = {}
+        if verdict.get("error"):
+            raise Fail(verdict["error"])
+        if verdict.get("outcome") in ("won", "lost", "unbound"):
+            return verdict["outcome"], verdict.get("holder")
+        raise Fail(f"the claim on {res} ended without a verdict")
 
     def long_held_notice(self) -> str:
         """R19's warning where a working session sees it — at most once per lease per run.
@@ -4879,7 +5065,65 @@ def ensure_untracked(root: Path, entry: str) -> None:
 
 # --------------------------------------------------------------------------- status
 
+def status_brief() -> int:
+    """What THIS run must act on, in one line, or nothing at all (AS-25). SessionStart's.
+
+    The full `status` was printed at every startup, resume and /clear: 834 characters in the
+    hub checkout on 2026-10-20, most of them about the setup and about other runs' residue,
+    closing on "NEXT: acquire a lease", which the family's routing block already says and
+    which a read-only session never needs. Kept: the leases this run holds (and one held past
+    the scheduled interval), this run's own expired locks, and claim tags out of step with
+    its leases. Local reads only: no record plane, no remote, no vault, and the signal
+    watermark is left alone so the next `status` still shows what is new.
+    """
+    try:
+        root = project_root()
+        os.chdir(root)
+        if not (root / CONFIG_PATH).exists():
+            return 0
+        s = Sync()
+        items: list[str] = []
+
+        def named(keys: list[str], limit: int = 4) -> str:
+            more = f" +{len(keys) - limit} more" if len(keys) > limit else ""
+            return ", ".join(keys[:limit]) + more
+
+        held = s.held()
+        tasks = [k for k in held if not k.startswith(s.RESOURCE_PREFIX)]
+        files = len(held) - len(tasks)
+        if held:
+            what = f"holds {named(tasks)}" if tasks else "holds no task lease"
+            if files:
+                what += f" ({files} file claim{'s' if files != 1 else ''})"
+            items.append(what)
+        try:
+            interval = int(s.cfg.get("scheduledIntervalSeconds") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        for key, age in long_held(s.held_ages(), interval)[:2]:
+            items.append(f"{key} held {since(int(age))}, past the scheduled interval "
+                         f"({since(interval)}): release it between batches")
+        mine = [e["key"] for e in s.stale() if e["state"] == REAPABLE]
+        if mine:
+            items.append(f"expired lease{'s' if len(mine) != 1 else ''} of this run still "
+                         f"on disk: {named(mine)}; clear with agent_sync.py reap")
+        issues = s.claim_divergence()
+        if issues:
+            items.append(f"{len(issues)} claim tag{'s' if len(issues) != 1 else ''} out of "
+                         "step with the leases: agent_sync.py status")
+    except Fail as exc:
+        why = " ".join(str(exc).split())
+        print(f"agent-sync {VERSION}: cannot read this repository's setup "
+              f"({why[:160]}); run agent_sync.py check")
+        return 0
+    if items:
+        print(f"agent-sync {VERSION}: " + "; ".join(items))
+    return 0
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
+    if getattr(_args, "brief", False):
+        return status_brief()
     root = project_root()
     os.chdir(root)
     load_env_file(root)
@@ -5964,6 +6208,28 @@ def cmd_signal(args: argparse.Namespace) -> int:
 NOTICE_MARK = "AGENT_SYNC_NOTICE "
 
 
+def guard_budget(environ: dict[str, str] | None = None) -> float | None:
+    """Seconds the guard may wait for a remote resource claim; None = wait for it (AS-26)."""
+    raw = ((os.environ if environ is None else environ).get(GUARD_BUDGET_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_GUARD_BUDGET_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_GUARD_BUDGET_S
+    return value if value > 0 else None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def cmd_guard(args: argparse.Namespace) -> int:
     """Exit 0 = allowed, 2 = denied. Any other code is non-blocking in Claude Code,
     so internal failures must also exit 2 rather than fail open.
@@ -5975,8 +6241,18 @@ def cmd_guard(args: argparse.Namespace) -> int:
     global _GIT_MEMO
     paths = args.path if isinstance(args.path, list) else [args.path]
     _GIT_MEMO = {}
+    budget = guard_budget()
+    deadline = None
+    if budget is not None:
+        # Counted from the process start, so the interpreter's own start is inside it. A
+        # `main()` reused in one process (the tests) starts its count here instead.
+        spent = time.time() - _WALL_T0
+        if not 0 <= spent <= 1.0:
+            spent = 0.0
+        deadline = time.monotonic() + budget - spent
     try:
         s = Sync()
+        s.guard_deadline = deadline
         for path in paths:
             allowed, reason = s.guard(path)
             if not allowed:
@@ -7108,7 +7384,11 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--force", action="store_true")
     i.set_defaults(fn=cmd_init)
 
-    sub.add_parser("status", help="inspect, repair, report, one next action").set_defaults(fn=cmd_status)
+    st = sub.add_parser("status", help="inspect, repair, report, one next action")
+    st.add_argument("--brief", action="store_true",
+                    help="one line of what this run must act on, or nothing "
+                         "(the SessionStart hook's; local reads only)")
+    st.set_defaults(fn=cmd_status)
     sub.add_parser("bootstrap", help="create the cloud container").set_defaults(fn=cmd_bootstrap)
     sub.add_parser("whoami", help="this run and its leases").set_defaults(fn=cmd_whoami)
     sub.add_parser("setup", help="write the generated snapshot of how this project is wired").set_defaults(fn=cmd_setup)
@@ -7247,7 +7527,8 @@ def main(argv: list[str] | None = None) -> int:
     INVOKED_ARGV = list(argv) if argv is not None else sys.argv[1:]
     # `release --held` is SessionEnd's (and its children's) command: see NO_RECORD_PLANE.
     RECORD_PLANE_COMMAND = args.cmd not in NO_RECORD_PLANE and not (
-        args.cmd == "release" and getattr(args, "held", False))
+        args.cmd == "release" and getattr(args, "held", False)) and not (
+        args.cmd == "status" and getattr(args, "brief", False))
     _VAULT_DECIDED.clear()
     try:
         return int(args.fn(args))

@@ -57,6 +57,10 @@ set -uo pipefail
 # one, and a configured session no longer blocks commits in repositories where
 # coordination is off.
 #
+#   the first write of a guarded file whose claim needs a remote (git lease, cloud plane)
+#     and does not land inside AGENT_SYNC_GUARD_BUDGET (1.5 s)  ALLOWED under the task lease
+#     (1.23.0, AS-26); the claim lands from a detached process, and a claim another run
+#     holds is refused from the NEXT write of that file
 #   parser cannot run (no python3), session configured     FAIL CLOSED (exit 2)
 #   parser cannot run, session unconfigured                UNENFORCED (exit 0) --
 #     the owning repository cannot be named without the parser, and refusing every

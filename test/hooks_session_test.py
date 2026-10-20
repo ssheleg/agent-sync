@@ -233,6 +233,145 @@ def the_stamp_makes_this_run_identity_strong():
         shutil.rmtree(root, ignore_errors=True)
 
 
+# --- SessionStart says only what this session must act on (AS-25) ------------------------
+#
+# Measured 2026-10-20 in the hub checkout: the hook printed `status` in full, 834 characters
+# of record plane, lease mode, run id, other runs, someone else's expired locks and a closing
+# "NEXT: acquire a lease before you touch a guarded file", at every startup, resume and
+# /clear, read-only sessions included. The family's routing block already says when to
+# acquire. What is left is what only this tool knows about THIS run: what it holds, what it
+# left expired, and a claim tag out of step with its lease. Nothing else, and nothing at all
+# when there is nothing to do.
+
+def _run_hook_as(root, payload, rid=None, **extra):
+    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=PLUGIN, CLAUDE_PROJECT_DIR=root, **extra)
+    env.pop("CLAUDE_SESSION_ID", None)
+    if rid is not None:
+        env["AGENT_SYNC_RUN_ID"] = rid
+    else:
+        env.pop("AGENT_SYNC_RUN_ID", None)
+    return subprocess.run(["bash", HOOK], cwd=root, env=env, input=payload,
+                          capture_output=True, text=True, timeout=60)
+
+
+def _start(source, sid="sess-brief"):
+    return json.dumps({"session_id": sid, "hook_event_name": "SessionStart", "source": source})
+
+
+def a_startup_with_nothing_to_act_on_prints_nothing():
+    root = _repo()
+    try:
+        proc = _run_hook_as(root, _start("startup"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == "", (
+            "a session holding nothing, owing nothing, was handed %d characters at start:\n%s"
+            % (len(proc.stdout), proc.stdout[:600]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def a_startup_names_the_lease_this_run_holds_in_one_line():
+    root = _repo()
+    try:
+        assert _as(root, "r-brief", "acquire", "T-7").returncode == 0
+        proc = _run_hook_as(root, _start("startup"), rid="r-brief")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        assert len(lines) == 1, "want one line, got %d:\n%s" % (len(lines), proc.stdout)
+        assert "T-7" in lines[0], "the held lease is not named: %r" % lines[0]
+        assert len(lines[0]) <= 200, "%d characters is not a line: %r" % (len(lines[0]), lines[0])
+        assert "NEXT: acquire" not in proc.stdout, proc.stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def a_resume_or_clear_prints_nothing_and_still_stamps():
+    """The earlier context already carries the line; /clear must still re-stamp (ASY-08)."""
+    root = _repo()
+    try:
+        assert _as(root, "r-brief", "acquire", "T-7").returncode == 0
+        for source in ("resume", "clear"):
+            sid = "sess-after-" + source
+            proc = _run_hook_as(root, _start(source, sid), rid="r-brief")
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            assert proc.stdout.strip() == "", "%s printed:\n%s" % (source, proc.stdout)
+            got = open(os.path.join(root, ".agent-sync", "sessions",
+                                    str(os.getpid()))).read().strip()
+            assert got == sid, "after %s the stamp reads %r" % (source, got)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def an_expired_lease_of_this_run_is_named_with_its_remedy():
+    root = _repo()
+    try:
+        assert _as(root, "r-brief", "acquire", "T-8").returncode == 0
+        lock = os.path.join(root, ".agent-sync", "leases", "T-8.lock")
+        body = json.load(open(lock))
+        body["ts"] = "2020-01-01T00:00:00Z"
+        json.dump(body, open(lock, "w"))
+        proc = _run_hook_as(root, _start("startup"), rid="r-brief")
+        lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        assert len(lines) == 1 and "T-8" in lines[0] and "reap" in lines[0], (
+            "an expired lease of this run must be named with `reap`: %r" % proc.stdout)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def another_runs_expired_lease_is_not_this_sessions_business():
+    root = _repo()
+    try:
+        assert _as(root, "r-gone", "acquire", "T-9").returncode == 0
+        lock = os.path.join(root, ".agent-sync", "leases", "T-9.lock")
+        body = json.load(open(lock))
+        body["ts"] = "2020-01-01T00:00:00Z"
+        json.dump(body, open(lock, "w"))
+        proc = _run_hook_as(root, _start("startup"), rid="r-brief")
+        assert proc.stdout.strip() == "", (
+            "another run's residue is reported by `status`, not at every start: %r"
+            % proc.stdout)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def verbose_brings_back_the_full_status_block():
+    root = _repo()
+    try:
+        proc = _run_hook_as(root, _start("startup"), AGENT_SYNC_SESSION_VERBOSE="1")
+        assert "record plane" in proc.stdout and "leases held" in proc.stdout, (
+            "AGENT_SYNC_SESSION_VERBOSE=1 must print the full `status`: %r" % proc.stdout[:300])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def the_brief_leaves_new_signals_for_status_to_show():
+    """`status` marks signals seen as it prints them. A brief that read them would mark them
+    seen without showing them, and the next `status` would say nothing new."""
+    root = _repo()
+    try:
+        r = _as(root, "r-other", "signal", "DEP-1", "filed")
+        assert r.returncode == 0, r.stdout + r.stderr
+        _run_hook_as(root, _start("startup"), rid="r-brief")
+        out = _as(root, "r-brief", "status").stdout
+        assert "DEP-1" in out, "after the brief, `status` no longer shows the new signal:\n" + out
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def a_setup_it_cannot_read_is_one_line_and_never_fails_the_hook():
+    root = _repo()
+    try:
+        with open(os.path.join(root, ".claude", "agent-sync.json"), "w") as fh:
+            fh.write("{ not json")
+        proc = _run_hook_as(root, _start("startup"))
+        assert proc.returncode == 0, "exit %d" % proc.returncode
+        lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        assert len(lines) <= 1, "a broken setup printed %d lines:\n%s" % (len(lines), proc.stdout)
+        assert "Traceback" not in proc.stdout + proc.stderr, proc.stdout + proc.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 # --- SessionEnd: one budget both hosts honour ---------------------------------------------
 #
 # Codex 0.157 clamps a SessionEnd handler's timeout to 3 s and says so at every session start
@@ -434,7 +573,7 @@ def a_linked_worktree_finds_the_main_checkouts_session_stamp():
         shutil.rmtree(wt, ignore_errors=True)
 
 
-print("agent-sync — session hooks: SessionStart identity, SessionEnd budget")
+print("agent-sync session hooks: SessionStart identity and brief, SessionEnd budget")
 for name, fn in [
     ("the hook stamps the session from its stdin payload",
      the_hook_stamps_the_session_from_its_stdin_payload),
@@ -445,6 +584,21 @@ for name, fn in [
     ("a cleared session is stamped as a new identity",
      a_cleared_session_is_stamped_as_a_new_identity),
     ("the stamp makes this run's identity strong", the_stamp_makes_this_run_identity_strong),
+    ("a startup with nothing to act on prints nothing",
+     a_startup_with_nothing_to_act_on_prints_nothing),
+    ("a startup names the lease this run holds in one line",
+     a_startup_names_the_lease_this_run_holds_in_one_line),
+    ("a resume or clear prints nothing and still stamps",
+     a_resume_or_clear_prints_nothing_and_still_stamps),
+    ("an expired lease of this run is named with its remedy",
+     an_expired_lease_of_this_run_is_named_with_its_remedy),
+    ("another run's expired lease is not this session's business",
+     another_runs_expired_lease_is_not_this_sessions_business),
+    ("verbose brings back the full status block", verbose_brings_back_the_full_status_block),
+    ("the brief leaves new signals for status to show",
+     the_brief_leaves_new_signals_for_status_to_show),
+    ("a setup it cannot read is one line and never fails the hook",
+     a_setup_it_cannot_read_is_one_line_and_never_fails_the_hook),
     ("the SessionEnd timeout fits every host", the_session_end_timeout_fits_every_host),
     ("the SessionEnd hook releases every held lease within budget",
      the_session_end_hook_releases_every_held_lease_within_budget),

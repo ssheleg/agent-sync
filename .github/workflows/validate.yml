@@ -34,11 +34,14 @@ jobs:
       - name: Claim cell and id registers (6 cases, 4 of them watched failing)
         run: python3 test/claim_cell_test.py
 
-      - name: SessionStart identity (the real hook, as a process)
+      - name: SessionStart identity and brief (the real hook, as a process)
         run: python3 test/hooks_session_test.py
 
       - name: Uncoordinated guard
         run: python3 test/guard_uncoordinated_test.py
+
+      - name: Guard budget over a slow lease remote (AS-26)
+        run: python3 test/guard_budget_test.py
 
       - name: Coordination (wave 3 and its fix rounds)
         run: python3 test/coordination_test.py
