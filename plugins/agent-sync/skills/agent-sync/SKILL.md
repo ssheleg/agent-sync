@@ -1,10 +1,10 @@
 ---
 name: agent-sync
-description: "Use when several coding agents work one repository at once and must not collide - claiming a task, reserving the next decision/question/ticket id, journaling a run, moving a cross-repo dependency, regenerating the board, or finishing work across a parent repo and its submodules - clean, pushed, and pointed at. Triggers - 'claim this task' / 'возьми задачу', 'who is working on' / 'кто сейчас делает', 'reserve an id' / 'зарезервируй id', 'sync the board' / 'обнови доску', 'set up agent coordination' / 'настрой координацию агентов', 'the submodule is pushed, the parent points at the old commit' / 'сабмодуль запушен, родитель на старом коммите', /agent-sync. Use it BEFORE editing any shared registry file (decisions, open questions, roadmap, workstreams, dependencies) in a project with .claude/agent-sync.json, even when the user never mentions coordination - an unclaimed edit to those files lets two agents overwrite each other."
+description: "Use when several agents share a repo: claim this task, ask who is working on it, reserve an id, sync the board, set up agent coordination, or finish when the submodule is pushed and the parent points at the old commit. RU: возьми задачу, кто сейчас делает, зарезервируй id, обнови доску, настрой координацию агентов, сабмодуль запушен, родитель на старом коммите. Not for solo work or an unconfigured repo: 'no coordination' / «без координации»."
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
-  version: "1.22.2"
+  version: "1.23.0"
   author: ssheleg
 ---
 
@@ -18,6 +18,10 @@ Two planes, and one rule between them:
 
 No cloud object is ever the only home of a durable fact. Everything below exists to
 keep that true while several agents write at once.
+
+**When, even unasked:** before editing a shared registry (decisions, open questions, roadmap,
+workstreams, dependencies) in a project with `.claude/agent-sync.json`; an unclaimed edit lets
+two agents overwrite each other. Also `/agent-sync`.
 
 ## Four traps — read these before anything else
 

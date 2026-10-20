@@ -55,7 +55,7 @@ The hook receives JSON on stdin with `session_id`, `prompt_id`, `transcript_path
 {
   "hooks": {
     "SessionStart": [
-      { "matcher": "startup|resume",
+      { "matcher": "startup|resume|clear",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh" }] }
     ],
     "PreToolUse": [
@@ -151,7 +151,7 @@ a machine where no session ever left its project pays nothing.
 
 | Hook | Job |
 |---|---|
-| `session-start.sh` | Register the run, print the board summary and the one next action |
+| `session-start.sh` | Stamp the session (startup, resume, clear). On startup only, print `status --brief`: one line of what this run must act on, or nothing; `AGENT_SYNC_SESSION_VERBOSE=1` prints the full `status` |
 | `guard.sh` | Deny an edit to a `guardedFiles[]` path, or a commit staging one, without a live lease — judged by the repository that owns the file |
 | `renew.sh` | Run `renew --active-only --session-repos`: refresh only keys with recent guarded activity or explicit acquisition/renewal, throttled per key; unrelated calls never reset activity |
 | `session-end.sh` | Release every lease this run holds, here and in this session's other listed repositories. That is all it does — it writes no journal entry and closes nothing else |
@@ -180,6 +180,27 @@ visibility line in the Notion claims log (published whenever the token is in the
 If it ever becomes slower than that, the throttle is broken — fix the throttle rather than
 removing the hook.
 
+`session-start.sh` (1.23.0, AS-25) reads the session id and the payload's `source` with
+bash, so a `resume` or a `/clear` stamps the session and starts no interpreter. On
+`startup` it runs `status --brief`, which reads local state only: the lock directory,
+this run's lease notes and the claim-tag files. It never reads the record plane, the
+remote or the vault, and it leaves the signal watermark alone, so the next `status`
+still shows what is new. It prints one line, or nothing when nothing is this run's to
+act on; its stderr is dropped.
+
+The guard (1.23.0, AS-26) answers inside a budget. The first write of a guarded file
+takes that file's claim, and where the claim needs a remote (a git lease, or a cloud
+record plane) it runs in a forked, detached process; the guard waits for it until
+`AGENT_SYNC_GUARD_BUDGET` seconds from the coordinator's start (default 1.5; `0` waits
+for the claim, as before). Past the budget the write proceeds under the task lease. The
+claim process then leaves this run's local note (the next write is decided locally) or a
+record of the run holding the file under `.agent-sync/claiming/` (the next write is
+refused from it, without a round-trip, for 60 s). A second write of the same file while
+the claim is in flight waits for that claim rather than racing it. Measured 2026-10-20
+against github.com: 8.6 to 10.9 s per first write before, 4.0 to 5.2 s after on a machine
+at load average ~500, where the rest was local file I/O. On a host without `fork`, and
+for a local lease on a local record plane, the claim stays synchronous.
+
 Hooks cache Python bytecode under `${XDG_CACHE_HOME:-~/.cache}/agent-sync/pycache`
 (`PYTHONPYCACHEPREFIX`), never beside the shipped scripts (ASY-01); with no HOME they
 write none.
@@ -191,7 +212,9 @@ write none.
 | Guarded edits go through | The guard crashed. Any exit code other than 2 is non-blocking. Run it by hand with a sample stdin payload |
 | Everything is denied | No lease in the repository that owns the file. Run `status` from that repository's root, not the session's |
 | A commit into a repository without a config is blocked | Fixed in 1.21.2 — update the plugin; earlier versions asked the session's config and ran the check in the target repository |
-| Session start is slow | The backend is unreachable. Each hook is capped twice — `run_limited 10` inside the script, and the `timeout` in `hooks.json` (15–20 s) — so it degrades rather than hanging |
+| Session start is slow | Since 1.23.0 the start reads local state only; a slow start is the machine (python start, disk). `AGENT_SYNC_SESSION_VERBOSE=1` runs the full `status`, which reads the record plane and is capped by `run_limited 10` and the `hooks.json` timeout |
+| Session start prints nothing | Nothing is this run's to act on. `agent_sync.py status` prints the full block |
+| A guarded write went through before its file claim landed | The claim was past `AGENT_SYNC_GUARD_BUDGET`. If another run holds the file, the next write is refused. Set the budget to `0` to wait for every claim |
 | Renew floods the log | The throttle file is not being written — check its path is writable |
 
 Run the guard directly to see what it decides:

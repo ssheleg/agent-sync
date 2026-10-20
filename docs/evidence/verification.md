@@ -8,6 +8,20 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.0 (2026-10-20): quiet session start, guard budget, router description
+
+[Release packet and handoff](releases/2026-10-20-quiet-start/README.md). Baseline for
+"watched failing" is `5bd8bec` (origin/main before this change).
+
+| Gate | Evidence |
+|---|---|
+| AS-25 brief | `test/hooks_session_test.py`: 23 cases. New: "a startup with nothing to act on prints nothing", "a startup names the lease this run holds in one line", "a resume or clear prints nothing and still stamps", "an expired lease of this run is named with its remedy", "another run's expired lease is not this session's business", "the brief leaves new signals for status to show", "a setup it cannot read is one line and never fails the hook" (all 7 failed on `5bd8bec`), "verbose brings back the full status block". The ASY-08 matcher case is unchanged and passes |
+| AS-25 measured | Interleaved A/B, 15 runs each, hub checkout `sshlg-skills@5852c575`, load average ~470: startup 834 to 0 chars, median 1037 to 533 ms, p90 1399 to 853 ms; resume 920 to 63 ms median (10 runs each) |
+| AS-26 budget | `test/guard_budget_test.py`: 5 cases over a local bare remote and a git shim adding 5 s to `ls-remote` and `push`; a guard call must finish under one slowed call. Run against `git archive 5bd8bec plugins`: 3 of 5 failed, with guard calls of 11.06 s ("a slow remote never holds a write past the budget"), 5.51 s ("a slow remote refuses another run's claim by the next write") and 11.36 s ("two writes of one file by one run never refuse each other"); all 5 pass on this tree. A first draft limited a call to 2.6 s and failed once at 3.61 s with the machine at load average ~690, so the limit is the slowed call, not the budget |
+| AS-26 measured | Against github.com with `leaseBackend: git` in a temporary worktree of this repository, three first writes each: 1.22.2 guard 8601, 8920, 10867 ms; 1.23.0 guard 3975, 5165, 3957 ms. Profiled on an already claimed file: 1.2 s of 1.35 s in two 50-byte activity writes, the machine at load average ~500. Every measurement lease and claim was released and `git ls-remote origin 'refs/agent-sync/*'` printed nothing |
+| AS-27 description | 445 chars (was 936). Hub `node test/advertised_check.js --member agent-sync` at `sshlg-skills@5852c575`: `ok: agent-sync advertises all 14 routed trigger(s) across 1 skill(s)`, exit 0 |
+| Structural gate | `python3 test/validate.py` printed `PASS: agent-sync v1.23.0 — all checks green` |
+
 ## v1.22.2 — lease activity and PR handoff
 
 The [FW04 source packet](lease-activity-20261013/README.md) binds independent

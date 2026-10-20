@@ -23,6 +23,7 @@ Review what you are installing before you run the installer. Specifically:
 | `<project>/.agent-sync/` | run state and, in degraded mode, lease files; `vault-slot.json` caches where Observatory's `use_secret.py` is and whether this project's vault slot exists — never a value |
 | `${XDG_CACHE_HOME:-~/.cache}/agent-sync/pycache/` | since 1.22.0: the hooks' Python bytecode (`PYTHONPYCACHEPREFIX`), kept out of the shipped `scripts/` tree; regenerated at will, safe to delete. Not written when HOME is unset |
 | `<project>/.agent-sync/warned/` | since 1.22.0: a marker per (run, lease), holding the time it was written, once the guard has warned that the lease is held past `scheduledIntervalSeconds` — so it warns once |
+| `<project>/.agent-sync/claiming/` | since 1.23.0 (AS-26): while a file claim that needs a remote is still being taken, its process id; after it lost, the run holding the file and when that was seen. The process is forked from the guard, detached from the hook, and ends with the claim (the acquire `push` is bounded at 60 s) |
 | `~/.agent-sync/session-repos/` | since 1.22.0 (AS-07): one `<sha256 of the session key>.json` per session that took a lease outside its own project, listing those repositories' paths so the renew and SessionEnd hooks reach them; removed when empty. A `.lock` file serialises writers. No credentials |
 
 The hooks it registers can **deny** tool calls (`PreToolUse` returning exit 2). They

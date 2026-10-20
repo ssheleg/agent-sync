@@ -1,3 +1,50 @@
+## v1.23.0 (2026-10-20): a quiet session start and a guard inside its budget
+
+**SessionStart says only what this run must act on (AS-25).** The hook printed the full
+`status` at every startup, resume and `/clear`: 834 characters in the hub checkout
+(measured 2026-10-20), mostly the setup and other runs' residue, closing on "NEXT: acquire
+a lease", which the family's routing block already says and a read-only session never
+needs. It now runs `status --brief`: one line naming the leases this run holds, a lease
+held past `scheduledIntervalSeconds`, this run's own expired locks (with `reap`) and claim
+tags out of step with the leases, or nothing at all. The brief reads local state only (no
+record plane, no remote, no vault) and leaves the signal watermark alone, so the next
+`status` still shows what is new. It prints on `startup` only; `resume` and `clear` still
+stamp the session (the matcher keeps both, ASY-08) and print nothing, without starting
+python. `AGENT_SYNC_SESSION_VERBOSE=1` restores the full block; `status` is unchanged.
+Measured interleaved on this machine at load average ~470: startup 834 to 0 characters,
+median 1037 to 533 ms (p90 1399 to 853 ms, n=15 each); resume 920 to 63 ms median.
+
+**The PreToolUse guard answers inside its budget (AS-26).** In git lease mode the first
+write of a guarded file took that file's claim on the lease remote, synchronously: one or
+two `ls-remote` calls (1.6 s each to github.com) and a `push` with no timeout, plus a cloud
+record-plane append where one is configured. Measured against github.com, the 1.22.2 guard
+took 8.6, 8.9 and 10.9 s for three first writes; the 2026-10-20 audit saw 10 to 20 s
+against the hook's 20 s timeout, past which the host lets the call through anyway. The
+claim now runs in a forked, detached process and the guard waits for it only until
+`AGENT_SYNC_GUARD_BUDGET` (1.5 s from the coordinator's start by default; `0` restores the
+synchronous claim). Past the budget the write proceeds under the task lease; the claim
+then lands and leaves this run's local note, or records the run that holds it, and the
+next write of that file is refused from that record without a round-trip (rechecked after
+60 s). A second write of the same file while the claim is in flight waits for that claim
+instead of racing it, and a claim this run already won is never reported as another
+run's. The acquire `push` is bounded at 60 s. Local leases on a local record plane are
+unchanged: they are a file create and are never backgrounded. Same three files on the
+same remote with 1.23.0: 4.0, 5.2 and 4.0 s, with the remaining time spent in local file
+writes on a machine at load average ~500 (two 50-byte writes profiled at 1.2 s).
+
+**The skill description is a router again (AS-27):** 445 characters, down from 936; every
+trigger the hub routes on (`lib/triggers.js`, route `agent-sync`) is still in it, in
+English and Russian, with the boundary and the refusal phrase. The "before editing a
+shared registry, even unasked" rule moved into the body.
+
+- Tests: `test/hooks_session_test.py` gains 8 cases (7 watched failing on `5bd8bec`);
+  new `test/guard_budget_test.py`, 5 cases over a local bare remote with a git shim that
+  slows `ls-remote` and `push` by 5 s (3 watched failing on `5bd8bec`: guard calls of
+  11.06 s, 5.51 s and 11.36 s). Both run in `npm test` and CI.
+- Not covered: the window between a write that proceeds and its claim landing; a run that
+  writes a file another run claimed in that window is refused only from its next write.
+  Trigger evals were not re-measured for the new description (backlog AS-28).
+
 ## v1.22.2 — active work keeps a lease alive
 
 - Automatic heartbeats renew only claims with recent guarded activity or explicit

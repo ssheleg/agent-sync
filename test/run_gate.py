@@ -26,6 +26,7 @@ SUITES = [["python3", "test/validate.py"],
           ["python3", "test/claim_cell_test.py"],
           ["python3", "test/hooks_session_test.py"],
           ["python3", "test/guard_uncoordinated_test.py"],
+          ["python3", "test/guard_budget_test.py"],
           ["python3", "test/coordination_test.py"]]
 SUITES += [["python3", os.path.relpath(p, REPO)]
            for p in sorted(glob.glob(os.path.join(REPO, "test", "audit_regressions", "*.py")))]
