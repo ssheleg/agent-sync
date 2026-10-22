@@ -23,6 +23,8 @@ sys.path.insert(0, HERE)
 import _sandbox  # noqa: E402
 
 SUITES = [["python3", "test/validate.py"],
+          ["python3", "test/family_gate.py"],
+          ["python3", "test/family_gate.py", "--self-test"],
           ["python3", "test/claim_cell_test.py"],
           ["python3", "test/hooks_session_test.py"],
           ["python3", "test/guard_uncoordinated_test.py"],
