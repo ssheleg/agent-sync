@@ -1,3 +1,10 @@
+## v1.23.1: the family member gate (2026-10-24)
+
+- **Done.** the family member gate: the family member gate (`test/family_gate.py`, with its shared-mechanism
+  declaration) and the documentation merged since v1.23.0, released.
+- **Next task.** After merge: tag `v1.23.1`, watch the release, then the sshlg-skills pin bump; then
+  the highest open board row.
+
 # Start here: agent-sync
 
 This page holds the current entry and the next bounded task. Open work lives in
