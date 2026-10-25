@@ -8,6 +8,11 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.2 (2026-10-25): descriptions within a 300-character budget
+
+descriptions within a 300-character budget. Evidence: the repository gate exits 0 on the candidate tree; the PR CI run
+and the tag release run are named in docs/HANDOFF.md.
+
 ## v1.23.1 (2026-10-24): quiet session start, guard budget, router description
 
 the family member gate. Evidence: the repository gate exits 0 on the candidate tree; the PR CI run

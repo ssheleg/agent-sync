@@ -1,10 +1,10 @@
 ---
 name: agent-sync
-description: "Use when several agents share a repo: claim this task, ask who is working on it, reserve an id, sync the board, set up agent coordination, or finish when the submodule is pushed and the parent points at the old commit. RU: возьми задачу, кто сейчас делает, зарезервируй id, обнови доску, настрой координацию агентов, сабмодуль запушен, родитель на старом коммите. Not for solo work or an unconfigured repo: 'no coordination' / «без координации»."
+description: "Use when several agents share a repo: claim a task, see who works on it, reserve an id, sync the board, set up coordination. RU: возьми задачу, кто сейчас делает, зарезервируй id, обнови доску. Not for solo work or an unconfigured repo: 'no coordination' / «без координации»."
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
-  version: "1.23.1"
+  version: "1.23.2"
   author: ssheleg
 ---
 
@@ -317,6 +317,12 @@ the parent; a service repo listing the parent's decision register is a config de
 - Everything the cloud holds about a durable fact is a link to git, never a substitute.
 - Boundary: `.claude/agent-sync.json`. None, or one agent alone — route past. The
   operator's waiver: "no coordination" / «без координации».
+
+## Triggers
+
+Beside the description's: "claim this task", "who is working on it", "set up agent
+coordination" / «настрой координацию агентов», "the submodule is pushed" / «сабмодуль
+запушен», "the parent points at the old commit" / «родитель на старом коммите».
 
 ## References
 
