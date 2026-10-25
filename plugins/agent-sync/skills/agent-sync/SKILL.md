@@ -320,12 +320,9 @@ the parent; a service repo listing the parent's decision register is a config de
 
 ## Triggers
 
-The description keeps the strongest phrases (listing budget, 2026-10-25); the family
-routing hook matches this list. "claim this task" / «возьми задачу», "who is working on
-it" / «кто сейчас делает», "reserve an id" / «зарезервируй id», "sync the board" /
-«обнови доску», "set up agent coordination" / «настрой координацию агентов», "the
-submodule is pushed" / «сабмодуль запушен», "the parent points at the old commit" /
-«родитель на старом коммите».
+Beside the description's: "claim this task", "who is working on it", "set up agent
+coordination" / «настрой координацию агентов», "the submodule is pushed" / «сабмодуль
+запушен», "the parent points at the old commit" / «родитель на старом коммите».
 
 ## References
 
