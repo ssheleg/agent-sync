@@ -1,3 +1,11 @@
+## v1.23.2 (2026-10-25): descriptions within a 300-character budget
+
+- **Description within a 300-character budget** (hub board row B-255 (a)): Claude Code lists every
+  skill's description in one ~30,000-character budget, and on the operator's machine the listing
+  stood at 51,178. The description falls from 447 to 277 characters (hub measure); the phrases it
+  dropped (the submodule and parent-pointer pair among them) move to a new `## Triggers` section,
+  where the family routing hook still finds them.
+
 ## v1.23.1 (2026-10-24): the family member gate
 
 - `test/family_gate.py`, the family's canonical member gate (hub B-108, B-109): the board
