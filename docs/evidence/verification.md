@@ -8,6 +8,19 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.3 (2026-10-27): the guard reads Codex's apply_patch
+
+| Requirement | Verified by |
+|---|---|
+| An `apply_patch` payload touching a guarded file is refused without a lease and allowed with one, for Add, Update, Delete and Move-to paths, absolute or relative to the payload `cwd`, with the patch in `tool_input.command` or `tool_input.input` | `check_guard_covers_every_write_shape` in `test/validate.py`, the `apply_patch` rows of `GUARD_SHAPES` |
+| An `apply_patch` touching only unguarded paths, or whose body reads like a guarded shell write and a commit, passes | the same check, rows "apply_patch adding an unrelated file" and "apply_patch whose body reads as a guarded write and a commit" |
+| A malformed `apply_patch` payload passes silently | the same check, rows "a non-string command", "no tool_input", "truncated mid-payload" |
+| The Claude Code shapes are unchanged | the existing `GUARD_SHAPES` rows, same check |
+
+Against 1.23.2's `guard.sh`, eight of the twelve `apply_patch` rows give the wrong exit (seven
+writes to `DECISIONS.md` allowed, the shell-looking patch body refused). The repository gate exits
+0 on the candidate tree; the PR CI run and the tag release run are named in docs/HANDOFF.md.
+
 ## v1.23.2 (2026-10-25): descriptions within a 300-character budget
 
 descriptions within a 300-character budget. Evidence: the repository gate exits 0 on the candidate tree; the PR CI run

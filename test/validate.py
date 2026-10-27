@@ -2230,6 +2230,46 @@ GUARD_SHAPES = [
 ]
 
 
+def _patch(*lines: str, key: str = "command", cwd: str | None = None) -> str:
+    """A Codex apply_patch payload: no file_path, the patch text in tool_input.command."""
+    body = "\n".join(["*** Begin Patch", *lines, "*** End Patch"]) + "\n"
+    payload = {"tool_name": "apply_patch", "tool_input": {key: body}}
+    if cwd is not None:
+        payload["cwd"] = cwd
+    return json.dumps(payload)
+
+
+# Hub B-211: Codex sends every edit as `apply_patch` with the patch text in
+# tool_input.command. Until 1.23.3 the matcher did not name it, and its empty path fell into
+# the Bash branch, which parsed the patch as a shell command: a guarded file edited through
+# a patch passed, and a patch whose BODY held `> DECISIONS.md` or `git commit` was refused.
+GUARD_SHAPES += [
+    ("apply_patch updating a guarded file",
+     _patch("*** Update File: DECISIONS.md", "@@", "-# Decisions", "+# Decisions!"), True),
+    ("apply_patch deleting a guarded file", _patch("*** Delete File: DECISIONS.md"), True),
+    ("apply_patch moving a file onto a guarded path",
+     _patch("*** Update File: README.md", "*** Move to: DECISIONS.md", "@@", "-# readme",
+            "+# decisions"), True),
+    ("apply_patch whose second file is guarded",
+     _patch("*** Add File: notes/a.md", "+a", "*** Update File: DECISIONS.md", "@@",
+            "-# Decisions", "+# D"), True),
+    ("apply_patch with an absolute guarded path",
+     _patch("*** Update File: %(dir)s/DECISIONS.md", "@@", "-# Decisions", "+# D"), True),
+    ("apply_patch relative to the payload cwd",
+     _patch("*** Update File: DECISIONS.md", "@@", "-# Decisions", "+# D", cwd="%(dir)s"), True),
+    ("apply_patch with the patch in tool_input.input",
+     _patch("*** Update File: DECISIONS.md", "@@", "-# Decisions", "+# D", key="input"), True),
+    ("apply_patch adding an unrelated file", _patch("*** Add File: notes/new.md", "+hello"), False),
+    ("apply_patch whose body reads as a guarded write and a commit",
+     _patch("*** Add File: notes/run.sh", "+echo x > DECISIONS.md && git commit -m wip"), False),
+    ("apply_patch with a non-string command",
+     '{"tool_name":"apply_patch","tool_input":{"command":42}}', False),
+    ("apply_patch with no tool_input", '{"tool_name":"apply_patch"}', False),
+    ("apply_patch truncated mid-payload",
+     '{"tool_name":"apply_patch","tool_input":{"command":"*** Update File: DECISIONS.md', False),
+]
+
+
 def check_guard_covers_every_write_shape() -> None:
     """The enforcement path agents actually hit, in every shape it arrives in.
 

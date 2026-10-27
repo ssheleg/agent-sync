@@ -38,7 +38,10 @@ set -uo pipefail
 #   Bash: a relative target after `cd -`, `cd`, `cd $X` UNPARSED (directory unknown)
 #   Bash: the arguments xargs reads from stdin; env -S  UNPARSED (not in the command)
 #   Bash: a `cd` in a pipeline or behind `&`            followed NOT AT ALL (a subshell)
-#   Bash: apply_patch                          UNSUPPORTED (no file_path parse)
+#   apply_patch (Codex's edit tool)             COVERED (1.23.3, hub B-211): the patch text in
+#     tool_input.command (or .input) is read for every `*** Add File:`, `*** Update File:`,
+#     `*** Delete File:` and `*** Move to:` path, and each path is checked like an Edit,
+#     relative to the payload's cwd. The patch body is data: it never reaches the Bash branch.
 #   Bash: python -c "...write_text(...)"        UNSUPPORTED (a runtime, not a path)
 #   Bash: perl -i, awk, dd, install, rsync      UNSUPPORTED (not parsed)
 #   (sed -i / perl -i were both UNSUPPORTED until 1.22.0; sed -i is now parsed above.)
@@ -105,8 +108,46 @@ parser_or_die() {
 # every session — a Bash command that writes nothing and commits nothing — spawns no process
 # at all (seam S5). The pattern cannot match inside a JSON string, where quotes are escaped.
 bash_re='"tool_name"[[:space:]]*:[[:space:]]*"Bash"'
+# Codex edits files with `apply_patch`: no file_path, the patch text in tool_input.command.
+# Before 1.23.3 its empty path sent it into the Bash branch below, which read the PATCH as a
+# shell command (hub B-211). Every path the patch names is listed here instead, one per line,
+# made absolute against the payload's cwd when it carries one. A payload that does not parse
+# lists nothing and passes: hooks fail silent.
+patch_re='"tool_name"[[:space:]]*:[[:space:]]*"apply_patch"'
+patch=0
 if [[ $input =~ $bash_re ]]; then
   path=""
+elif [[ $input =~ $patch_re ]]; then
+  patch=1
+  path=""
+  patch_paths=$(printf '%s' "$input" | python3 -c '
+import json, os, re, sys
+try:
+    d = json.load(sys.stdin)
+    ti = d.get("tool_input") if isinstance(d, dict) else None
+    if isinstance(ti, dict):
+        txt = ti.get("command") or ti.get("input") or ""
+    else:
+        txt = ti or ""
+    if isinstance(txt, list):
+        txt = "\n".join(x for x in txt if isinstance(x, str))
+    if not isinstance(txt, str):
+        txt = ""
+    cwd = d.get("cwd") if isinstance(d.get("cwd"), str) else ""
+    seen = []
+    for a, b in re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", txt, re.M):
+        p = (a or b).strip()
+        if not p:
+            continue
+        if cwd and not os.path.isabs(p):
+            p = os.path.join(cwd, p)
+        if p not in seen:
+            seen.append(p)
+    print("\n".join(seen))
+except Exception:
+    pass
+' 2>/dev/null)
+  parser_or_die $?
 else
   path=$(printf '%s' "$input" | python3 -c '
 import json,sys
@@ -156,6 +197,33 @@ print(json.dumps({"systemMessage": m, "hookSpecificOutput": {
   esac
 }
 trap flush_notices EXIT
+
+# check_one PATH: the repository that contains PATH decides, exactly as for an Edit/Write
+# below. Returns when the write may proceed; exits 2 when it may not.
+check_one() {
+  local p="$1" owner out code
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  owner=$(agent_sync_owner "$(dirname "$p")") || return 0
+  if out=$(cd "$owner" && python3 "$S" guard -- "$p" 2>&1); then
+    forward_notice "$out"
+    return 0
+  fi
+  code=$?
+  if [ "$code" -eq 2 ]; then
+    echo "$out" >&2
+    exit 2
+  fi
+  echo "agent-sync guard failed to run ($code): $out. Diagnose with \`python3 $S check\`, or acquire a lease first: \`python3 $S acquire <TASK-ID>\`" >&2
+  exit 2
+}
+
+# An apply_patch call: each path it adds, updates, deletes or moves to, checked once.
+if [ "$patch" = 1 ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] && check_one "$p"
+  done <<< "$patch_paths"
+  exit 0
+fi
 
 # A Bash call: its writes, then its commit.
 if [ -z "$path" ]; then
@@ -251,18 +319,5 @@ fi
 
 # An Edit/Write: the repository that contains the file decides. A relative path is relative
 # to this hook's cwd, which is where the tool call resolves it too.
-case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
-owner=$(agent_sync_owner "$(dirname "$path")") || exit 0
-
-if out=$(cd "$owner" && python3 "$S" guard -- "$path" 2>&1); then
-  forward_notice "$out"
-  exit 0
-else
-  code=$?
-  if [ "$code" -eq 2 ]; then
-    echo "$out" >&2
-    exit 2
-  fi
-  echo "agent-sync guard failed to run ($code): $out — diagnose with \`python3 $S check\`, or acquire a lease first: \`python3 $S acquire <TASK-ID>\`" >&2
-  exit 2
-fi
+check_one "$path"
+exit 0

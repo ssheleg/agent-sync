@@ -1,3 +1,17 @@
+## v1.23.3 (2026-10-27): the guard reads Codex's apply_patch
+
+- **Codex edits are guarded** (hub board row B-211). Codex sends every file edit as one tool,
+  `apply_patch`, with the patch text in `tool_input.command` and no `file_path`. The PreToolUse
+  matcher did not name it, and an empty path fell into the Bash branch, which parsed the patch as a
+  shell command: a guarded file edited through a patch passed, and a patch whose body held
+  `> DECISIONS.md` or `git commit` was refused. The matcher now names `apply_patch`; `guard.sh`
+  reads every `*** Add File:`, `*** Update File:`, `*** Delete File:` and `*** Move to:` path from
+  the patch (relative paths against the payload's `cwd`), checks each like an Edit, and never hands
+  the patch to the Bash branch. A payload that does not parse names no path and passes silently.
+  Twelve `apply_patch` rows in `GUARD_SHAPES` (`test/validate.py`); eight of them fail on 1.23.2.
+- **Board:** AS-23 and AS-24 are closed with their receipt (PR #35, `8c93030`, released in v1.22.2);
+  their status had read "merge pending" since the merge.
+
 ## v1.23.2 (2026-10-25): descriptions within a 300-character budget
 
 - **Description within a 300-character budget** (hub board row B-255 (a)): Claude Code lists every
