@@ -59,7 +59,7 @@ The hook receives JSON on stdin with `session_id`, `prompt_id`, `transcript_path
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh" }] }
     ],
     "PreToolUse": [
-      { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit|apply_patch",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh" }] },
       { "matcher": "Bash",
         "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh" }] }
@@ -120,6 +120,17 @@ under `.agent-sync/warned/`) as ONE JSON object: `systemMessage` for the person 
 `hookSpecificOutput.additionalContext` for the model — Claude Code shows a `systemMessage`
 to the person only. A Bash write into several repositories merges their notices into that
 one object: the host reads two JSON lines as a parse failure and drops both.
+
+**Codex's `apply_patch` (1.23.3, hub B-211).** Codex edits files with one tool,
+`apply_patch`, whose payload carries no `file_path`: the patch text is in
+`tool_input.command` (or `tool_input.input`). Until 1.23.3 the matcher did not name it,
+and an empty path would have sent the payload into the Bash branch, where the patch was
+parsed as a shell command. Now the matcher names it, and `guard.sh` reads every
+`*** Add File:`, `*** Update File:`, `*** Delete File:` and `*** Move to:` path out of the
+patch (relative paths against the payload's `cwd`) and checks each one exactly like an
+`Edit`; the patch body is data, never a command. A payload that does not parse names no
+path and passes silently. Cases: the `apply_patch` rows of `GUARD_SHAPES` in
+`test/validate.py`.
 
 **Which repository decides (since v1.21.2): the one that owns the write.** For
 `Edit`/`Write`/`MultiEdit`/`NotebookEdit` that is `git -C <dirname of the path>

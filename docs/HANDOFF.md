@@ -1,3 +1,17 @@
+## v1.23.3: the guard reads Codex's apply_patch (2026-10-27)
+
+- **Objective.** Hub board row B-211 (agent-sync part): the lease guard never acted on Codex edits,
+  which arrive as `apply_patch` with the patch text in `tool_input.command`.
+- **Done.** `hooks/hooks.json` names `apply_patch` in the PreToolUse matcher; `hooks/guard.sh`
+  checks every path the patch adds, updates, deletes or moves to, through the same `check_one` the
+  Edit branch now uses, and never parses the patch as a shell command. Twelve `GUARD_SHAPES` rows in
+  `test/validate.py`. Board: AS-23 and AS-24 closed with the PR #35 receipt (`8c93030`, v1.22.2).
+- **Checks run.** The repository gate (`npm test`) on the candidate tree, and the fixtures against
+  1.23.2's `guard.sh` (eight of twelve wrong there). PR, CI run, merge commit and release run: in
+  the pull request for this change.
+- **Next task.** After the release: the sshlg-skills pin bump to 1.23.3 (hub B-211 close); then the
+  highest open board row, AS-28 (re-measure the trigger evals).
+
 ## v1.23.2: descriptions within a 300-character budget (2026-10-25)
 
 - **Done.** Every skill description in this member is at or under 300 characters (hub measure:
