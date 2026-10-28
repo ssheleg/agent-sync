@@ -1,3 +1,15 @@
+## v1.23.4 (2026-10-28): the guard fails silent on a wrong-shaped payload, the snapshot carries no em dash
+
+- **The guard fails silent on an Edit payload of the wrong shape** (hub B-211 follow-up): a payload
+  that is not an object, a `tool_input` that is a string, or a `file_path` that is not a string
+  raised inside the parser, and the parser's non-zero exit failed CLOSED (exit 2) in a configured
+  session. Such a payload names no file and now passes, as the apply_patch branch already did.
+  Three GUARD_SHAPES rows; two of them fail on 1.23.3.
+- **The generated `AGENT_SYNC.md` carries no em dash** (hub B-289): the setup snapshot's headings,
+  table cells, wiring and credential lines, and the generated-file marker use a colon, semicolon
+  or parentheses. The marker keeps its `agent-sync:generated source=... cfg=... at=...` fields;
+  a project's snapshot changes on its next `agent_sync.py setup`.
+
 ## v1.23.3 (2026-10-27): the guard reads Codex's apply_patch
 
 - **Codex edits are guarded** (hub board row B-211). Codex sends every file edit as one tool,

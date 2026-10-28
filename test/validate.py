@@ -2267,6 +2267,11 @@ GUARD_SHAPES += [
     ("apply_patch with no tool_input", '{"tool_name":"apply_patch"}', False),
     ("apply_patch truncated mid-payload",
      '{"tool_name":"apply_patch","tool_input":{"command":"*** Update File: DECISIONS.md', False),
+    # Hooks fail silent (hub B-211 follow-up): an Edit payload of the wrong shape names no file
+    # and passes. Before 1.23.4 these raised in the parser and failed CLOSED (exit 2).
+    ("Edit whose tool_input is a string", '{"tool_name":"Edit","tool_input":"DECISIONS.md"}', False),
+    ("Edit whose payload is a list", '[{"tool_name":"Edit"}]', False),
+    ("Edit whose file_path is a number", '{"tool_name":"Edit","tool_input":{"file_path":42}}', False),
 ]
 
 

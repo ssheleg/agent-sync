@@ -1,3 +1,10 @@
+## v1.23.4: the guard fails silent on a wrong-shaped payload, the snapshot carries no em dash (2026-10-28)
+
+- **Done.** the guard fails silent on a wrong-shaped payload, the snapshot carries no em dash: the family member gate (`test/family_gate.py`, with its shared-mechanism
+  declaration) and the documentation merged since v1.23.3, released.
+- **Next task.** After merge: tag `v1.23.4`, watch the release, then the sshlg-skills pin bump; then
+  the highest open board row.
+
 ## v1.23.3: the guard reads Codex's apply_patch (2026-10-27)
 
 - **Objective.** Hub board row B-211 (agent-sync part): the lease guard never acted on Codex edits,

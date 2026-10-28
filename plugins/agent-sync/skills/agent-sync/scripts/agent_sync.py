@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.23.3"
+VERSION = "1.23.4"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -4662,13 +4662,13 @@ class Sync:
         backend = os.environ.get("AGENT_SYNC_BACKEND") or self.cfg.get("backend") or "fs"
         if backend == "notion":
             return [f"- record-plane token: the Observatory vault slot "
-                    f"`{vault_project(self.root)}/{VAULT_SECRET}` first — every command that "
+                    f"`{vault_project(self.root)}/{VAULT_SECRET}` first: every command that "
                     "writes to Notion re-runs itself under `use_secret.py run --vault-only`; "
                     f"{where} only as a DEGRADED fallback (`status` names which one served). "
                     "Never sourced, never committed",
-                    f"- other settings (parent page, collection) read from {where} — "
-                    "gitignored, never committed"]
-        return [f"- credentials read from {where} — gitignored, never committed"]
+                    f"- other settings (parent page, collection) read from {where} ("
+                    "gitignored, never committed)"]
+        return [f"- credentials read from {where} (gitignored, never committed)"]
 
     def setup_snapshot(self) -> str:
         """A snapshot of how THIS project is actually wired, generated from the config.
@@ -4688,47 +4688,47 @@ class Sync:
         L = [
             f"{GENERATED_MARKER} source={repo_name()}@{head_sha()} "
             f"cfg={self.config_digest()} at={now_iso()} "
-            "— regenerate with `agent_sync.py setup`, do not hand-edit -->",
+            "(regenerate with `agent_sync.py setup`, do not hand-edit) -->",
             "",
             f"# How documentation and coordination work in {repo_name()}",
             "",
             "This file is **generated** from the live configuration. If it disagrees with",
-            "what the tool does, the tool is right and this file is stale — regenerate it.",
+            "what the tool does, the tool is right and this file is stale: regenerate it.",
             "",
             "## Two documentation sources",
             "",
             "| Source | Answers | Where |",
             "|---|---|---|",
-            "| Git documents | *how it should be* — intent, decisions, contracts | this repository |",
-            "| As-built record | *how it actually is* — what agents wrote, with commits | the coordination plane |",
+            "| Git documents | *how it should be*: intent, decisions, contracts | this repository |",
+            "| As-built record | *how it actually is*: what agents wrote, with commits | the coordination plane |",
             "",
             "Neither outranks the other; they answer different questions. **The gap between",
             "them is the finding.** Reconcile before starting a task and after finishing it.",
             "",
             "## This project's wiring",
             "",
-            f"- record plane: **{self.adapter.name}** · lease: **{self.lease_mode}** — "
+            f"- record plane: **{self.adapter.name}** · lease: **{self.lease_mode}**: "
             f"{lease_guarantee(self.lease_mode)[0]} · runs recorded "
             f"**{'gated' if self.gated else 'ungated'}**",
             f"- lease TTL {cfg.get('leaseTtlSeconds', DEFAULT_TTL)}s, renewed every "
             f"{cfg.get('renewIntervalSeconds', DEFAULT_RENEW)}s",
             *self._snapshot_credentials(env_path),
             "",
-            "### Id registers — reserve before you write",
+            "### Id registers: reserve before you write",
             "",
         ]
         if regs:
             L += ["| Register | File | Reserve with |", "|---|---|---|"]
             L += [f"| `{r}` | `{s['file']}` | `agent_sync.py reserve {r}` |" for r, s in sorted(regs.items())]
-            L += ["", "Reading a *next free id* line is **not** reserving it — two agents read the same number."]
+            L += ["", "Reading a *next free id* line is **not** reserving it: two agents read the same number."]
             authority, how = id_allocator(cfg, self.adapter)
             L += ["", f"Ids are allocated by {how}." if authority else
-                  f"**No allocator serves these registers** — {how}, so `reserve` refuses "
+                  f"**No allocator serves these registers**: {how}, so `reserve` refuses "
                   "and `check` reports it."]
         else:
             L += ["None declared here. Ids live in the parent repository; reserve them there."]
 
-        L += ["", "### Guarded files — a live lease is required to write these", ""]
+        L += ["", "### Guarded files: a live lease is required to write these", ""]
         L += ([f"- `{g}`" for g in guarded] or ["- none"])
         L += ["", "### Gates run before a change is considered done", ""]
         L += ([f"- `{g}`" for g in gates] or ["- none configured"])
@@ -4756,7 +4756,7 @@ class Sync:
             "the correcting entry, because the logs are replayed in order and a deletion",
             "would silently rewrite a decision every other agent already read. A lease is",
             "released, never removed. A reserved id that is not used is returned with",
-            "`release-id`, which appends — it does not erase.",
+            "`release-id`, which appends; it does not erase.",
             "",
             "Generated pages are the exception: they are rewritten wholesale, and a page",
             "whose first line lost its generated marker is **refused**, not overwritten.",
@@ -4779,7 +4779,7 @@ class Sync:
             "board       → regenerate the shared view",
             "merge --key → land the branch: conflicts checked first, the merge recorded,",
             "              that lease released. Without a branch, `release ID` by hand",
-            "              — on every path, including failure",
+            "              (on every path, including failure)",
             "residue     → what this run leaves on disk. Expiry ends a lease and leaves",
             "              the file, so `status` and `finish` enumerate them; `reap`",
             "              clears only what THIS run can prove it owns and has spent,",

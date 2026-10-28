@@ -149,14 +149,20 @@ except Exception:
 ' 2>/dev/null)
   parser_or_die $?
 else
+  # A payload of the wrong shape (not an object, tool_input not an object, a path that is not
+  # a string) names no file: it passes, because hooks fail silent. Before 1.23.4 it raised,
+  # and the parser's non-zero exit failed CLOSED in a configured session.
   path=$(printf '%s' "$input" | python3 -c '
 import json,sys
 try:
     d=json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-ti=d.get("tool_input") or {}
-print(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
+ti=d.get("tool_input") if isinstance(d, dict) else None
+if not isinstance(ti, dict):
+    sys.exit(0)
+p=ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or ""
+print(p if isinstance(p, str) else "")
 ' 2>/dev/null)
   parser_or_die $?
 fi

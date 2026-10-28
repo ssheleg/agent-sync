@@ -8,6 +8,11 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.4 (2026-10-28): the guard reads Codex's apply_patch
+
+the guard fails silent on a wrong-shaped payload, the snapshot carries no em dash. Evidence: the repository gate exits 0 on the candidate tree; the PR CI run
+and the tag release run are named in docs/HANDOFF.md.
+
 ## v1.23.3 (2026-10-27): the guard reads Codex's apply_patch
 
 | Requirement | Verified by |
