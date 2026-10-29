@@ -83,6 +83,19 @@ agent_sync_payload_session() {
   [[ ${1:-} =~ $re ]] && printf '%s' "${BASH_REMATCH[1]}"
 }
 
+# The same id, read in THIS shell into _agent_sync_sid (the caller declares it `local`):
+# `sid=$(agent_sync_payload_session …)` forked a subshell on every hook call that carried no
+# session in its environment (hub B-311). Trailing newlines go, as command substitution
+# drops them. Returns 1 when there is no id.
+agent_sync_read_session() {
+  local re='"session_id"[[:space:]]*:[[:space:]]*"([^"]+)"'
+  _agent_sync_sid=
+  [[ ${1:-} =~ $re ]] || return 1
+  _agent_sync_sid=${BASH_REMATCH[1]}
+  while [[ $_agent_sync_sid == *$'\n' ]]; do _agent_sync_sid=${_agent_sync_sid%$'\n'}; done
+  [ -n "$_agent_sync_sid" ]
+}
+
 agent_sync_session_key() {
   if [ -n "${AGENT_SYNC_RUN_ID:-}" ]; then printf 'env:%s' "$AGENT_SYNC_RUN_ID"; return 0; fi
   if [ -n "${CLAUDE_SESSION_ID:-}" ]; then printf 'session:%s' "$CLAUDE_SESSION_ID"; return 0; fi
@@ -96,8 +109,8 @@ agent_sync_session_key() {
 # no SessionStart stamped as the Bash call that acquired there (CLAUDE_CODE_SESSION_ID).
 agent_sync_export_session() {
   [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}${AGENT_SYNC_RUN_ID:-}" ] && return 0
-  local sid; sid=$(agent_sync_payload_session "${1:-}")
-  [ -n "$sid" ] && export CLAUDE_SESSION_ID="$sid"
+  local _agent_sync_sid
+  agent_sync_read_session "${1:-}" && export CLAUDE_SESSION_ID="$_agent_sync_sid"
   return 0
 }
 
