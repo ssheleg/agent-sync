@@ -18,5 +18,9 @@ if [ -z "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}${AGENT_SYNC_RUN_ID:-}
 fi
 agent_sync_configured || agent_sync_has_session_repos "$payload" || exit 0
 agent_sync_export_session "$payload"
-run_limited 10 python3 "$S" renew --active-only --session-repos >/dev/null 2>&1 || true
+# The 10 s limit is armed inside agent_sync.py (AGENT_SYNC_TIME_LIMIT, hub B-311), not by
+# `run_limited`: on a stock macOS its watchdog started `sleep 0.1` every 100 ms while Python
+# ran. stdin is /dev/null, as it was for the watchdog's background job. The braces send bash's
+# own report of a process ended by its timer ("Alarm clock") to /dev/null with the rest.
+{ AGENT_SYNC_TIME_LIMIT=10 python3 "$S" renew --active-only --session-repos </dev/null >/dev/null 2>&1; } 2>/dev/null || true
 exit 0

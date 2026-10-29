@@ -184,6 +184,13 @@ explicit named renewal. Missing/corrupt legacy activity is unknown and is not
 automatically renewed; a fresh guard or explicit renewal establishes it. The
 existing lease TTL and arbitration still decide ownership, so inactivity neither
 deletes claims nor authorizes a write after expiry. See `lease-protocol.md`.
+Its 10 s limit is armed inside `agent_sync.py` (1.23.5, hub B-311): the hook sets
+`AGENT_SYNC_TIME_LIMIT=10`, and the script starts a real-time timer whose SIGALRM keeps its
+default action, so a renew that hangs still ends at 10 s. It used to run under
+`run_limited 10`, whose fallback on a stock macOS starts `sleep 0.1` every 100 ms while
+Python runs; per tool call in a coordinated project that is one bash and one python3 now
+(`test/hooks_session_test.py`: "renew starts one python3 and no watchdog", "a stalled renew
+ends within its 10 s bound").
 It touches the network at most once per `renewIntervalSeconds` (default
 300 s) per repository. `renew` and SessionEnd's `release --held` never ask the Observatory
 vault: the lease they act on is a local lock or a git ref, and the token would add only a

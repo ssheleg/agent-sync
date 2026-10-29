@@ -1,3 +1,30 @@
+## v1.23.5 (2026-10-28): renew's 10 s limit lives in the script, not in a watchdog
+
+- **Fewer processes per tool call, same bound** (hub board row B-311). `renew.sh` runs after every
+  tool call and ran `run_limited 10 python3 … renew`; on a stock macOS (no `timeout`, no
+  `gtimeout`) that is the bash watchdog, which starts `sleep 0.1` every 100 ms while Python runs.
+  The hook now sets `AGENT_SYNC_TIME_LIMIT=10` and `agent_sync.py` arms a real-time timer before
+  its first import, with SIGALRM at its default action, so a renew that hangs still ends at 10 s;
+  the variable is removed at once, so no child and no vault re-exec arms a second one. The hook
+  and lifecycle helpers also read a payload's `session_id` in the shell itself instead of in a
+  `$(…)` subshell. Counted with PATH shims that log every program start (median of 10 runs) plus
+  the subshells the scripts fork, the hook's bash included, and cross-checked by PID delta: in a
+  coordinated project with the session in the environment, renew started bash, python3, its two
+  `git` calls, the watchdog subshell and one `sleep` per 100 ms of Python (2 to 5 here), 7 to 10
+  processes; now 4 (bash, python3, two `git`). With the session only in the payload, 10 or more
+  became 6, and `guard.sh` on a Bash call 3 became 2. `session-start.sh` and `session-end.sh` keep
+  `run_limited`.
+- **Not done: the renew interval checked in shell before Python.** A renew with nothing due still
+  maintains the session's repository list (`_finish_session_children` drops a repository where
+  this run holds nothing, and the session's own when it holds nothing), and the throttle is per
+  run and key under `.agent-sync/`, keyed by a run id only the script derives. A shell test that
+  skipped Python would change what the list holds, so it is left as a proposal.
+- **Tests** (`test/hooks_session_test.py`, 27, four new): renew starts python3 once and no
+  `sleep`, `timeout` or `gtimeout` (red on 1.23.4: the watchdog's `sleep`); a renew whose `git`
+  never answers ends between 9 and 13 s with exit 0, no output, its python3 gone and the limit
+  variable absent from its child; the script given a 1 s limit ends by SIGALRM; the in-shell
+  session read equals the subshell one on ten payloads.
+
 ## v1.23.4 (2026-10-28): the guard fails silent on a wrong-shaped payload, the snapshot carries no em dash
 
 - **The guard fails silent on an Edit payload of the wrong shape** (hub B-211 follow-up): a payload

@@ -15,6 +15,44 @@ process — there is no subprocess and nothing for another process to read.
 
 from __future__ import annotations
 
+
+def _arm_time_limit(environ=None) -> float | None:
+    """End this process at AGENT_SYNC_TIME_LIMIT seconds, as a hook's watchdog would.
+
+    renew.sh ran this script under `run_limited 10`, whose fallback on a stock macOS (no
+    `timeout`, no `gtimeout`) is a bash watchdog that starts `sleep 0.1` every 100 ms while
+    this process runs: 11 processes per tool call in a coordinated project (hub B-311). The
+    hook now sets the variable instead, and the limit is armed here, before anything else
+    is imported: a real-time interval timer whose SIGALRM keeps its DEFAULT action, so the
+    kernel ends the process at the limit the way the watchdog's SIGTERM did. No handler
+    runs and no Python code can hold it off. The variable is removed at once, so no child
+    and no vault re-exec arms a second limit; a pending timer survives `execv`, so a
+    re-exec stays inside the first one, and a forked child starts with no timer. Without
+    `setitimer` (Windows) a daemon timer thread ends the process instead.
+    """
+    import os
+    import signal
+    env = os.environ if environ is None else environ
+    raw = env.pop("AGENT_SYNC_TIME_LIMIT", None)
+    try:
+        secs = float(raw) if raw else 0.0
+    except ValueError:
+        return None
+    if not 0 < secs < 1e6:          # NaN, zero, negative and absurd values arm nothing
+        return None
+    if hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.setitimer(signal.ITIMER_REAL, secs)
+    else:
+        import threading
+        t = threading.Timer(secs, os._exit, args=(124,))
+        t.daemon = True
+        t.start()
+    return secs
+
+
+_arm_time_limit()
+
 import argparse
 import json
 import os
@@ -37,7 +75,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.23.4"
+VERSION = "1.23.5"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")

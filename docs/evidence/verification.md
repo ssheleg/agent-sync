@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.5 (2026-10-28): renew's 10 s limit lives in the script
+
+| Requirement | Verified by |
+|---|---|
+| `renew.sh` starts one python3 and no `sleep`, `timeout` or `gtimeout` | `test/hooks_session_test.py` "B-311: renew starts one python3 and no watchdog" (PATH shims log each start; red on 1.23.4) |
+| A renew that hangs ends at its 10 s bound, silent, exit 0, its python3 gone | `test/hooks_session_test.py` "B-311: a stalled renew ends within its 10 s bound" (a `git` shim that never answers; 9 to 13 s) |
+| `AGENT_SYNC_TIME_LIMIT` ends the script by SIGALRM and reaches no child | the same file, "B-311: the script arms the limit it is given" and the stalled case's child environment |
+| The in-shell `session_id` read gives what the subshell gave | the same file, "B-311: the in-shell session read matches the subshell one" (ten payloads) |
+
+The repository gate exits 0 on the candidate tree; the PR CI run and the tag release run are named
+in docs/HANDOFF.md.
+
 ## v1.23.4 (2026-10-28): the guard reads Codex's apply_patch
 
 the guard fails silent on a wrong-shaped payload, the snapshot carries no em dash. Evidence: the repository gate exits 0 on the candidate tree; the PR CI run

@@ -522,6 +522,154 @@ def the_fallback_watchdog_still_kills_an_overrun():
     assert "rc:0" not in proc.stdout, "a killed command reported success: %r" % proc.stdout
 
 
+# --- B-311 (hub board): renew.sh's limit lives in agent_sync.py ------------------------------
+#
+# renew.sh ran `run_limited 10 python3 … renew`. On a stock macOS that is the bash watchdog
+# above, which starts `sleep 0.1` every 100 ms while Python runs: 11 processes per tool call
+# in a coordinated project. The hook now sets AGENT_SYNC_TIME_LIMIT=10 and the script arms a
+# real-time timer whose SIGALRM keeps its default action. The bound must stay real: a renew
+# that hangs (here: `git` never answers) still ends at 10 s.
+
+RENEW = os.path.join(PLUGIN, "hooks", "renew.sh")
+
+
+def _shim_dir(log, wrap=(), stall_git=False, slow_python=False):
+    """PATH shims: each name in `wrap` logs itself and execs the real program; `git`, when
+    stalled, records its parent (the python3 that called it) and its environment, then sleeps.
+    `slow_python` holds python3 0.3 s before it starts (through the real `sleep`, unlogged),
+    so a watchdog polling every 0.1 s is seen polling on any machine, however fast."""
+    d = tempfile.mkdtemp(prefix="agent-sync-shims-")
+    for name in wrap:
+        real = shutil.which(name)
+        if not real:
+            continue        # a shim would make `command -v` find a program the host lacks
+        hold = ('"%s" 0.3\n' % shutil.which("sleep")) if slow_python and name == "python3" else ""
+        body = "#!/bin/sh\necho %s >> '%s'\n%sexec \"%s\" \"$@\"\n" % (name, log, hold, real)
+        with open(os.path.join(d, name), "w") as fh:
+            fh.write(body)
+        os.chmod(os.path.join(d, name), 0o755)
+    if stall_git:
+        with open(os.path.join(d, "git"), "w") as fh:
+            fh.write("#!/bin/sh\necho \"git $$ $PPID ${AGENT_SYNC_TIME_LIMIT:-unset}\" >> '%s'\n"
+                     "exec sleep 60\n" % log)
+        os.chmod(os.path.join(d, "git"), 0o755)
+    return d
+
+
+def _renew_env(root, shims):
+    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=PLUGIN, CLAUDE_PROJECT_DIR=root,
+               PATH=shims + os.pathsep + os.environ["PATH"])
+    for k in ("CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "AGENT_SYNC_RUN_ID"):
+        env.pop(k, None)
+    return env
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def renew_starts_one_python_and_no_watchdog():
+    root = _repo()
+    log = os.path.join(root, "started.log")
+    shims = _shim_dir(log, wrap=("python3", "sleep", "timeout", "gtimeout", "head"), slow_python=True)
+    try:
+        r = subprocess.run(["bash", RENEW], cwd=root, env=_renew_env(root, shims),
+                           input='{"session_id":"s-renew","hook_event_name":"PostToolUse"}',
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr)
+        started = open(log).read().split() if os.path.exists(log) else []
+        assert started.count("python3") == 1, "renew.sh did not start python3 once: %r" % started
+        for name in ("sleep", "timeout", "gtimeout"):
+            assert name not in started, "renew.sh started %s: %r" % (name, started)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(shims, ignore_errors=True)
+
+
+def a_stalled_renew_ends_within_its_bound():
+    import time
+    root = _repo()
+    log = os.path.join(root, "started.log")
+    shims = _shim_dir(log, stall_git=True)
+    sleepers = []
+    try:
+        t0 = time.monotonic()
+        r = subprocess.run(["bash", RENEW], cwd=root, env=_renew_env(root, shims),
+                           input='{"session_id":"s-stall"}', capture_output=True, text=True,
+                           timeout=60)
+        took = time.monotonic() - t0
+        lines = [l.split() for l in open(log).read().splitlines() if l.startswith("git ")]
+        sleepers = [int(l[1]) for l in lines]
+        assert lines, "the stalled git was never called, so nothing stalled"
+        assert r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr)
+        assert 9.0 <= took < 13.0, "a renew stalled in git ended after %.2f s, not at its 10 s bound" % took
+        assert not any(_alive(int(l[2])) for l in lines), "the stalled python3 outlived the bound"
+        assert all(l[3] == "unset" for l in lines), \
+            "AGENT_SYNC_TIME_LIMIT reached a child: %r" % lines
+    finally:
+        for pid in sleepers:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(shims, ignore_errors=True)
+
+
+def the_script_arms_the_limit_it_is_given():
+    import signal
+    import time
+    root = _repo()
+    log = os.path.join(root, "started.log")
+    shims = _shim_dir(log, stall_git=True)
+    sleepers = []
+    try:
+        env = _renew_env(root, shims)
+        env["AGENT_SYNC_TIME_LIMIT"] = "1"
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, SCRIPT, "renew", "--active-only"], cwd=root, env=env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        took = time.monotonic() - t0
+        sleepers = [int(l.split()[1]) for l in open(log).read().splitlines() if l.startswith("git ")]
+        assert r.returncode == -signal.SIGALRM, "exit %r, not ended by its timer" % r.returncode
+        assert took < 4.0, "a 1 s limit ended the process after %.2f s" % took
+        mod = _module()
+        for raw in ("", "x", "0", "-3", "nan", "inf", "1e9"):
+            env2 = {"AGENT_SYNC_TIME_LIMIT": raw}
+            assert mod._arm_time_limit(env2) is None, "%r armed a limit" % raw
+            assert "AGENT_SYNC_TIME_LIMIT" not in env2, "%r stayed in the environment" % raw
+        assert mod._arm_time_limit({}) is None
+    finally:
+        for pid in sleepers:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(shims, ignore_errors=True)
+
+
+def the_in_shell_session_read_matches_the_subshell_one():
+    payloads = ['{"session_id":"abc","x":1}', '{"session_id" : "a b"}', '{"x":1}', "",
+                'not json', '{"session_id":""}', '{"session_id":"one"} {"session_id":"two"}',
+                '{"session_id":"nl\n\n"}', '{"session_id":"\n"}', '{"session_id":"é-ü"}']
+    script = ""
+    for i, pl in enumerate(payloads):
+        q = pl.replace("'", "'\\''")
+        script += ("p='%s'\nold=$(agent_sync_payload_session \"$p\"); orc=$?\n"
+                   "_agent_sync_sid=; agent_sync_read_session \"$p\"; nrc=$?\n"
+                   "[ \"$old\" = \"$_agent_sync_sid\" ] && { [ -n \"$old\" ] && [ $nrc = 0 ] || "
+                   "{ [ -z \"$old\" ] && [ $nrc = 1 ]; }; } && echo same%d || echo diff%d\n") % (q, i, i)
+    proc, _ = _lib_run(script)
+    assert proc.stdout.count("same") == len(payloads), proc.stdout + proc.stderr
+
+
 # --- B-150 (reported 2026-10-11 from a linked worktree) -----------------------------------
 #
 # `acquire` from a shell with no session id ran under the SHARED fallback identity and
@@ -610,6 +758,11 @@ for name, fn in [
     ("the fallback watchdog releases a captured pipe at once",
      the_fallback_watchdog_releases_a_captured_pipe_at_once),
     ("the fallback watchdog still kills an overrun", the_fallback_watchdog_still_kills_an_overrun),
+    ("B-311: renew starts one python3 and no watchdog", renew_starts_one_python_and_no_watchdog),
+    ("B-311: a stalled renew ends within its 10 s bound", a_stalled_renew_ends_within_its_bound),
+    ("B-311: the script arms the limit it is given", the_script_arms_the_limit_it_is_given),
+    ("B-311: the in-shell session read matches the subshell one",
+     the_in_shell_session_read_matches_the_subshell_one),
     ("acquire refuses the shared identity where hooks know their session",
      acquire_refuses_the_shared_identity_where_hooks_know_their_session),
     ("a linked worktree finds the main checkout's session stamp",

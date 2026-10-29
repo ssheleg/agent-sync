@@ -17,6 +17,12 @@ anything that can make the tool report something untrue outranks both.
 | AS-20 | unverified | A passed vault probe is cached for an hour | If the grant is revoked inside that hour, a record-plane command execs into the vault's refusal instead of degrading to the file token — against `_vault_run_refusal`'s own "never exec on a guess". Shorten the positive TTL to the negative one, or on a non-zero vault re-exec re-run once without it and name the degradation | wave 3 final unit reading, 2026-10-12 |
 | AS-22 | untidy | With a vault-only Notion token, `renew` and `release --held` publish no claims-log lines | They never ask the vault (by design, the hot path), so the Notion view of a held lease can show it expired. The lease itself is decided locally. Name it in `status` ("claims-log heartbeats not published: vault-only token") | wave 3 final unit reading, 2026-10-12 |
 
+## Closed by v1.23.5 (2026-10-28): renew's limit lives in the script
+
+| ID | Closed by |
+|---|---|
+| AS-30 | Hub B-311: `renew.sh` starts 4 processes per tool call in a coordinated project instead of 7 to 10 (PATH-shim count, PID delta cross-check), its 10 s limit armed in `agent_sync.py`; a payload's `session_id` is read without a subshell. Four cases in `test/hooks_session_test.py`, one red on 1.23.4. The renew interval checked in shell was not done: it would change the session's repository list (CHANGELOG 1.23.5) |
+
 ## Closed by PR #35 (`8c93030`, merged 2026-10-13), released in v1.22.2
 
 Both rows read "verified candidate; merge pending" for two weeks after the merge; the
