@@ -721,6 +721,73 @@ def a_linked_worktree_finds_the_main_checkouts_session_stamp():
         shutil.rmtree(wt, ignore_errors=True)
 
 
+GUARD = os.path.join(PLUGIN, "hooks", "guard.sh")
+
+
+def _edit(path, first=True, sid="sess-as8"):
+    ti = {"file_path": path, "old_string": "x", "new_string": "y"}
+    if not first:
+        ti = {"old_string": "x", "new_string": "y", "file_path": path}
+    return json.dumps({"session_id": sid, "hook_event_name": "PreToolUse",
+                       "tool_name": "Edit", "tool_input": ti})
+
+
+def an_edit_in_an_unconfigured_repository_starts_no_python():
+    """AS-8 (2026-11-11). Every Edit/Write spawned python3 to read file_path BEFORE the
+    owner check, so an Edit in a repository with no config paid an interpreter start for a
+    guard with nothing to say. The plain shape is read in bash; the owner check runs first.
+    A configured repository still refuses an unleased guarded file, by either shape."""
+    coordinated = _repo()
+    cfg = os.path.join(coordinated, ".claude", "agent-sync.json")
+    c = json.load(open(cfg))
+    c["guardedFiles"] = ["notes.md"]
+    json.dump(c, open(cfg, "w"))
+    plain = tempfile.mkdtemp(prefix="agent-sync-plain-")
+    subprocess.run(["git", "init", "-q", plain], check=True)
+    log = os.path.join(plain, "started.log")
+    shims = _shim_dir(log, wrap=("python3",))
+    env = _renew_env(coordinated, shims)
+    try:
+        r = subprocess.run(["bash", GUARD], cwd=coordinated, env=env,
+                           input=_edit(os.path.join(plain, "a.md")),
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and r.stderr == "", (r.returncode, r.stderr)
+        started = open(log).read().split() if os.path.exists(log) else []
+        assert "python3" not in started, "an Edit outside coordination started %r" % started
+        for first in (True, False):
+            r = subprocess.run(["bash", GUARD], cwd=coordinated, env=env,
+                               input=_edit(os.path.join(coordinated, "notes.md"), first),
+                               capture_output=True, text=True, timeout=60)
+            assert r.returncode == 2, ("an unleased guarded Edit passed", first, r.stderr)
+    finally:
+        for d in (coordinated, plain, shims):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def the_guard_and_scaffold_name_a_command_that_exists():
+    """AS-2, AS-4 (2026-11-11). `scaffold` seeded `agent-sync reserve DEC`, `agent-sync
+    status` and `agent-sync merge` into new projects, and the guard told a refused agent to
+    run a bare `agent_sync.py acquire`. No `agent-sync` command is on PATH (the npm bin only
+    installs), so every one of those was an instruction that could not run."""
+    import re as _re
+    root = tempfile.mkdtemp(prefix="agent-sync-scaffold-")
+    try:
+        subprocess.run(["git", "init", "-q", root], check=True)
+        r = subprocess.run([sys.executable, SCRIPT, "scaffold", "--docs-dir"], cwd=root,
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        for rel in ("AGENTS.md", os.path.join("docs", "DECISIONS.md")):
+            text = open(os.path.join(root, rel)).read()
+            bare = _re.findall(r"`agent-sync [a-z]+", text)
+            assert not bare, "%s seeds a command that does not exist: %r" % (rel, bare)
+            assert 'python3 "$SKILL_DIR/scripts/agent_sync.py"' in text, (
+                "%s does not name the working invocation" % rel)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    guard = open(GUARD).read()
+    assert not _re.search(r"&& agent_sync\.py acquire", guard), "a bare acquire hint remains"
+
+
 print("agent-sync session hooks: SessionStart identity and brief, SessionEnd budget")
 for name, fn in [
     ("the hook stamps the session from its stdin payload",
@@ -767,6 +834,10 @@ for name, fn in [
      acquire_refuses_the_shared_identity_where_hooks_know_their_session),
     ("a linked worktree finds the main checkout's session stamp",
      a_linked_worktree_finds_the_main_checkouts_session_stamp),
+    ("AS-8: an Edit in an unconfigured repository starts no python3",
+     an_edit_in_an_unconfigured_repository_starts_no_python),
+    ("AS-2/AS-4: the guard and scaffold name a command that exists",
+     the_guard_and_scaffold_name_a_command_that_exists),
 ]:
     case(name, fn)
 

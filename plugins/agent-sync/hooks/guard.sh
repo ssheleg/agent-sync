@@ -148,6 +148,18 @@ except Exception:
     pass
 ' 2>/dev/null)
   parser_or_die $?
+elif fast_path_re='"tool_input"[[:space:]]*:[[:space:]]*\{[[:space:]]*"file_path"[[:space:]]*:[[:space:]]*"([^"\\]+)"' \
+     && [[ $input =~ $fast_path_re ]] && rest=${input#*'"file_path"'} \
+     && [[ $rest != *'"file_path"'* && $input != *'\u'* ]] \
+     && command -v python3 >/dev/null 2>&1; then
+  # An Edit/Write whose tool_input OPENS with a plain file_path (no escape in it, named once,
+  # no \u escape anywhere that could spell the key another way) is read without an interpreter,
+  # so an Edit in a repository with no config spawns no python3 at all: check_one asks git
+  # whether the owner is coordinated before anything else runs (AS-8, seam S5). Every other
+  # shape takes the parser below, which reads exactly what this reads when both apply. Without
+  # python3 on PATH (`command -v` is a builtin) it takes the parser too, so the refusal still
+  # names python3 (ASY-07).
+  path=${BASH_REMATCH[1]}
 else
   # A payload of the wrong shape (not an object, tool_input not an object, a path that is not
   # a string) names no file: it passes, because hooks fail silent. Before 1.23.4 it raised,
@@ -263,7 +275,7 @@ if [ -z "$path" ]; then
           [ "$o" = "$owner" ] && targets+=("$t")
         done < <(printf '%s\n' "$hits")
         if ! out=$(cd "$owner" && python3 "$S" guard -- "${targets[@]}" 2>&1); then
-          echo "agent-sync: this command writes a guarded file in $owner and this run holds no lease on it. Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>) first. ${out}" >&2
+          echo "agent-sync: this command writes a guarded file in $owner and this run holds no lease on it. Acquire one there (cd $owner && python3 $S acquire <TASK-ID>) first. ${out}" >&2
           exit 2
         fi
         forward_notice "$out"
@@ -315,7 +327,7 @@ if [ -z "$path" ]; then
     esac
     if [ "${#files[@]}" -gt 0 ]; then
       if ! why=$(cd "$owner" && python3 "$S" guard -- "${files[@]}" 2>&1 >/dev/null); then
-        echo "agent-sync: this commit in $owner stages a guarded file this run holds no lease on (staged already, or by this same command). Acquire one there (cd $owner && agent_sync.py acquire <TASK-ID>), or unstage it. ${why}" >&2
+        echo "agent-sync: this commit in $owner stages a guarded file this run holds no lease on (staged already, or by this same command). Acquire one there (cd $owner && python3 $S acquire <TASK-ID>), or unstage it. ${why}" >&2
         exit 2
       fi
     fi

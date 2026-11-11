@@ -1,3 +1,46 @@
+## v1.23.6 (2026-11-11): release skips a claim it never wrote, scaffold and guard name a command that runs
+
+Family audit of 2026-11-11 (operator order in the sshlg-skills session), findings AS-1 to AS-10.
+
+- **Release no longer refuses a claim nobody made** (AS-1). `release` runs the claim write-through
+  for every key, file paths included, and the "appears in N table rows, refusing to guess" refusal
+  fired before the stored claim was read. In the hub, `acquire docs/evidence/backlog.md` then
+  `release --held` printed it because the claimTags file cites its own path in 4 rows. `write_claim`
+  now reads `.agent-sync/claims.json` first: on release, a key with no saved cell and no claim
+  marker in a row it could have tagged (the row that owns the key, or the single row naming it) is
+  skipped quietly. On acquire, a key no row owns that several rows only cite is skipped too: the
+  board does not register it, so there is no cell to write. A duplicated id that two rows both
+  own still refuses.
+- **`scaffold` seeds a command that runs** (AS-2). New projects got `agent-sync reserve DEC`,
+  `agent-sync status` and `agent-sync merge`, and no `agent-sync` command is on PATH (the npm bin
+  only installs and updates). The seeded `AGENTS.md` and `DECISIONS.md` now name
+  `python3 "$SKILL_DIR/scripts/agent_sync.py" <verb>` and say what `$SKILL_DIR` is.
+- **The guard's refusal names the full command** (AS-4): `python3 <script> acquire <TASK-ID>`,
+  as its other refusal already did, instead of a bare `agent_sync.py acquire`.
+- **An Edit outside coordination starts no python3** (AS-8). The guard parsed every Edit/Write
+  payload with python3 before asking whether the owning repository is coordinated. A payload whose
+  `tool_input` opens with a plain `file_path` (no escape, named once) is now read in bash, and the
+  owner check runs first; every other shape takes the old parser.
+- **Delegating hosts** (AS-5). `SKILL.md` and `references/lease-protocol.md` keep the operator
+  steps (confirming registers, choosing the backend, placing a token, `reap --apply`) as the
+  default, and add: where the host's instructions delegate decisions, the agent decides from the
+  recorded decisions, records the reason and places a token through the host's secret door, asking
+  only at a true human gate (sign-in, one-time code, consent, payment, typed secret).
+- **The commands table moved to `references/commands.md`** (AS-10), with a one-line pointer: the
+  skill body was about 52 tokens under its 5,000 budget.
+- **Docs and release.** `install.sh` names `npx @ssheleg/agent-sync install` (AS-3, the package's
+  real name). README's single-member update is the family updater
+  `npx --yes sshlg-skills@latest update`, or standalone `npx --yes @ssheleg/agent-sync@latest update`,
+  which prunes `~/.claude/skills/agent-sync`; the bare skills CLI update recreated that shadow copy
+  (AS-7). `release.yml` drops `NODE_AUTH_TOKEN: secrets.NPM_TOKEN`: the secret is deleted and v1.23.5
+  published through OIDC trusted publishing without it (run 40868769971) (AS-9).
+- **Tests.** `test/claim_cell_test.py` (29, one new: a board citing its own path in 4 rows, one
+  citing row carrying another id's marker; acquire then `release --held` prints no refusal and leaves
+  the board byte-identical; red on 1.23.5). `test/hooks_session_test.py` (29, two new: an Edit in an
+  unconfigured repository starts no python3 while a configured one still refuses an unleased guarded
+  Edit in both key orders; the scaffolded files and the guard name no command that does not exist;
+  both red on 1.23.5).
+
 ## v1.23.5 (2026-10-28): renew's 10 s limit lives in the script, not in a watchdog
 
 - **Fewer processes per tool call, same bound** (hub board row B-311). `renew.sh` runs after every

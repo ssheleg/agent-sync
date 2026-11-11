@@ -347,7 +347,8 @@ def check_public_floor() -> None:
     # A count in prose is a fact with a decay rate. This one was stale by two.
     refs = sorted((ROOT / "plugins" / "agent-sync" / "skills" / "agent-sync"
                    / "references").glob("*.md"))
-    words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+    words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+             13: "thirteen", 14: "fourteen", 15: "fifteen"}
     stated = re.search(r"and (\w+) reference contracts", readme)
     if stated and stated.group(1) != words.get(len(refs), "?"):
         err(f"README.md says '{stated.group(1)} reference contracts' and {len(refs)} ship")

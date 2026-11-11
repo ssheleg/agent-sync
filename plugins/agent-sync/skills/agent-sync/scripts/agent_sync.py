@@ -75,7 +75,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.23.5"
+VERSION = "1.23.6"
 
 CONFIG_PATH = Path(".claude/agent-sync.json")
 ENV_FILE = Path(".env.agent-sync")
@@ -3983,6 +3983,33 @@ class Sync:
             rel = path.relative_to(self.root)
             if not hits:
                 continue
+            # Kept beside the run state, not in the lock file: the git lease mode has no
+            # lock file, and a release that cannot find what it replaced leaves the claim
+            # written through forever, which is worse than never writing it.
+            store = self.root / STATE_DIR / "claims.json"
+            try:
+                state = json.loads(store.read_text())
+            except (json.JSONDecodeError, OSError):
+                state = {}
+            saved = (state.get(key) or {}).get(str(rel))
+            template = spec.get("held") or DEFAULT_CLAIM_TEMPLATE
+            # On RELEASE the stored claim is consulted before any row is searched. A key
+            # that never wrote here (no saved cell) and whose rows carry no claim marker has
+            # nothing to undo, whatever else mentions it. Without this, `release` of a FILE
+            # lease on a board that cites its own path (the hub's backlog cites
+            # `docs/evidence/backlog.md` in 4 rows, 2026-11-11) printed the ambiguity
+            # refusal below for a claim that was never made.
+            # Only a row the claim could have been written to counts: the row that owns the
+            # key, or the single row naming it. A citing row's marker is its own id's claim.
+            if holder is None and saved is None:
+                rx = claim_marker_re(template)
+                bare = template.replace("{prev}", "").strip()
+                owned = [i for i in hits
+                         if (self._row_cells(lines[i]) or [""])[0].strip() == key]
+                could = owned or (hits if len(hits) == 1 else [])
+                if not any((rx.search(lines[i]) if rx else (bare and bare in lines[i]))
+                           for i in could):
+                    continue
             # On RELEASE the id is the wrong key to search by. `acquire` wrote a marker naming
             # this run; by the time the work is done the id may appear in rows that did not exist
             # when it was taken — which is what happened on 2026-08-07, when a task id gained a
@@ -4012,6 +4039,11 @@ class Sync:
                         own.append(i)
                 if len(own) == 1:
                     hits = own
+                elif not own and holder is not None:
+                    # No row OWNS the key: every match only cites it, as rows cite a file
+                    # path a lease names. The board does not register this key, so there is
+                    # no claim cell to write and nothing to refuse about.
+                    continue
 
             if len(hits) > 1:
                 notes.append(f"{rel}: `{key}` appears in {len(hits)} table rows — refusing "
@@ -4027,16 +4059,6 @@ class Sync:
             if not 0 <= idx < len(cells):
                 notes.append(f"{rel}: cell {spec.get('cell')} is out of range for `{key}`'s row")
                 continue
-
-            # Kept beside the run state, not in the lock file: the git lease mode has no
-            # lock file, and a release that cannot find what it replaced leaves the claim
-            # written through forever — which is worse than never writing it.
-            store = self.root / STATE_DIR / "claims.json"
-            try:
-                state = json.loads(store.read_text())
-            except (json.JSONDecodeError, OSError):
-                state = {}
-            saved = (state.get(key) or {}).get(str(rel))
 
             current = cells[idx]
             if holder is not None:
@@ -6602,7 +6624,9 @@ shapes the product, architecture, scope, security, data or process — recorded 
 is never lost to a chat log.
 
 **Reserve an id before you write one.** Reading the line below is not reserving it: two
-agents read the same number and both use it. Run `agent-sync reserve DEC`.
+agents read the same number and both use it. Run
+`python3 "$SKILL_DIR/scripts/agent_sync.py" reserve DEC`, where `$SKILL_DIR` is the installed
+agent-sync skill directory (the folder holding its `SKILL.md`).
 
 **Next free ID:** `DEC-0001`
 
@@ -6635,13 +6659,17 @@ This file deliberately does **not** restate that cycle. It is seeded once and ne
 overwritten, so a copy of the protocol here would be frozen on the day the project was
 created while the tool moved on — and the two would disagree in front of an agent with no
 way to tell which is current. One fact, one home; the home is the generated snapshot,
-because it can be regenerated and `agent-sync check` fails when it goes stale.
+because it can be regenerated and `check` fails when it goes stale.
+
+Every command below runs the skill's script: `python3 "$SKILL_DIR/scripts/agent_sync.py" <verb>`,
+where `$SKILL_DIR` is the installed agent-sync skill directory (the folder holding its
+`SKILL.md`). There is no `agent-sync` command on PATH.
 
 ## The three that are true in every project
 
-1. **Several agents may work this repository at once.** `agent-sync status` before you
+1. **Several agents may work this repository at once.** `agent_sync.py status` before you
    start: who holds what, and what changed since you last looked.
-2. **Work on a branch, and land it with `agent-sync merge`.** The integration branch is
+2. **Work on a branch, and land it with `agent_sync.py merge`.** The integration branch is
    somebody else's stable base — nothing about work in flight is committed there.
 3. **No decision lives only in chat.** Record it in the decision register, propagate it to
    every document it affects, and commit referencing the id.

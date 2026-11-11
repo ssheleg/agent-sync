@@ -17,6 +17,15 @@ anything that can make the tool report something untrue outranks both.
 | AS-20 | unverified | A passed vault probe is cached for an hour | If the grant is revoked inside that hour, a record-plane command execs into the vault's refusal instead of degrading to the file token — against `_vault_run_refusal`'s own "never exec on a guess". Shorten the positive TTL to the negative one, or on a non-zero vault re-exec re-run once without it and name the degradation | wave 3 final unit reading, 2026-10-12 |
 | AS-22 | untidy | With a vault-only Notion token, `renew` and `release --held` publish no claims-log lines | They never ask the vault (by design, the hot path), so the Notion view of a held lease can show it expired. The lease itself is decided locally. Name it in `status` ("claims-log heartbeats not published: vault-only token") | wave 3 final unit reading, 2026-10-12 |
 
+## Closed by v1.23.6 (2026-11-11): family audit findings
+
+| ID | Closed by |
+|---|---|
+| AS-31 | Audit AS-1: `release` skips a key it never wrote (no saved cell, no marker in a row it could have tagged) before the ambiguity refusal; acquire skips a key no row owns. `test/claim_cell_test.py`, red on 1.23.5 |
+| AS-32 | Audit AS-2/AS-3/AS-4/AS-7: `scaffold`, the guard, `install.sh` and README name commands that exist (`python3 "$SKILL_DIR/scripts/agent_sync.py"`, `npx @ssheleg/agent-sync`, the family updater). `test/hooks_session_test.py` |
+| AS-33 | Audit AS-8: the guard reads a plain Edit `file_path` in bash and checks the owner before any python3. `test/hooks_session_test.py`, red on 1.23.5 |
+| AS-34 | Audit AS-5/AS-9/AS-10: delegating-host clause in `SKILL.md` and `references/lease-protocol.md`; `NODE_AUTH_TOKEN` dropped from `release.yml` (OIDC); commands table in `references/commands.md` |
+
 ## Closed by v1.23.5 (2026-10-28): renew's limit lives in the script
 
 | ID | Closed by |

@@ -388,6 +388,9 @@ the operator. The limits:
   run could prove before deciding — and removes nothing.
 - **`--apply` is the operator's call, never an agent's.** An agent may run the listing
   and show it; it does not pass `--apply` on its own initiative, and `SKILL.md` says so.
+  A host whose instructions delegate the operator's decisions to the agent is the exception:
+  there the agent decides from the recorded decisions, passes `--apply`, and records the
+  reason; the attributable path below is unchanged.
 - **Each removal is attributable.** `--apply` goes through the `--i-own-this` path: the
   same refusals, the payload it destroyed printed beside the classifier's verdict, a
   journal line where a record plane is configured, and teardown verified by a second

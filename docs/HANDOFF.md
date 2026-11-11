@@ -1,3 +1,16 @@
+## v1.23.6: family audit findings AS-1 to AS-10, branch `fix/audit-1111` (2026-11-11)
+
+- **Objective.** The operator's family audit order (2026-11-11, sshlg-skills session): fix the
+  agent-sync findings AS-1 to AS-10 that the caller passed (AS-6 was not passed).
+- **Done.** Backlog rows AS-31 to AS-34 closed; CHANGELOG 1.23.6 lists each finding.
+  `scripts/agent_sync.py` (`write_claim`, scaffold seeds), `hooks/guard.sh`, `SKILL.md`,
+  `references/commands.md` (new), `references/lease-protocol.md`, `install.sh`, `README.md`,
+  `.github/workflows/release.yml`.
+- **Checks run.** `npm run test:all`; three new cases, each red on 1.23.5.
+- **Next task.** After merge: tag `v1.23.6` with the hub's `release-member.js`, watch the release,
+  confirm `npm view @ssheleg/agent-sync version`; the hub re-pins separately. Then the highest open
+  board row, AS-28.
+
 ## v1.23.5: renew's 10 s limit lives in the script, branch `waves/1028-agent-sync-hooks` (2026-10-28)
 
 - **Objective.** Hub board row B-311: `renew.sh` started up to 11 processes per tool call in a

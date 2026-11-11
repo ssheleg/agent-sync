@@ -169,16 +169,21 @@ is not the session that gets the new ones.
 
 <details><summary>Updating this one member only</summary>
 
-**agent-sync itself** — update every channel you installed, then restart Claude Code:
+**agent-sync itself.** On a machine with the family, the family updater is the one path: it
+updates every member's channels and prunes the plain `~/.claude/skills/agent-sync` copy that
+would shadow the plugin. Then restart Claude Code:
 
 ```bash
-claude plugin marketplace update agent-sync && claude plugin update agent-sync@agent-sync && npx --yes skills update agent-sync --global --yes
+npx --yes sshlg-skills@latest update
 ```
 
-Re-running the installer works too, but pin `@latest` or npx may serve you its cache:
+Without the family, this package's own updater does the same for agent-sync alone: it updates
+the plugin and the skill channel, then prunes `~/.claude/skills/agent-sync` when the plugin owns
+Claude Code. Pin `@latest` or npx may serve you its cache. Do not call the bare skills CLI's
+update for this skill: it recreates that shadow copy.
 
 ```bash
-npx @ssheleg/agent-sync@latest install
+npx --yes @ssheleg/agent-sync@latest update
 ```
 
 Check what you are actually running — the plugin and the skill must report the same
@@ -511,11 +516,12 @@ workflow run it on every push and every tag, so nothing a merge or a release enf
 moved.
 
 What ships: one skill (`agent-sync`), `scripts/agent_sync.py` (stdlib only), four hook
-scripts, the slash command, `agent-sync.schema.json`, and twelve reference contracts the
+scripts, the slash command, `agent-sync.schema.json`, and thirteen reference contracts the
 agent loads on their own trigger rather than by default:
 
 | Reference | Read it when |
 |---|---|
+| [`commands.md`](plugins/agent-sync/skills/agent-sync/references/commands.md) | running a verb you have not used, or checking its flags |
 | [`adapter-contract.md`](plugins/agent-sync/skills/agent-sync/references/adapter-contract.md) | adding or auditing a knowledge backend |
 | [`lease-protocol.md`](plugins/agent-sync/skills/agent-sync/references/lease-protocol.md) | changing acquisition, expiry, stealing or id allocation |
 | [`backend-outline.md`](plugins/agent-sync/skills/agent-sync/references/backend-outline.md) | making any Outline API call, or debugging one |
