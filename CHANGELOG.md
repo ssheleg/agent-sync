@@ -39,7 +39,8 @@ Family audit of 2026-11-11 (operator order in the sshlg-skills session), finding
   the board byte-identical; red on 1.23.5). `test/hooks_session_test.py` (29, two new: an Edit in an
   unconfigured repository starts no python3 while a configured one still refuses an unleased guarded
   Edit in both key orders; the scaffolded files and the guard name no command that does not exist;
-  both red on 1.23.5).
+  both red on 1.23.5). The validator self-test's "skill body over the token budget" plant now pads
+  500 lines instead of 60: with the body near 4,320 tokens, 60 no longer crossed the 5,000 line.
 
 ## v1.23.5 (2026-10-28): renew's 10 s limit lives in the script, not in a watchdog
 
