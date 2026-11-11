@@ -4,7 +4,7 @@ description: "Use when several agents share a repo: claim a task, see who works 
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
-  version: "1.23.5"
+  version: "1.23.6"
   author: ssheleg
 ---
 
@@ -63,7 +63,7 @@ The parsing contract and observed failures live in `references/lease-protocol.md
 scaffold  → create the documentation architecture, only where it is absent
 adopt     → read the repository, propose a config, write nothing
 init      → write the approved config + the gitignored env file
-            (operator places the token — never you)
+            (the operator places the token; a delegating host: below)
 reconcile --set-baseline    → make history a counted backlog, once
 setup     → generate the snapshot that describes this project's wiring
 check     → validate the whole thing; non-zero if it is not healthy
@@ -76,6 +76,13 @@ and in CI; it names every failing condition.
 **`scaffold` never overwrites.** It seeds a decision register and an `AGENTS.md` pointing at
 the snapshot, and leaves every existing file untouched.
 
+**Hosts that delegate.** The operator steps below (confirming registers, choosing the backend,
+placing a token, `reap --apply`) are the default. Where the host's instructions delegate
+decisions to the agent, decide from the recorded decisions and the project's goal, write the
+reason where the work lives, and place a token through the host's secret door (never chat,
+`argv` or a file you author). Ask only at a true human gate: sign-in, one-time code, consent,
+payment, typed secret.
+
 ## Existing project: start with `adopt`
 
 Run `adopt` before `init`. It reads the repository and prints what it found — id
@@ -86,9 +93,9 @@ then proposes a config.
 python3 "$SKILL_DIR/scripts/agent_sync.py" adopt
 ```
 
-Confirm the registers and guarded files with the operator first: a register pointed at the
-wrong file makes every later check confidently wrong, and a guarded list that misses a shared
-file leaves the one place collisions happen unprotected. In a submodule it declares no
+Confirm the registers and guarded files with the operator first (a delegating host: decide
+and record why): a register pointed at the wrong file makes every later check confidently
+wrong, and a guarded list that misses a shared file leaves the one place collisions happen unprotected. In a submodule it declares no
 registers — decisions belong to the parent. Then take the chain above from `init`.
 
 ## First command in a project: `init`
@@ -96,7 +103,7 @@ registers — decisions belong to the parent. Then take the chain above from `in
 **Never run anything else against an uninitialised project.** `init` asks and answers
 the storage question once, and writes it down.
 
-**Ask the operator these two things in chat — do not guess, do not pick a default:**
+**Unless the host delegates, ask the operator these two things in chat; do not guess, do not pick a default:**
 
 1. **Where should coordination state live?**
    - a knowledge cloud — `outline`, hosted or self-hosted, or `notion` — the shared
@@ -110,7 +117,7 @@ the storage question once, and writes it down.
 2. **If cloud: where.** Outline needs its instance URL; Notion needs the id of the page
    the container goes under. Both are configuration, not secrets, so you may write them.
    The **token is not** — you never ask for it in chat, never read it back, and never
-   place it yourself.
+   place it yourself outside a delegating host's secret door.
 
 Then run it with their answers:
 
@@ -124,7 +131,7 @@ python3 "$SKILL_DIR/scripts/agent_sync.py" init --backend fs
 **empty** token line (identity, mode 600), gitignores both, and prints the one step that is
 the operator's — creating the token and placing it (`notion`: the vault). Never overwrites either
 file without `--force`. **Relay those closing instructions verbatim**; the design depends on
-the token staying theirs.
+the token staying theirs (a delegating host: do that step through its secret door).
 
 ## Then, before every session
 
@@ -153,35 +160,8 @@ npx sshlg-skills install
 
 ## The commands
 
-| Command | Does |
-|---|---|
-| `init` | **Run first.** Ask where state lives, write config + gitignored env file, print the operator's step |
-| `status` | Inspect, repair, report, name one next action |
-| `bootstrap` | Create the cloud container and print the id to paste into the env file |
-| `acquire <KEY>` | Take the lease on a task id. Prints `won` or `lost <holder>` |
-| `renew <KEY>` | Explicit keepalive. The hook uses `--active-only`; unrelated calls do not prolong claims |
-| `release <KEY>` | Give the lease back on every path; `released` means the remote ref is gone |
-| `release --held` | Give back everything this run holds, in one process — what SessionEnd runs |
-| `reserve <REG> [--key K] [--offline]` | Reserve the next id in a register (`DEC`, `OQ`, `DEP`, …); prints it. `--key` makes a retry idempotent (one key, one number); `--offline` issues a namespaced `REG-o-…` id with no global authority |
-| `map-offline <REG> <ID> <N>` | Bind an offline id to a properly reserved number — append-only, never rebound |
-| `release-id <REG> <ID>` | Return an id you did not end up writing to git |
-| `journal <text>` | Append one line to this run's journal |
-| `record <text>` | Append what you **actually built** — `--decision DEC-…`, `--files a,b` |
-| `reconcile` | Intent (git) vs as-built (cloud). `--set-baseline` once per project |
-| `signal <DEP-ID> <state>` | Record dependency state, never an ask. With Fabric, ask via `com.submit`; the DEP cites its board message |
-| `guard <path>` | Answer whether this run may write that path. Exit 0 = yes, 2 = no |
-| `board` | Regenerate the shared board and this repo's page. `--mirror` also renders the configured git docs into the plane |
-| `whoami` | Print this run's id and its held leases |
-| `residue` | What a run left behind in BOTH planes: expired locks on disk, and claim tags with no live lease behind them |
-| `reap [KEY…]` | Clear only what this run **proves** it owns and has spent, then re-read the directory to confirm it went |
-| `reap --long-expired` | List locks expired 7+ days on both planes, each with its verdict. `--apply` clears them by age alone — **the operator's call, never yours** |
-| `setup` | Write the generated snapshot of how **this** project is wired, for agents to read |
-| `adopt` | Inspect an existing project and **propose** a config — writes nothing |
-| `merge` | Land this branch: conflicts checked **before** anything is touched, merge log written, the `--key` lease released after the push. `--summary`, `--dry-run`, `--push` |
-| `merges` | What landed while you were on your branch. `--all` includes the compacted tail |
-| `check` | Validate the whole setup end to end. Non-zero when it is not healthy |
-| `scaffold [--full]` | Create only what is missing, never a line over what exists. `--full` also seeds the question register, index, dependency board, data model and docs gate |
-| `finish [--gates]` | Is the **work** finished — every repository clean, pushed and pointed at, nothing left held. `check` answers whether the project is wired right; this, whether you are done |
+Each verb, with what it does: **read `references/commands.md`** before running one you have
+not used. `init` runs first; `status` before every session; `--help` names a verb's flags.
 
 Resolve `$SKILL_DIR` from the active `SKILL.md` location and reuse the absolute path;
 `${CLAUDE_PLUGIN_ROOT}/skills/agent-sync` is a Claude text substitution, not a Bash
@@ -330,6 +310,7 @@ Each file is loaded on its own trigger, not by default.
 
 | File | Read it when |
 |---|---|
+| `references/commands.md` | running a verb you have not used, or checking its flags |
 | `references/adapter-contract.md` | adding or auditing a knowledge backend — six primitives, the capability flags, an honest degradation path |
 | `references/lease-protocol.md` | changing acquisition, expiry, stealing or id allocation |
 | `references/backend-outline.md` | making any Outline API call, or debugging one |

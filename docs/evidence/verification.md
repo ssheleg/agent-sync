@@ -8,6 +8,18 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.6 (2026-11-11): release skips a claim it never wrote, scaffold and guard name a command that runs
+
+| Requirement | Verified by |
+|---|---|
+| A file lease on a board that cites its own path in several rows: acquire then `release --held` prints no refusal and rewrites nothing (AS-1) | `test/claim_cell_test.py` "a file lease on a board citing its own path writes and refuses nothing (AS-1)" (red on 1.23.5) |
+| A duplicated id two rows both own still refuses | `test/claim_cell_test.py` "a genuinely ambiguous id still refuses" (unchanged, green) |
+| An Edit in an unconfigured repository starts no python3; an unleased guarded Edit in a configured one is still refused, with `file_path` first or last (AS-8) | `test/hooks_session_test.py` "AS-8: an Edit in an unconfigured repository starts no python3" (PATH shim logs python3; red on 1.23.5) |
+| `scaffold` and the guard name no `agent-sync <verb>` or bare `agent_sync.py acquire` (AS-2, AS-4) | `test/hooks_session_test.py` "AS-2/AS-4: the guard and scaffold name a command that exists" (red on 1.23.5) |
+
+The repository gate exits 0 on the candidate tree; the PR CI run and the tag release run are named
+in docs/HANDOFF.md.
+
 ## v1.23.5 (2026-10-28): renew's 10 s limit lives in the script
 
 | Requirement | Verified by |

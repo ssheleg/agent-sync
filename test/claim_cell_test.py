@@ -188,6 +188,29 @@ def a_genuinely_ambiguous_id_still_refuses():
         f"a duplicated id was tagged without complaint: {out[-300:]}")
 
 
+def a_file_lease_on_a_board_citing_its_own_path_writes_and_refuses_nothing():
+    """AS-1 (2026-11-11, hub sshlg-skills). `acquire docs/evidence/backlog.md` then
+    `release --held` printed "appears in 4 table rows, refusing to guess" because the
+    claimTags file cites its own path in 4 rows. Nothing was ever written for that key,
+    so release must consult the stored claim first and skip quietly. One citing row
+    carries ANOTHER id's claim marker: that marker is not this key's claim."""
+    d = project([
+        "| B-1 | edit docs/board.md | open |\n",
+        "| B-2 | docs/board.md again | open (claimed: r-someone) |\n",
+        "| B-3 | see docs/board.md | open |\n",
+        "| B-4 | docs/board.md, fourth | open |\n",
+    ])
+    before = board(d)
+    a = cli(d, "acquire", "docs/board.md")
+    assert a.returncode == 0, a.stderr
+    r = cli(d, "release", "--held")
+    assert r.returncode == 0, r.stderr
+    out = a.stdout + a.stderr + r.stdout + r.stderr
+    assert "refusing to guess" not in out, f"a claim never made was refused: {out[-300:]}"
+    assert "released docs/board.md" in r.stdout, r.stdout
+    assert board(d) == before, "the board was rewritten for a key it does not register"
+
+
 def an_expired_foreign_lease_can_be_reaped():
     """THE #4 INCIDENT. A lease from a run that died is expired for `acquire` and
     was eternal for `release`, so no command could clear it — measured in the field
@@ -589,6 +612,8 @@ CASES = [
     ("an expired foreign lease can be reaped", an_expired_foreign_lease_can_be_reaped),
     ("a live foreign lease is still refused", a_live_foreign_lease_is_still_refused),
     ("an undatable lease is not eternal", a_lease_with_an_unreadable_timestamp_is_not_eternal),
+    ("a file lease on a board citing its own path writes and refuses nothing (AS-1)",
+     a_file_lease_on_a_board_citing_its_own_path_writes_and_refuses_nothing),
     ("an orphaned claim tag is cleared (#5)", an_orphaned_claim_tag_is_cleared),
     ("an orphaned tag behind an expired lease is cleared (#5)",
      an_orphaned_tag_behind_an_expired_lease_is_cleared),

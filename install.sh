@@ -1,5 +1,5 @@
 #!/bin/sh
-# POSIX fallback installer. Prefer `npx agent-sync install` — it is cross-platform.
+# POSIX fallback installer. Prefer `npx @ssheleg/agent-sync install`: it is cross-platform.
 # This script is POSIX-only: on Windows use npx, the Claude Code plugin, or the
 # skills CLI, never this file.
 set -eu

@@ -347,7 +347,8 @@ def check_public_floor() -> None:
     # A count in prose is a fact with a decay rate. This one was stale by two.
     refs = sorted((ROOT / "plugins" / "agent-sync" / "skills" / "agent-sync"
                    / "references").glob("*.md"))
-    words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+    words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+             13: "thirteen", 14: "fourteen", 15: "fifteen"}
     stated = re.search(r"and (\w+) reference contracts", readme)
     if stated and stated.group(1) != words.get(len(refs), "?"):
         err(f"README.md says '{stated.group(1)} reference contracts' and {len(refs)} ship")
@@ -4388,7 +4389,10 @@ def self_test() -> int:
         # plant on the divisor itself cannot be caught: loosening it makes the run pass.
         "skill body over the token budget": (
             "plugins/agent-sync/skills/agent-sync/SKILL.md",
-            lambda t: t + ("\n" + "padding that costs tokens and buys nothing. " * 60)),
+            # Sized past the whole budget, not past today's headroom: the plant must fire
+            # however much a later release trims the body (1.23.6 moved the commands table
+            # out, and 60 repetitions stopped crossing the line).
+            lambda t: t + ("\n" + "padding that costs tokens and buys nothing. " * 500)),
         # The exact condition that shipped to 1.21.0: `check` asked the record plane alone
         # whether ids can be reserved, so fs + `leaseBackend: git` was refused for a
         # register `reserve` served race-free through refs/agent-sync/ids/*.
