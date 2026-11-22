@@ -16,7 +16,9 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # Pinned: `ubuntu-latest` moved to Ubuntu 26.04, which has no Python 3.9 build, and
+    # setup-python failed every run from 2026-11-18. The 3.9 floor needs a runner that has it.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 

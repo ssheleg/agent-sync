@@ -11,6 +11,9 @@ Hub B-344 (family audit of 2026-11-11, A1). Ships with the next release.
   submodule both lines read as before. The new `in_submodule()` asks git for the superproject.
 - Two cases in `test/coordination_test.py` (a standalone repository, a submodule with and without
   the parent's credential file), both watched red on the previous script.
+- **CI runs again.** The `validate` job ran on `ubuntu-latest`, which became Ubuntu 26.04 and has no
+  Python 3.9 build: `setup-python` failed every nightly run from 2026-11-18 before a test started.
+  The job is pinned to `ubuntu-24.04`, where the 3.9 floor it claims to test exists.
 
 ## v1.23.6 (2026-11-11): release skips a claim it never wrote, scaffold and guard name a command that runs
 
