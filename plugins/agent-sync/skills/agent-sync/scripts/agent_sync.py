@@ -567,6 +567,15 @@ def find_env_file(root: Path) -> Path | None:
     return None
 
 
+def in_submodule(root: Path) -> bool:
+    """Whether this checkout has a parent repository git can vouch for. The generated
+    documents told every repository without registers that its ids "live in the parent
+    repository", which is false for one that has no parent (hub B-344)."""
+    if (root / ".git").is_dir():        # a submodule's `.git` is a FILE (see find_env_file)
+        return False
+    return bool(git("rev-parse", "--show-superproject-working-tree", cwd=root))
+
+
 VAULT_REEXEC = "AGENT_SYNC_VAULT_REEXEC"
 VAULT_SECRET = "AGENT_SYNC_NOTION_TOKEN"
 VAULT_SLOT_CACHE_S = 3600
@@ -4718,7 +4727,7 @@ class Sync:
         backend — a committed description that contradicted the tool (fix round 2, item 6)."""
         where = (f"`{env_path.name}`"
                  f"{' in ' + str(env_path.parent.name) if env_path and env_path.parent != self.root else ''}"
-                 if env_path else "`(none found)`")
+                 if env_path else f"`{ENV_FILE}` (none found)")
         backend = os.environ.get("AGENT_SYNC_BACKEND") or self.cfg.get("backend") or "fs"
         if backend == "notion":
             return [f"- record-plane token: the Observatory vault slot "
@@ -4728,6 +4737,12 @@ class Sync:
                     "Never sourced, never committed",
                     f"- other settings (parent page, collection) read from {where} ("
                     "gitignored, never committed)"]
+        if not env_path:
+            # "credentials read from `(none found)`" named a file that does not exist as the
+            # place credentials come from (hub B-344).
+            return [f"- credentials: none read, no `{ENV_FILE}` found here"
+                    f"{' or in a parent repository' if in_submodule(self.root) else ''} "
+                    "(when one is added it stays gitignored, never committed)"]
         return [f"- credentials read from {where} (gitignored, never committed)"]
 
     def setup_snapshot(self) -> str:
@@ -4786,7 +4801,11 @@ class Sync:
                   f"**No allocator serves these registers**: {how}, so `reserve` refuses "
                   "and `check` reports it."]
         else:
-            L += ["None declared here. Ids live in the parent repository; reserve them there."]
+            L += ["None declared here. Ids live in the parent repository; reserve them there."
+                  if in_submodule(self.root) else
+                  "None declared here. This repository is not a submodule, so no parent holds "
+                  "its ids: declare a register under `idRegisters` in "
+                  f"`{CONFIG_PATH}` before reserving one."]
 
         L += ["", "### Guarded files: a live lease is required to write these", ""]
         L += ([f"- `{g}`" for g in guarded] or ["- none"])
@@ -4931,7 +4950,7 @@ class Sync:
             f"# {repo_name()}",
             "",
             f"- registers declared here: "
-            f"{', '.join(sorted(self.cfg.get('idRegisters') or {})) or 'none — they live in the parent repository'}",
+            f"{', '.join(sorted(self.cfg.get('idRegisters') or {})) or ('none — they live in the parent repository' if in_submodule(self.root) else 'none')}",
             f"- guarded files: {len(self.cfg.get('guardedFiles') or [])}",
         ]
         leaks = self._leaks(res_events)
