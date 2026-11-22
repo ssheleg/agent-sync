@@ -1,3 +1,20 @@
+## Unreleased: the wiring snapshot invents neither a credential file nor a parent
+
+Hub B-344 (family audit of 2026-11-11, A1). Ships with the next release.
+
+- **A repository with no `.env.agent-sync` is no longer told its credentials are "read from
+  `(none found)`".** `setup` now writes "credentials: none read, no `.env.agent-sync` found here"
+  (inside a submodule: "here or in a parent repository"). A found file is named as before.
+- **A repository that is not a submodule is no longer told its ids "live in the parent
+  repository".** With no registers declared, the snapshot says no parent holds its ids and names
+  `idRegisters` in `.claude/agent-sync.json`; the board's repository page says `none`. Inside a
+  submodule both lines read as before. The new `in_submodule()` asks git for the superproject.
+- Two cases in `test/coordination_test.py` (a standalone repository, a submodule with and without
+  the parent's credential file), both watched red on the previous script.
+- **CI runs again.** The `validate` job ran on `ubuntu-latest`, which became Ubuntu 26.04 and has no
+  Python 3.9 build: `setup-python` failed every nightly run from 2026-11-18 before a test started.
+  The job is pinned to `ubuntu-24.04`, where the 3.9 floor it claims to test exists.
+
 ## v1.23.6 (2026-11-11): release skips a claim it never wrote, scaffold and guard name a command that runs
 
 Family audit of 2026-11-11 (operator order in the sshlg-skills session), findings AS-1 to AS-10.

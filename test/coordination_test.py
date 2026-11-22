@@ -1335,6 +1335,62 @@ def the_wiring_snapshot_names_the_vault_first_for_notion():
             shutil.rmtree(d, ignore_errors=True)
 
 
+def the_wiring_snapshot_does_not_invent_a_parent_or_a_credential_file():
+    """Hub B-344: a standalone repository with no `.env.agent-sync` and no registers was told
+    "credentials read from `(none found)`" and "Ids live in the parent repository". It has
+    neither a credential file nor a parent; the snapshot and the board page say so."""
+    root = _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        env = _clean_env(HOME=home, AGENT_SYNC_RUN_ID="coordtest-setup")
+        r = _py(root, env, "setup")
+        assert r.returncode == 0, r.stdout + r.stderr
+        snap = open(os.path.join(root, "AGENT_SYNC.md")).read()
+        assert "(none found)" not in snap, snap
+        assert "credentials read from" not in snap, snap
+        assert "no `.env.agent-sync` found" in snap, snap
+        assert "parent repository" not in snap, snap
+        assert "None declared here. This repository is not a submodule" in snap, snap
+        mod = _module()
+        os.environ["AGENT_SYNC_RUN_ID"] = "coordtest-setup"
+        here = os.getcwd()
+        os.chdir(root)
+        try:
+            page = mod.Sync().repo_page()
+        finally:
+            os.chdir(here)
+        assert "parent repository" not in page, page
+        assert "- registers declared here: none" in page, page
+    finally:
+        for d in (root, home):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def the_wiring_snapshot_still_points_a_submodule_at_its_parent():
+    """The other side of B-344: inside a submodule the ids do live in the parent, and a found
+    credential file is still named."""
+    parent, child = _repo(), _repo()
+    home = tempfile.mkdtemp(prefix="agent-sync-coordtest-home-")
+    try:
+        subprocess.run(["git", "-C", parent, "-c", "protocol.file.allow=always", "submodule",
+                        "add", "-q", child, "member"], check=True, capture_output=True)
+        sub = os.path.join(parent, "member")
+        env = _clean_env(HOME=home, AGENT_SYNC_RUN_ID="coordtest-setup")
+        r = _py(sub, env, "setup")
+        assert r.returncode == 0, r.stdout + r.stderr
+        snap = open(os.path.join(sub, "AGENT_SYNC.md")).read()
+        assert "None declared here. Ids live in the parent repository; reserve them there." in snap, snap
+        assert "(none found)" not in snap, snap
+        open(os.path.join(parent, ".env.agent-sync"), "w").write("X=1\n")
+        r = _py(sub, env, "setup")
+        assert r.returncode == 0, r.stdout + r.stderr
+        snap = open(os.path.join(sub, "AGENT_SYNC.md")).read()
+        assert "- credentials read from `.env.agent-sync` in " in snap, snap
+    finally:
+        for d in (parent, child, home):
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def a_lease_held_too_long_is_said_once_where_the_session_sees_it():
     """Seam S9: R19's warning printed only from `status` at SessionStart, when a fresh session
     holds nothing. The guard now says it, once per lease per run, as a `systemMessage`."""
@@ -1420,6 +1476,8 @@ CASES = [
     only_a_keyless_json_object_is_flagged,
     check_refuses_a_scheduled_interval_below_the_schema_minimum,
     the_wiring_snapshot_names_the_vault_first_for_notion,
+    the_wiring_snapshot_does_not_invent_a_parent_or_a_credential_file,
+    the_wiring_snapshot_still_points_a_submodule_at_its_parent,
     a_lease_held_too_long_is_said_once_where_the_session_sees_it,
     a_write_into_two_repositories_says_both_notices_in_one_object,
     a_refusing_vault_never_locks_the_guard,
