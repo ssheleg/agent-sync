@@ -1,3 +1,15 @@
+## v1.23.7: the wiring snapshot invents neither a credential file nor a parent, branch `release/1.23.7` (2026-11-24)
+
+- **Objective.** Hub backlog B-344: release the fix merged in #52 (`18c0a31`) so the hub can pin it.
+  Run by the hub's unattended board session (Fabric task "hub refactor in waves", no person present),
+  under the operator's development-mode rule of 2026-11-23 (releases ship when their checks are green).
+- **Done.** Version 1.23.7 in the six places CONTRIBUTING names; the CHANGELOG's Unreleased section
+  becomes v1.23.7; a verification table for it.
+- **Checks run.** `npm run test:all` on this tree (result in the PR).
+- **Next task.** After merge: `node scripts/release-member.js <checkout> v1.23.7 --push` from the hub,
+  watch the release run, confirm `npm view @ssheleg/agent-sync version`; then the hub pins 1.23.7, runs
+  `agent_sync.py setup` and reads the two lines back in its `docs/AGENT_SYNC.md` (hub B-344).
+
 ## v1.23.6: family audit findings AS-1 to AS-10, branch `fix/audit-1111` (2026-11-11)
 
 - **Objective.** The operator's family audit order (2026-11-11, sshlg-skills session): fix the
