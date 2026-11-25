@@ -13,6 +13,12 @@ Hub B-344 (family audit of 2026-11-11, A1). Released 2026-11-24.
   the parent's credential file), both watched red on the previous script.
 - **CI runs again.** The `validate` job ran on `ubuntu-latest`, which became Ubuntu 26.04 and has no
   Python 3.9 build: `setup-python` failed every nightly run from 2026-11-18 before a test started.
+- **The local gate no longer refuses a release for another session's write.** `test/run_gate.py`
+  failed on any new file under the real `~/.agent-sync`; other live sessions write
+  `session-repos` there while the gate runs, and the 1.23.7 tag was refused twice on such files.
+  A new file now fails the gate only when it names a gate or test temp HOME, or this checkout
+  (an unreadable one still fails); the rest are printed as a note. `test/gate_residue_test.py`
+  (six cases, CI step) covers the split.
   The job is pinned to `ubuntu-24.04`, where the 3.9 floor it claims to test exists.
 
 ## v1.23.6 (2026-11-11): release skips a claim it never wrote, scaffold and guard name a command that runs
