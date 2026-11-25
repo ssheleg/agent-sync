@@ -8,6 +8,14 @@ A row whose method is "read the code" is a row nobody can re-run; those say so.
 (`python3 test/validate.py --self-test`).
 
 
+## v1.23.7 (2026-11-24): the wiring snapshot invents neither a credential file nor a parent
+
+| Requirement | Verified by |
+|---|---|
+| A standalone repository with no `.env.agent-sync` reads "credentials: none read" and "no parent holds its ids" (hub B-344) | `test/coordination_test.py`, the standalone-repository case (red on 1.23.6) |
+| Inside a submodule the old lines stay, with and without the parent's credential file | `test/coordination_test.py`, the submodule case (red on 1.23.6) |
+| CI's `validate` job runs on a runner that has Python 3.9 | `.github/workflows/validate.yml` pins `ubuntu-24.04`; nightly run 45335177317 green on 2026-11-24 |
+
 ## v1.23.6 (2026-11-11): release skips a claim it never wrote, scaffold and guard name a command that runs
 
 | Requirement | Verified by |

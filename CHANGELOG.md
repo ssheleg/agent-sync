@@ -1,6 +1,6 @@
-## Unreleased: the wiring snapshot invents neither a credential file nor a parent
+## v1.23.7 (2026-11-24): the wiring snapshot invents neither a credential file nor a parent
 
-Hub B-344 (family audit of 2026-11-11, A1). Ships with the next release.
+Hub B-344 (family audit of 2026-11-11, A1). Released 2026-11-24.
 
 - **A repository with no `.env.agent-sync` is no longer told its credentials are "read from
   `(none found)`".** `setup` now writes "credentials: none read, no `.env.agent-sync` found here"
