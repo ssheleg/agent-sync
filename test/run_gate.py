@@ -29,10 +29,33 @@ SUITES = [["python3", "test/validate.py"],
           ["python3", "test/hooks_session_test.py"],
           ["python3", "test/guard_uncoordinated_test.py"],
           ["python3", "test/guard_budget_test.py"],
-          ["python3", "test/coordination_test.py"]]
+          ["python3", "test/coordination_test.py"],
+          ["python3", "test/gate_residue_test.py"]]
 SUITES += [["python3", os.path.relpath(p, REPO)]
            for p in sorted(glob.glob(os.path.join(REPO, "test", "audit_regressions", "*.py")))]
 SUITES += [["node", "test/installer_test.js"]]
+
+
+# A file a suite leaked into the real home names where the suite ran: its temp HOME (every
+# fixture repository lives inside it, `_sandbox.isolate()`) or this checkout. Other live
+# sessions keep writing `~/.agent-sync/session-repos` while the gate runs (2026-11-25: two
+# release attempts refused on files naming `_worktrees/fabric-0330-land` and
+# `obsidian-memory-vault`); a file that names neither is theirs, reported and not failed.
+GATE_MARKERS = ("agent-sync-gate-home-", "agent-sync-test-home-")
+
+
+def classify(added, markers):
+    """Split new real-home files into (leaked, foreign). Unreadable counts as leaked."""
+    leaked, foreign = [], []
+    for path in added:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(1 << 20)
+        except OSError:
+            leaked.append(path)
+            continue
+        (leaked if any(m in text for m in markers) else foreign).append(path)
+    return leaked, foreign
 
 
 def main() -> int:
@@ -54,15 +77,20 @@ def main() -> int:
         if r.returncode != 0:
             failed.append(" ".join(argv))
     after = _sandbox.agent_sync_files(real) if real else []
-    if after != before:
-        added = sorted(set(after) - set(before))
-        print(f"\nFAIL: the gate changed {real}/.agent-sync — {len(added)} new file(s): {added[:5]}")
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    leaked, foreign = classify(added, GATE_MARKERS + (REPO,))
+    if foreign or removed:
+        print(f"\nnote: other processes changed {real}/.agent-sync during the run "
+              f"({len(foreign)} new, {len(removed)} removed), naming no gate home: {(foreign + removed)[:5]}")
+    if leaked:
+        print(f"\nFAIL: the gate changed {real}/.agent-sync — {len(leaked)} new file(s): {leaked[:5]}")
         failed.append("real-HOME residue")
     if failed:
         print(f"\nFAIL: {len(failed)} of {len(SUITES)} suite(s): " + "; ".join(failed))
         return 1
     print(f"\nPASS: {len(SUITES)} suite(s), each in its own HOME; "
-          f"{real or '$HOME'}/.agent-sync untouched ({len(after)} file(s) before and after)")
+          f"{real or '$HOME'}/.agent-sync untouched by the suites ({len(before)} file(s) before, {len(after)} after)")
     return 0
 
 
