@@ -1,6 +1,6 @@
 ---
 name: agent-sync
-description: "Use when several agents share a repo: claim a task, see who works on it, reserve an id, sync the board, set up coordination. RU: возьми задачу, кто сейчас делает, зарезервируй id, обнови доску. Not for solo work or an unconfigured repo: 'no coordination' / «без координации»."
+description: "Use when several agents share a repo: claim a task, see who works on it, reserve an id, sync the board, set up coordination. RU: «возьми задачу», «кто сейчас делает», «зарезервируй id», «обнови доску». Not for solo work or an unconfigured repo: 'no coordination' / «без координации»."
 compatibility: "Requires the task-pipeline skill for its stages (npx sshlg-skills install). Needs python3 3.9+ (stdlib only, HTTP included - nothing to pip install) and bash for the hooks. The knowledge backend is configured per project; with none configured it degrades to git-file leases. The shipped enforcement adapter targets Claude Code; without a verified adapter, run the same checks as a self-check."
 license: MIT
 metadata:
